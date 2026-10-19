@@ -90,6 +90,11 @@ CLI alternative:
 node scripts/create-local-admin.js <username> <email> '<name>' '<password>'
 ```
 
+**Where are the console passwords?** In `local_admins.json`, also reachable
+through the `admin_passwords.json` symlink. They are bcrypt **hashes**, not
+encrypted or plain passwords, so they can't be read back. A forgotten
+password is replaced by re-running the command above with the same username.
+
 ## Sidebar tour
 
 | Tab                  | Purpose |
@@ -172,6 +177,7 @@ public/js/image-upload.js       Browser-side resize (≤ 1600 px JPEG) + upload
 tailwind.input.css              Tailwind v4 source
 START_APP.sh                    Convenience boot script
 local_admins.json               GITIGNORED — bcrypt hashes for console admins
+admin_passwords.json            Symlink → local_admins.json (easy-to-find name; holds no data itself)
 backups/                        GITIGNORED — rebuild bundles
 ```
 
