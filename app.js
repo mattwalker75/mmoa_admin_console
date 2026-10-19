@@ -35,8 +35,17 @@ if (appConfig.server && appConfig.server.trustProxy) {
   app.set('trust proxy', appConfig.server.trustProxy === true ? 1 : appConfig.server.trustProxy);
 }
 
+// Helmet's defaults add HSTS and the CSP `upgrade-insecure-requests`
+// directive, which make the browser rewrite every request — the stylesheet,
+// Alpine, even the post-login redirect — to https://. When the console is
+// served over plain HTTP (server.ssl false) nothing answers there: the pages
+// render unstyled and the login redirect "can't connect". Send both only
+// when the console really serves HTTPS.
+const servesHttps = !!(appConfig.server && appConfig.server.ssl) ||
+  /^https:\/\//i.test(appConfig.publicBaseUrl || '');
 if (appConfig.security && appConfig.security.headers && appConfig.security.headers.enabled !== false) {
   app.use(helmet({
+    strictTransportSecurity: servesHttps,
     contentSecurityPolicy: appConfig.security.headers.contentSecurityPolicy === false ? false : {
       directives: {
         defaultSrc: ["'self'"],
@@ -50,7 +59,9 @@ if (appConfig.security && appConfig.security.headers && appConfig.security.heade
         scriptSrc: ["'self'", "'unsafe-eval'"],
         imgSrc: ["'self'", 'data:', 'blob:'],
         connectSrc: ["'self'"],
-        formAction: ["'self'"]
+        formAction: ["'self'"],
+        // null removes helmet's default directive (see servesHttps above).
+        upgradeInsecureRequests: servesHttps ? [] : null
       }
     },
     crossOriginEmbedderPolicy: false
