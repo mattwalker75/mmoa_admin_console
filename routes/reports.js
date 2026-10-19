@@ -67,7 +67,7 @@ function yesNo(v) {
 const REPORTS = {
   'members-all': {
     label: 'All members',
-    description: 'Every account in the web app (members and web-app admins) with their profile. Sorted by most-recently created.',
+    description: 'Every member account in the web app with their profile. Sorted by most-recently created.',
     needsDb: true,
     columns: [
       { key: 'user_id',           label: 'User ID' },
@@ -75,7 +75,6 @@ const REPORTS = {
       { key: 'full_name',         label: 'Name' },
       { key: 'email',             label: 'Email' },
       { key: 'phone_number',      label: 'Phone' },
-      { key: 'role',              label: 'Role' },
       { key: 'is_active',         label: 'Active' },
       { key: 'email_verified_at', label: 'Verified at' },
       { key: 'created_at',        label: 'Created' },
@@ -84,7 +83,7 @@ const REPORTS = {
     async fetch({ db }) {
       const rows = await db.allAsync(`
         SELECT user_id, login_name, first_name, last_name, email,
-               phone_number, role, is_active,
+               phone_number, is_active,
                email_verified_at, created_at, last_login_at
           FROM users
          ORDER BY created_at DESC, user_id DESC`);

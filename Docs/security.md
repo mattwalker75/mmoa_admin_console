@@ -47,9 +47,8 @@ The local file design is a **break-glass capability**: even with the
 DB unreachable, an operator can log in, navigate the UI, fix the
 connection from Settings → Web App (Database section), and resume.
 
-The `users` table in the web app's DB *can* contain rows with
-`role='admin'`, but those are web-app accounts, not operators of this
-console. They cannot sign in here. See
+The `users` table in the web app's DB holds member accounts (there are
+no roles), not operators of this console. They cannot sign in here. See
 [routes/public.js](../routes/public.js) — the login lookup is always
 `localAdmins.findByUsername(...)`, never a DB query.
 
@@ -277,8 +276,7 @@ their own guard rails (details at the top of
   primary key are read-only.
 - **Every delete goes through `uiConfirm`.**
 
-Member creation pins `role='member'` server-side (promotion to `admin`
-is a deliberate Modify action) and pre-checks login name
+Member creation pre-checks login name
 (case-insensitive) and email uniqueness.
 
 ## File permissions in production

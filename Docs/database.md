@@ -55,7 +55,7 @@ From the shared build contract (both engines, same columns):
 
 | Table | Columns used by the console |
 | ----- | --------------------------- |
-| `users` | `user_id` PK, `login_name` (unique, case-insensitive), `email` (unique, lowercased), `first_name`, `last_name`, `phone_number`, `password_hash`, `role` (`member` / `admin`), `is_active`, `email_verified_at`, `created_at`, `last_login_at` |
+| `users` | `user_id` PK, `login_name` (unique, case-insensitive), `email` (unique, lowercased), `first_name`, `last_name`, `phone_number`, `password_hash`, `is_active`, `email_verified_at`, `created_at`, `last_login_at` |
 | `email_verification_tokens` | `token_id`, `user_id` (FK cascade), `token`, `expires_at`, `consumed_at`, `created_at` |
 | `password_reset_tokens` | same shape |
 | `login_lockouts` | `id`, `scope` (`ip` / account), `scope_key`, `fail_count`, `locked_until_ms` (epoch ms), `last_failed_at`, `updated_at`, `created_at` |
@@ -76,7 +76,7 @@ Portability rules followed by every query here:
 
 | Page | Writes |
 | ---- | ------ |
-| Members → Create | `INSERT INTO users` (role `member`; `password_hash` bcrypt or `no_login`) |
+| Members → Create | `INSERT INTO users` (`password_hash` bcrypt or `no_login`) |
 | Members → Modify / Verify | `UPDATE users`; verifying also stamps `consumed_at` on open verification tokens |
 | Members → Reset password | `UPDATE users SET password_hash`; consumes open reset tokens |
 | Members → Delete | one transaction: delete the member's tokens, then the user |

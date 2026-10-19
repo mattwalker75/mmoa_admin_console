@@ -1,19 +1,18 @@
 // routes/members.js — the web app's member accounts (the `users` table).
 //
-//   GET  /members                     → list + client-side search / sort / role filter
+//   GET  /members                     → list + client-side search / sort / status filter
 //   POST /members/create              → insert a member
 //   GET  /members/:id                 → detail (profile, outstanding links, lockouts)
-//   POST /members/:id/update          → edit name / login / email / phone / role / active / verified
+//   POST /members/:id/update          → edit name / login / email / phone / active / verified
 //   POST /members/:id/verify          → mark verified (state=1) or unverified (state=0)
 //   POST /members/:id/reset-password  → set a new password (bcrypt cost 10, like the web app)
 //   POST /members/:id/delete          → delete the account and its tokens
 //
 // Ported from car_show_admin_console/routes/admin.js (the Customers pages),
-// adapted to the mmoa_web_app schema: role is 'member' | 'admin' (there is
-// no business name / credit / deployments), and email verification gates
-// web-app login. A web-app `admin` has no admin surface in the web app
-// itself — the role is informational there; THIS console is the admin
-// surface, and its own operators live in local_admins.json, not here.
+// adapted to the mmoa_web_app schema: every account is a member — there are
+// no roles (and no business name / credit / deployments) — and email
+// verification gates web-app login. THIS console is the admin surface; its
+// own operators live in local_admins.json, not in the users table.
 //
 // Every DB query is wrapped in safeGet / safeAll (or a try/catch) so the
 // pages render a "Database unavailable" banner instead of crashing when the
@@ -25,8 +24,6 @@ const express = require('express');
 const { page, flash } = require('../views/layout');
 const { escapeHtml, jsAttrStr } = require('../views/escapeHtml');
 const { requireAdmin, hashPassword, getPasswordRules, validatePassword } = require('../middleware/auth');
-
-const ROLES = ['member', 'admin'];
 
 function dbBanner(err) {
   if (!err) return '';
@@ -140,7 +137,7 @@ function createMemberModal(minPasswordLength) {
              }
            ">
         <h2 class="text-lg font-semibold text-slate-900 dark:text-slate-100">Create member</h2>
-        <p class="mt-1 text-xs text-slate-500 dark:text-slate-400">New row in the web app's <code class="font-mono">users</code> table with role <code class="font-mono">member</code>. Login name (case-insensitive) and email must be unique.</p>
+        <p class="mt-1 text-xs text-slate-500 dark:text-slate-400">New row in the web app's <code class="font-mono">users</code> table. Login name (case-insensitive) and email must be unique.</p>
 
         <form method="POST" action="/members/create" class="mt-5 space-y-4"
               x-on:submit="if (createPassword && password !== passwordConfirm) { $event.preventDefault(); window.uiConfirm('The two passwords do not match.', { title: 'Check the password', confirmLabel: 'OK', danger: false }); }">
@@ -183,10 +180,6 @@ function createMemberModal(minPasswordLength) {
               <input id="cm-phone" class="input" type="tel" name="phone_number" maxlength="40">
             </div>
 
-            <!-- Role is intentionally NOT exposed here. New accounts are
-                 created as role='member' server-side regardless of what the
-                 client posts; promoting to 'admin' is a deliberate per-member
-                 action on the Modify dialog. -->
             <div class="flex flex-col gap-2 pt-6">
               <label class="inline-flex items-center gap-2 text-sm text-slate-700 dark:text-slate-200">
                 <input type="checkbox" name="is_active" value="1" checked class="h-4 w-4">
@@ -299,7 +292,7 @@ function resetPasswordModal(memberId, minPasswordLength) {
   `;
 }
 
-// Modify-member modal. Same field set as Create plus role, seeded from the
+// Modify-member modal. Same field set as Create, seeded from the
 // record via data-* attributes on the modal card (sidesteps HTML attribute
 // quoting on names like "O'Brien"). The password is changed separately via
 // Reset password.
@@ -310,7 +303,6 @@ function modifyMemberModal(m) {
     `data-login-name="${escapeHtml(m.login_name || '')}"`,
     `data-email="${escapeHtml(m.email || '')}"`,
     `data-phone-number="${escapeHtml(m.phone_number || '')}"`,
-    `data-role="${escapeHtml(ROLES.includes(m.role) ? m.role : 'member')}"`,
     `data-is-active="${Number(m.is_active) ? '1' : '0'}"`,
     `data-email-verified="${m.email_verified_at ? '1' : '0'}"`
   ].join(' ');
@@ -324,7 +316,7 @@ function modifyMemberModal(m) {
            ${dataAttrs}
            x-data="{
              firstName: '', lastName: '', loginName: '', email: '', phoneNumber: '',
-             role: 'member', isActive: false, emailVerified: false,
+             isActive: false, emailVerified: false,
              seed() {
                const d = $el.dataset;
                this.firstName     = d.firstName;
@@ -332,7 +324,6 @@ function modifyMemberModal(m) {
                this.loginName     = d.loginName;
                this.email         = d.email;
                this.phoneNumber   = d.phoneNumber;
-               this.role          = d.role;
                this.isActive      = d.isActive === '1';
                this.emailVerified = d.emailVerified === '1';
              }
@@ -365,13 +356,6 @@ function modifyMemberModal(m) {
             <div>
               <label class="label" for="mm-phone">Phone number</label>
               <input id="mm-phone" class="input" type="tel" name="phone_number" maxlength="40" x-model="phoneNumber">
-            </div>
-            <div>
-              <label class="label" for="mm-role">Role</label>
-              <select id="mm-role" class="input" name="role" x-model="role">
-                <option value="member">member</option>
-                <option value="admin">admin</option>
-              </select>
             </div>
             <div class="sm:col-span-2 flex flex-wrap items-center gap-x-6 gap-y-2">
               <label class="inline-flex items-center gap-2 text-sm text-slate-700 dark:text-slate-200">
@@ -419,14 +403,14 @@ module.exports = function (db, appConfig) {
 
   // ── Member list ───────────────────────────────────────────────────────
   // The row data is serialized into JSON on the wrapper element so Alpine
-  // can drive search filtering, the role filter and column sorting
+  // can drive search filtering, the status filter and column sorting
   // client-side without re-hitting the server on each keystroke. At a men's
   // group's scale (hundreds of rows) the inline approach is fine.
   router.get('/members', requireAdmin, async (req, res) => {
     const user = req.session.user;
     const autoOpenCreate = req.query.create === '1';
     const { rows, err } = await safeAll(db, `
-      SELECT user_id, login_name, email, first_name, last_name, phone_number, role,
+      SELECT user_id, login_name, email, first_name, last_name, phone_number,
              is_active, email_verified_at, created_at, last_login_at
         FROM users
        ORDER BY LOWER(first_name), LOWER(last_name), user_id
@@ -439,7 +423,6 @@ module.exports = function (db, appConfig) {
         email: u.email || '',
         login: u.login_name || '',
         phone: u.phone_number || '',
-        role: u.role || '',
         active: !!Number(u.is_active),
         verified: !!u.email_verified_at,
         created: u.created_at ? String(u.created_at) : '',
@@ -456,7 +439,6 @@ module.exports = function (db, appConfig) {
              openCreate: ${autoOpenCreate ? 'true' : 'false'},
              members: [],
              query: '',
-             role: '',
              status: '',
              sortKey: 'name',
              sortDir: 'asc',
@@ -467,7 +449,6 @@ module.exports = function (db, appConfig) {
                const q = this.query.trim().toLowerCase();
                let arr = this.members.slice();
                if (q) arr = arr.filter(m => m.search.includes(q));
-               if (this.role) arr = arr.filter(m => m.role === this.role);
                if (this.status === 'unverified') arr = arr.filter(m => !m.verified);
                if (this.status === 'inactive') arr = arr.filter(m => !m.active);
                const dir = this.sortDir === 'asc' ? 1 : -1;
@@ -514,11 +495,6 @@ module.exports = function (db, appConfig) {
                  placeholder="Search by name, email, login, or phone…"
                  autocomplete="off"
                  x-model="query">
-          <select class="input max-w-[10rem]" x-model="role" aria-label="Role">
-            <option value="">All roles</option>
-            <option value="member">member</option>
-            <option value="admin">admin</option>
-          </select>
           <select class="input max-w-[12rem]" x-model="status" aria-label="Status">
             <option value="">Any status</option>
             <option value="unverified">Unverified only</option>
@@ -540,7 +516,6 @@ module.exports = function (db, appConfig) {
                 <th class="cursor-pointer select-none" x-on:click="toggleSort('login')">
                   Login <span class="text-xs text-slate-400 ml-1" x-text="sortIcon('login')"></span>
                 </th>
-                <th>Role</th>
                 <th>Status</th>
                 <th class="cursor-pointer select-none" x-on:click="toggleSort('created')">
                   Created <span class="text-xs text-slate-400 ml-1" x-text="sortIcon('created')"></span>
@@ -556,7 +531,6 @@ module.exports = function (db, appConfig) {
                   <td class="font-medium text-slate-900 dark:text-slate-100" x-text="m.name || '—'"></td>
                   <td x-text="m.email"></td>
                   <td class="font-mono text-xs text-slate-500" x-text="m.login || '—'"></td>
-                  <td><span class="text-xs" :class="m.role === 'admin' ? 'pill-pending' : 'text-slate-500'" x-text="m.role"></span></td>
                   <td class="space-x-1 whitespace-nowrap">
                     <span x-show="m.verified" class="pill-running">Verified</span>
                     <span x-show="!m.verified" class="pill-pending">Unverified</span>
@@ -567,9 +541,9 @@ module.exports = function (db, appConfig) {
                 </tr>
               </template>
               <tr x-show="!visible.length">
-                <td colspan="7" class="text-center py-8 text-slate-400">
-                  <span x-show="query || role || status">No matching members.</span>
-                  <span x-show="!query && !role && !status">${emptyMsg}</span>
+                <td colspan="6" class="text-center py-8 text-slate-400">
+                  <span x-show="query || status">No matching members.</span>
+                  <span x-show="!query && !status">${emptyMsg}</span>
                 </td>
               </tr>
             </tbody>
@@ -584,7 +558,6 @@ module.exports = function (db, appConfig) {
 
   // POST /members/create — insert a new row into the web app's `users` table.
   // Behaviour notes:
-  //   * role               → always 'member' (any posted role is ignored).
   //   * email_verified=1   → email_verified_at = sqlTime() (UTC, the web
   //                          app's format). Unverified members can't sign in.
   //   * create_password=0  → password_hash is the literal 'no_login' — not a
@@ -621,8 +594,8 @@ module.exports = function (db, appConfig) {
       const r = await db.runAsync(`
         INSERT INTO users (
           login_name, email, first_name, last_name, phone_number,
-          password_hash, role, is_active, email_verified_at, last_login_at
-        ) VALUES (?, ?, ?, ?, ?, ?, 'member', ?, ?, NULL)
+          password_hash, is_active, email_verified_at, last_login_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL)
       `, [f.login_name, f.email, f.first_name, f.last_name, f.phone_number,
           password_hash, is_active, email_verified_at]);
       console.log(`[members] ${req.session.user.username} created member ${f.login_name}${r && r.lastID ? ' #' + r.lastID : ''}`);
@@ -641,7 +614,7 @@ module.exports = function (db, appConfig) {
       return res.redirect('/members?error=Invalid+member+id');
     }
     const { value: m, err: mErr } = await safeGet(db,
-      `SELECT user_id, login_name, email, first_name, last_name, phone_number, role,
+      `SELECT user_id, login_name, email, first_name, last_name, phone_number,
               is_active, email_verified_at, created_at, last_login_at
          FROM users WHERE user_id = ?`, [id], null);
 
@@ -720,7 +693,6 @@ module.exports = function (db, appConfig) {
               <span>·</span>
               ${activeBadge}
               ${verifiedBadge}
-              ${m.role === 'admin' ? '<span class="pill-pending">web app admin</span>' : ''}
             </div>
           </div>
           <div class="flex items-center gap-2 flex-wrap justify-end">
@@ -747,7 +719,6 @@ module.exports = function (db, appConfig) {
               ${field('Name', escapeHtml(fullName || '—'))}
               ${field('Email', escapeHtml(m.email || '—'))}
               ${field('Phone', escapeHtml(m.phone_number || '—'))}
-              ${field('Role', escapeHtml(m.role || '—'))}
               ${field('Created', escapeHtml(m.created_at ? String(m.created_at) : '—'))}
               ${field('Last login', escapeHtml(m.last_login_at ? String(m.last_login_at) : '—'))}
               ${field('Verified', m.email_verified_at ? escapeHtml(String(m.email_verified_at)) : 'No')}
@@ -847,16 +818,15 @@ module.exports = function (db, appConfig) {
     const b = req.body || {};
     const { fields: f, error } = readProfile(b);
     if (error) return res.redirect(`/members/${id}?error=` + encodeURIComponent(error));
-    const role = ROLES.includes(b.role) ? b.role : 'member';
     const is_active = b.is_active === '1' ? 1 : 0;
     const verified = b.email_verified === '1';
 
     const sets = [
       'login_name = ?', 'email = ?', 'first_name = ?', 'last_name = ?',
-      'phone_number = ?', 'role = ?', 'is_active = ?',
+      'phone_number = ?', 'is_active = ?',
       verified ? 'email_verified_at = COALESCE(email_verified_at, ?)' : 'email_verified_at = NULL'
     ];
-    const params = [f.login_name, f.email, f.first_name, f.last_name, f.phone_number, role, is_active];
+    const params = [f.login_name, f.email, f.first_name, f.last_name, f.phone_number, is_active];
     if (verified) params.push(sqlTime());
     params.push(id);
 

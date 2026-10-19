@@ -69,8 +69,7 @@ module.exports = function (db, appConfig) {
     let firstErr = null;
     const now = Date.now();
     for (const [key, sql, params] of [
-      ['members',      "SELECT COUNT(*) AS c FROM users WHERE role = 'member'", []],
-      ['webAdmins',    "SELECT COUNT(*) AS c FROM users WHERE role = 'admin'", []],
+      ['members',      'SELECT COUNT(*) AS c FROM users', []],
       ['verified',     'SELECT COUNT(*) AS c FROM users WHERE email_verified_at IS NOT NULL', []],
       ['unverified',   'SELECT COUNT(*) AS c FROM users WHERE email_verified_at IS NULL', []],
       ['inactive',     'SELECT COUNT(*) AS c FROM users WHERE is_active = 0', []],
@@ -99,9 +98,8 @@ module.exports = function (db, appConfig) {
 
       <section class="mb-10">
         <h2 class="text-sm font-semibold uppercase tracking-wider text-slate-500 dark:text-slate-400 mb-3">Members</h2>
-        <div class="grid grid-cols-2 lg:grid-cols-5 gap-4">
+        <div class="grid grid-cols-2 lg:grid-cols-4 gap-4">
           ${statCard('Members', c.members, 'bg-indigo-500', '/members')}
-          ${statCard('Web app admins', c.webAdmins, 'bg-slate-500', '/members')}
           ${statCard('Verified', c.verified, 'bg-emerald-500', '/members')}
           ${statCard('Unverified', c.unverified, 'bg-amber-500', '/members')}
           ${statCard('Inactive', c.inactive, 'bg-red-500', '/members')}
@@ -153,7 +151,7 @@ module.exports = function (db, appConfig) {
     }).join('');
     const minLen = getPasswordRules(appConfig).minLength;
     const body = `
-      ${pageHeader('Console admins', 'Operators who can sign in to this admin console. Stored locally in local_admins.json (gitignored). Web app accounts with role "admin" are managed under Members.')}
+      ${pageHeader('Console admins', 'Operators who can sign in to this admin console. Stored locally in local_admins.json (gitignored). Web app accounts are managed under Members.')}
       ${flash('error', req.query.error)}
       ${flash('success', req.query.msg)}
 

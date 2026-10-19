@@ -79,7 +79,7 @@ node scripts/create-local-admin.js <username> <email> '<name>' '<password>'
 | Tab                  | Purpose |
 | -------------------- | ------- |
 | **Profile**          | Edit your own name / email / password. |
-| **Dashboard**        | Counts: members, web-app admins, verified / unverified / inactive, events, locked IPs / accounts, console admins. |
+| **Dashboard**        | Counts: members, verified / unverified / inactive, events, locked IPs / accounts, console admins. |
 | **Admins**           | Add / replace / remove local-file console admins. |
 | **Members**          | The web app's accounts — list, search, create, edit, verify, reset password, delete. |
 | **Data Browser**     | Generic table browser / editor for the whole web-app database. |
@@ -91,12 +91,12 @@ node scripts/create-local-admin.js <username> <email> '<name>' '<password>'
 | **Backup/Restore**   | JSON exports / restores and one-file rebuild bundles. |
 | **Settings**         | This console: Security, Appearance, Web App (access mode, database, lifecycle commands, Test connection). |
 
-## Two flavors of "admin"
+## Admins vs. members
 
 - **Console admins** — operators of *this* app. Live in
   `local_admins.json`, never in the DB. Managed under **Admins**.
-- **Web-app admins** — rows in the web app's `users` table with
-  `role='admin'`. They can't sign in here; the web app has no admin
+- **Members** — rows in the web app's `users` table (no roles — every
+  account is a member). They can't sign in here; the web app has no admin
   surface of its own — this console is it. Managed under **Members**.
 
 ## Cookie name

@@ -20,7 +20,7 @@ Your own name, email and password. Username can't be changed here.
 ## Dashboard
 
 At-a-glance counts. Tiles link to the page that explains them:
-members and web-app admins, verified / unverified / inactive accounts,
+members, verified / unverified / inactive accounts,
 events (all / published), and accounts / IPs currently locked out of the
 web app's login. A red banner means the database couldn't be reached.
 
@@ -34,14 +34,13 @@ admin.
 
 Every account in the web app.
 
-- **Search / filter** by name, email, login or phone; by role; or show
+- **Search / filter** by name, email, login or phone; or show
   only unverified / inactive accounts. Click a row for details.
-- **Create member** — new accounts are always role `member`. Leave
+- **Create member** — every account is a member (there are no roles). Leave
   "Email verified" ticked if you know the address is right (unverified
   members can't sign in). Untick "Set a password" for a no-login account;
   the member can use **Forgot password** on the website later.
-- **Modify member** — name, login, email, phone, role (`member` /
-  `admin`), active, verified.
+- **Modify member** — name, login, email, phone, active, verified.
 - **Mark verified / unverified** — quick toggle. Marking verified also
   invalidates any outstanding verification link.
 - **Reset password** — sets a new password immediately (same bcrypt
