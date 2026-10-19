@@ -22,7 +22,7 @@
 //   2. Values are ALWAYS bound as `?` parameters (search terms, primary-key
 //      values, edited cells, LIMIT / OFFSET).
 //   3. Password / token hash columns (*password_hash*, *_hash) are shown
-//      masked and are read-only here — set passwords from Members → Reset
+//      masked and are read-only here — set passwords from Nonprofits → Reset
 //      password, which bcrypts them the same way the web app does. On insert
 //      a NOT NULL hash column with no default gets the sentinel 'no_login'
 //      (not a valid bcrypt hash, so that account can never authenticate
@@ -220,7 +220,7 @@ module.exports = function (db, appConfig) {
       ${flash('error', req.query.error)}
       ${flash('success', req.query.msg)}
       ${dbBanner(err)}
-      <div class="flash-warn mb-6 text-sm"><strong>Direct database access.</strong> Edits here bypass the web app's own validation. Prefer <a class="underline" href="/members">Members</a> for accounts (password hashes are read-only here). Changes are live immediately — no restart.</div>
+      <div class="flash-warn mb-6 text-sm"><strong>Direct database access.</strong> Edits here bypass the web app's own validation. Prefer the dedicated pages — <a class="underline" href="/nonprofits">Nonprofits</a>, <a class="underline" href="/events">Events</a>, <a class="underline" href="/raffles">Raffles</a>, <a class="underline" href="/board">Board</a> — which also keep image files and child rows in step (password hashes are read-only here). Changes are live immediately — no restart.</div>
       <div class="table-wrap surface-target max-w-4xl">
         <table class="table-base">
           <thead><tr><th>Table</th><th class="text-right">Rows</th><th class="text-right">Columns</th><th>Primary key</th></tr></thead>
@@ -369,7 +369,7 @@ module.exports = function (db, appConfig) {
       const label = `<div class="flex items-baseline justify-between gap-2"><label class="label mb-0 font-mono" for="f-${i}">${escapeHtml(c.name)}</label>${meta}</div>`;
       if (dbSchema.isHashColumn(c.name)) {
         return `<div>${label}<input class="input mt-1" type="text" value="${v == null ? 'NULL' : MASK}" disabled readonly>
-          <p class="mt-1 text-xs text-slate-500 dark:text-slate-400">${c.name === 'password_hash' && table === 'users' ? 'Set a new password from <a class="text-brand-600 hover:underline" href="/members/' + encodeURIComponent(String(row.user_id)) + '">Members → Reset password</a>.' : 'Hash columns are never editable here.'}</p></div>`;
+          <p class="mt-1 text-xs text-slate-500 dark:text-slate-400">${c.name === 'password_hash' && table === 'users' ? 'Set a new password from <a class="text-brand-600 hover:underline" href="/nonprofits/' + encodeURIComponent(String(row.user_id)) + '">Nonprofits → Reset password</a>.' : 'Hash columns are never editable here.'}</p></div>`;
       }
       if (c.pk) {
         return `<div>${label}<input class="input mt-1 font-mono" type="text" value="${escapeHtml(cellText(v) == null ? 'NULL' : cellText(v))}" disabled readonly>
@@ -405,7 +405,7 @@ module.exports = function (db, appConfig) {
         <form method="POST" action="/data/${encodeURIComponent(table)}/row/delete" class="card surface-target card-pad flex items-center justify-between gap-4"
               x-data x-on:submit.prevent="window.uiConfirmSubmit($event.target, ${jsAttrStr(`Delete this row from "${table}" (key ${keyJson})? This cannot be undone.`)}, { title: 'Delete row', confirmLabel: 'Delete' })">
           <input type="hidden" name="key" value="${escapeHtml(keyJson)}">
-          <p class="text-sm text-slate-600 dark:text-slate-300">Delete this row permanently.${table === 'users' ? ' For member accounts prefer <a class="text-brand-600 hover:underline" href="/members">Members → Delete</a>, which also removes their tokens.' : ''}</p>
+          <p class="text-sm text-slate-600 dark:text-slate-300">Delete this row permanently.${table === 'users' ? ' For nonprofit accounts prefer <a class="text-brand-600 hover:underline" href="/nonprofits">Nonprofits → Delete</a>, which also removes the organization, its child rows and photo files.' : ''}</p>
           <button type="submit" class="btn-danger shrink-0">Delete row</button>
         </form>
       </div>` : ''}
@@ -481,7 +481,7 @@ module.exports = function (db, appConfig) {
       const label = `<div class="flex items-baseline justify-between gap-2"><span class="label mb-0 font-mono">${escapeHtml(c.name)}</span>${meta}</div>`;
       if (dbSchema.isHashColumn(c.name)) {
         const note = (c.notnull && c.dflt == null)
-          ? `Set to <code class="font-mono">${HASH_SENTINEL}</code> (cannot sign in). ${table === 'users' ? 'Set a real password afterwards from Members → Reset password.' : ''}`
+          ? `Set to <code class="font-mono">${HASH_SENTINEL}</code> (cannot sign in). ${table === 'users' ? 'Set a real password afterwards from Nonprofits → Reset password.' : ''}`
           : 'Left at its default.';
         return `<div>${label}<p class="mt-1 text-xs text-slate-500 dark:text-slate-400">Hash column — not editable here. ${note}</p></div>`;
       }

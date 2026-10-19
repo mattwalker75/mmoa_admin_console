@@ -1,7 +1,7 @@
 // routes/public.js — sign-in + sign-out for the admin console.
 //
 // Admin auth is LOCAL FILE ONLY (local_admins.json on disk). The web app's
-// database (mmoa_web_app's member accounts) is NOT
+// database (mmoa_web_app's nonprofit accounts) is NOT
 // consulted at login time — the admin console is an internal operator tool
 // with only a handful of users, and going DB-down should never lock anyone
 // out.

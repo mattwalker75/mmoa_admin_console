@@ -5,8 +5,8 @@
 //   POST /admins/delete → remove a local admin by username
 //
 // Ported from car_show_admin_console/routes/admin.js (dashboard + admins
-// sections). Members (the web app's `users` table) live in routes/members.js;
-// the car-show Deployments section, reaper and cleanup sweeper are gone.
+// sections). Nonprofit accounts live in routes/nonprofits.js; the car-show
+// Deployments section, reaper and cleanup sweeper are gone.
 //
 // Every DB query is wrapped in safeGet / safeAll so a logged-in operator
 // can still navigate the UI when the web app's database is unreachable —
@@ -60,21 +60,24 @@ module.exports = function (db, appConfig) {
   const router = express.Router();
 
   // ── Dashboard ─────────────────────────────────────────────────────────
-  // Counts only — every query is a portable COUNT(*). "Currently locked"
+  // Counts only — every query is a portable COUNT(*). "Upcoming" is the web
+  // app's rule (published, starts_at ≥ now − 12 h) and "currently locked"
   // binds JS's Date.now() against the epoch-ms column, so no engine-specific
-  // time function is needed.
+  // time function is needed. The "Pending verification" list is the board's
+  // to-do list: nonprofits waiting to be checked before they're listed.
   router.get('/', requireAdmin, async (req, res) => {
     const user = req.session.user;
     const c = {};
     let firstErr = null;
     const now = Date.now();
+    const upcomingCut = new Date(now - 12 * 3600 * 1000).toISOString().replace('T', ' ').replace(/\..+/, '');
     for (const [key, sql, params] of [
-      ['members',      'SELECT COUNT(*) AS c FROM users', []],
-      ['verified',     'SELECT COUNT(*) AS c FROM users WHERE email_verified_at IS NOT NULL', []],
-      ['unverified',   'SELECT COUNT(*) AS c FROM users WHERE email_verified_at IS NULL', []],
-      ['inactive',     'SELECT COUNT(*) AS c FROM users WHERE is_active = 0', []],
-      ['events',       'SELECT COUNT(*) AS c FROM events', []],
-      ['published',    'SELECT COUNT(*) AS c FROM events WHERE is_published = 1', []],
+      ['verified',     "SELECT COUNT(*) AS c FROM organizations WHERE verification_status = 'verified'", []],
+      ['pending',      "SELECT COUNT(*) AS c FROM organizations WHERE verification_status = 'unverified'", []],
+      ['rejected',     "SELECT COUNT(*) AS c FROM organizations WHERE verification_status = 'rejected'", []],
+      ['upcoming',     'SELECT COUNT(*) AS c FROM events WHERE is_published = 1 AND starts_at >= ?', [upcomingCut]],
+      ['drafts',       'SELECT COUNT(*) AS c FROM events WHERE is_published = 0', []],
+      ['openRaffles',  "SELECT COUNT(*) AS c FROM raffles WHERE status = 'open'", []],
       ['lockedIps',    "SELECT COUNT(*) AS c FROM login_lockouts WHERE scope = 'ip' AND locked_until_ms > ?", [now]],
       ['lockedAccts',  "SELECT COUNT(*) AS c FROM login_lockouts WHERE scope <> 'ip' AND locked_until_ms > ?", [now]]
     ]) {
@@ -83,6 +86,27 @@ module.exports = function (db, appConfig) {
       if (err && !firstErr) firstErr = err;
     }
     const localCount = localAdmins.count();
+    let pending = [];
+    try {
+      pending = await db.allAsync(`SELECT o.user_id, o.name, o.ein, o.city, o.created_at, u.email
+                                     FROM organizations o JOIN users u ON u.user_id = o.user_id
+                                    WHERE o.verification_status = 'unverified'
+                                    ORDER BY o.created_at ASC, o.org_id ASC LIMIT 25`, []);
+    } catch (err) { if (!firstErr) firstErr = err; }
+    const locked = (c.lockedIps == null && c.lockedAccts == null) ? null : (c.lockedIps || 0) + (c.lockedAccts || 0);
+
+    const pendingHtml = pending.length
+      ? `<div class="table-wrap surface-target"><table class="table-base">
+          <thead><tr><th>Organization</th><th>EIN</th><th>City</th><th>Email</th><th>Signed up</th></tr></thead>
+          <tbody>${pending.map(p => `<tr>
+            <td class="font-medium"><a class="text-brand-600 hover:underline" href="/nonprofits/${Number(p.user_id)}">${escapeHtml(p.name || '(no name)')}</a></td>
+            <td class="font-mono text-xs">${escapeHtml(p.ein || '—')}</td>
+            <td>${escapeHtml(p.city || '—')}</td>
+            <td class="text-xs">${escapeHtml(p.email || '')}</td>
+            <td class="text-xs text-slate-500 whitespace-nowrap">${escapeHtml(p.created_at ? String(p.created_at) : '—')}</td>
+          </tr>`).join('')}</tbody></table></div>
+          ${c.pending > pending.length ? `<p class="mt-2 text-xs text-slate-500"><a class="text-brand-600 hover:underline" href="/nonprofits?status=unverified">All ${c.pending} pending →</a></p>` : ''}`
+      : `<p class="text-sm text-slate-500 dark:text-slate-400">${firstErr ? 'Unavailable.' : 'Nothing waiting — every nonprofit has been reviewed.'}</p>`;
 
     const body = `
       ${pageHeader('Dashboard', `Welcome back, ${user.name || user.username}.`)}
@@ -90,36 +114,34 @@ module.exports = function (db, appConfig) {
       ${dbBanner(firstErr)}
 
       <section class="mb-10">
-        <h2 class="text-sm font-semibold uppercase tracking-wider text-slate-500 dark:text-slate-400 mb-3">Console</h2>
-        <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+        <h2 class="text-sm font-semibold uppercase tracking-wider text-slate-500 dark:text-slate-400 mb-3">Nonprofits</h2>
+        <div class="grid grid-cols-2 lg:grid-cols-4 gap-4">
+          ${statCard('Verified', c.verified, 'bg-emerald-500', '/nonprofits?status=verified')}
+          ${statCard('Pending verification', c.pending, 'bg-amber-500', '/nonprofits?status=unverified')}
+          ${statCard('Rejected', c.rejected, 'bg-red-500', '/nonprofits?status=rejected')}
+        </div>
+      </section>
+
+      <section class="mb-10">
+        <h2 class="text-sm font-semibold uppercase tracking-wider text-slate-500 dark:text-slate-400 mb-3">Website</h2>
+        <div class="grid grid-cols-2 lg:grid-cols-4 gap-4">
+          ${statCard('Upcoming events', c.upcoming, 'bg-sky-500', '/events')}
+          ${statCard('Event drafts', c.drafts, 'bg-slate-400', '/events?tab=drafts')}
+          ${statCard('Open raffles', c.openRaffles, 'bg-indigo-500', '/raffles?status=open')}
+        </div>
+      </section>
+
+      <section class="mb-10">
+        <h2 class="text-sm font-semibold uppercase tracking-wider text-slate-500 dark:text-slate-400 mb-3">Security &amp; console</h2>
+        <div class="grid grid-cols-2 lg:grid-cols-4 gap-4">
+          ${statCard('Locked logins', locked, 'bg-orange-500', '/locked-users')}
           ${statCard('Console admins', localCount, 'bg-brand-500', '/admins')}
         </div>
       </section>
 
-      <section class="mb-10">
-        <h2 class="text-sm font-semibold uppercase tracking-wider text-slate-500 dark:text-slate-400 mb-3">Members</h2>
-        <div class="grid grid-cols-2 lg:grid-cols-4 gap-4">
-          ${statCard('Members', c.members, 'bg-indigo-500', '/members')}
-          ${statCard('Verified', c.verified, 'bg-emerald-500', '/members')}
-          ${statCard('Unverified', c.unverified, 'bg-amber-500', '/members')}
-          ${statCard('Inactive', c.inactive, 'bg-red-500', '/members')}
-        </div>
-      </section>
-
-      <section class="mb-10">
-        <h2 class="text-sm font-semibold uppercase tracking-wider text-slate-500 dark:text-slate-400 mb-3">Events</h2>
-        <div class="grid grid-cols-2 lg:grid-cols-4 gap-4">
-          ${statCard('Events', c.events, 'bg-sky-500', '/data/events')}
-          ${statCard('Published', c.published, 'bg-emerald-500', '/data/events')}
-        </div>
-      </section>
-
       <section>
-        <h2 class="text-sm font-semibold uppercase tracking-wider text-slate-500 dark:text-slate-400 mb-3">Login lockouts (currently locked)</h2>
-        <div class="grid grid-cols-2 lg:grid-cols-4 gap-4">
-          ${statCard('Locked IPs', c.lockedIps, 'bg-red-500', '/locked-users')}
-          ${statCard('Locked accounts', c.lockedAccts, 'bg-orange-500', '/locked-users')}
-        </div>
+        <h2 class="text-sm font-semibold uppercase tracking-wider text-slate-500 dark:text-slate-400 mb-3">Pending verification</h2>
+        ${pendingHtml}
       </section>
     `;
     res.send(page({ title: 'Dashboard', body, appConfig, user, activeNav: 'home' }));
@@ -151,7 +173,7 @@ module.exports = function (db, appConfig) {
     }).join('');
     const minLen = getPasswordRules(appConfig).minLength;
     const body = `
-      ${pageHeader('Console admins', 'Operators who can sign in to this admin console. Stored locally in local_admins.json (gitignored). Web app accounts are managed under Members.')}
+      ${pageHeader('Console admins', 'Operators who can sign in to this admin console. Stored locally in local_admins.json (gitignored). Web app accounts (nonprofits) are managed under Nonprofits.')}
       ${flash('error', req.query.error)}
       ${flash('success', req.query.msg)}
 

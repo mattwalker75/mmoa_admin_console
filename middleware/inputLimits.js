@@ -25,7 +25,18 @@ const FIELD_CAPS = {
   // (still bounded by app.js's 64 KB body limit).
   html: 200000,
   // Data Browser row-key envelope (JSON of the primary-key values).
-  key: 4000
+  key: 4000,
+  // Events / Raffles: Markdown-lite descriptions (+ the JSON preview call),
+  // the beneficiaries editor's JSON, and the longer plain-text fields.
+  description_md: 20000,
+  prize_description_md: 20000,
+  text: 20000,
+  beneficiaries_json: 20000,
+  beneficiaries_text: 2000,
+  how_to_buy: 4000,
+  claim_requirements: 4000,
+  // Nonprofits: verification note.
+  note: 2000
 };
 
 // Data Browser edit / insert forms post one value per column as v__<n>

@@ -327,7 +327,8 @@ If you ever tighten CSP, remember:
 ## Debugging the running app
 
 - **Server logs.** Tail the morgan stream + `console.*` calls. Search
-  for subsystem tags: `[db]`, `[settings]`, `[members]`, `[data]`,
+  for subsystem tags: `[db]`, `[settings]`, `[nonprofits]`, `[events]`, `[raffles]`,
+  `[uploads]`, `[data]`,
   `[reports]`, `[login]`, `[profile]`, `[admin]`, `[setup]`,
   `[backup]`, `[boot]`, `[session]`, `[localAdmins]`.
 - **Alpine devtools.** The browser DevTools console can inspect any

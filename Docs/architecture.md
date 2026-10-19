@@ -31,11 +31,12 @@ Three independent data sources:
 1. **`local_admins.json`** — this console's own operators. Never in the
    database, so a dead DB can't lock anyone out.
 2. **The web app's database** — `mmoa_web_app.db` (SQLite) or the MySQL
-   database. Members, Data Browser, Locked Users, Reports, the dashboard
-   and database backups read/write it through `db/database.js`.
+   database. Events, Raffles, Nonprofits, Categories & Cities, Board,
+   Data Browser, Locked Users, Reports, the dashboard and database backups
+   read/write it through `db/database.js`.
 3. **The web app's install directory** — `config.json`, `HTML/`,
-   `logs/app.log`, `scripts/maintenance.sh` and the lifecycle scripts,
-   reached through `helpers/webAppAccess.js`.
+   `uploads/`, `logs/app.log`, `scripts/maintenance.sh` and the lifecycle
+   scripts, reached through `helpers/webAppAccess.js`.
 
 ## The Web App transport
 
@@ -46,13 +47,29 @@ accessor interface:
 | ------ | ----- | --- | --- |
 | `runCommand(cmd, { cwd, timeoutMs })` | `/bin/sh -c` | `conn.exec` | SSM `AWS-RunShellScript` (optionally `su - runAsUser`) |
 | `readFile(path)` | `fs` | SFTP | `base64` over SSM — **refuses** output ≥ ~23 KB (SSM truncates at 24 KB) |
-| `writeFile(path, content)` | temp + `rename` | SFTP temp + `mv -f` | base64 → temp + `mv -f` |
+| `writeFile(path, content)` | temp + `rename` | SFTP temp + `mv -f` | base64 → temp + `mv -f` (one command — small text files only) |
+| `writeFileChunked(path, buffer)` | `mkdir -p` + temp + `rename` | `mkdir -p`, SFTP temp + `mv -f` | `mkdir -p`; base64 pieces appended to a temp file, **each SSM command ≤ 40 KB** after the `su` wrap (`ssmChunkChars`: 39 400 chars, 29 348 with `runAsUser`); final size check (`stat -c %s`, else `wc -c`) then `mv -f`; any failure removes the temp file |
 | `exists(path)` | `fs.access` | SFTP `stat` | `test -e` |
 | `readBundle({files, dirs})` | parallel reads | one SSH connection | one SSM command with markers (falls back per-file if truncated) |
 | `test()` | dir exists / writable | connect + `whoami` + dir | SSM `whoami` + dir probe |
 
 Every write is atomic, so an interrupted save can never leave the web
-app's `config.json` or a website fragment truncated. Lifecycle and
+app's `config.json`, a website fragment or an uploaded image truncated.
+
+### Uploaded images (`uploads/`)
+
+[helpers/webAppUploads.js](../helpers/webAppUploads.js) owns the contract
+shared with the web app: files live at
+`<appPath>/uploads/<events|raffles|orgs|board>/<16 random hex>.<jpg|png|webp>`,
+the DB stores the relative path (`events/3f9c….jpg`), only JPEG / PNG /
+WebP pass (checked by magic bytes, 8 MB max), and paths are re-validated
+against that exact shape before any read, write or `rm -f`. The browser
+resizes first ([public/js/image-upload.js](../public/js/image-upload.js):
+canvas, ≤ 1600 px long edge, JPEG 0.82). Thumbnails go through the
+console's `/wa-uploads/<kind>/<file>` proxy (CSP allows only same-origin
+images): local / SSH read the file; EC2 fetches the web app's public
+`<publicBaseUrl>/uploads/…` URL (SSM can only return ~18 KB of file),
+falling back to an SSM read for small files. Lifecycle and
 maintenance commands run **from** the web app directory (`cwd = appPath`).
 
 `helpers/webAppConfig.js` builds on it: `readRemoteConfig` refuses a
@@ -96,7 +113,8 @@ See [`app.js`](../app.js). In order:
     → 503, never the setup form.
 13. **Routers**: `setup → public → settings → webAppSettings → webAppLogs →
     webAppWebsite → lockedUsers → dataBrowser → reports → backup →
-    profile → members → admin`.
+    profile → uploads → events → raffles → nonprofits → directory →
+    board → admin`.
 14. **404 fallback**.
 
 Unhandled rejections are logged and the process stays up; an uncaught
@@ -106,7 +124,9 @@ exception drains the server and exits non-zero.
 
 | Page | DB | Transport | Own config |
 | ---- | -- | --------- | ---------- |
-| Dashboard, Members, Data Browser, Locked Users, Reports | ✓ | | |
+| Dashboard, Nonprofits, Categories & Cities, Data Browser, Locked Users, Reports | ✓ | | |
+| Events, Raffles, Board | ✓ | ✓ (uploads; remote `publicBaseUrl` for View on site) | `timeZone` |
+| Nonprofits → IRS / ProPublica lookup | ✓ | | (outbound HTTPS to projects.propublica.org, 10 s timeout) |
 | Web App Website / Logs / Settings | | ✓ | `webApp.restartPending` |
 | Backup/Restore | ✓ (database) | ✓ (config, website, bundles) | ✓ (console settings) |
 | Settings, Profile, Admins | | (Test connection) | ✓ / `local_admins.json` |
@@ -122,7 +142,8 @@ exception drains the server and exits non-zero.
 - `views/layout.js` appends `?v=<mtime>` to both, so a rebuild is picked
   up without a hard refresh.
 - Behaviour that needs real JavaScript (the confirm dialog, the website
-  preview popup) lives in external files under `public/js/` — the CSP
+  preview popup, the image resize-and-upload helper) lives in external
+  files under `public/js/` — the CSP
   has no `'unsafe-inline'` for scripts.
 
 Dark mode is class-based (`dark` on `<html>` from `theme.mode`), see

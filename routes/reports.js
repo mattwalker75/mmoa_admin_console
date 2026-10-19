@@ -7,7 +7,7 @@
 //   GET /reports/:name.json     → { columns, rows } for the View modal.
 //   GET /reports/:name.csv      → CSV download of the same rows.
 //
-// All member-name composition is done in JS (not SQL) so the queries
+// All contact-name composition is done in JS (not SQL) so the queries
 // stay portable between SQLite and MySQL — there's no CONCAT vs `||`
 // divergence to maintain. Comparisons against "now" bind a JS-computed
 // value (epoch ms for lockouts) rather than calling an engine-specific
@@ -25,7 +25,7 @@ function csvEscape(v) {
   let s = String(v);
   // Neutralize spreadsheet formula injection: a cell starting with = + - @
   // (or tab/CR) is evaluated as a formula by Excel/Sheets. Report data
-  // includes member-controlled fields (names, emails, event text), so prefix a single
+  // includes nonprofit-controlled fields (names, emails, profile text), so prefix a single
   // quote to force text before the file reaches the operator's spreadsheet.
   if (/^[=+\-@\t\r]/.test(s)) s = "'" + s;
   return /[",\n\r]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
@@ -65,87 +65,151 @@ function yesNo(v) {
 // (full_name, yes/no flags, locked/lapsed) happens in JS below.
 
 const REPORTS = {
-  'members-all': {
-    label: 'All members',
-    description: 'Every member account in the web app with their profile. Sorted by most-recently created.',
+  'nonprofits-all': {
+    label: 'All nonprofits',
+    description: 'Every nonprofit account with its organization, EIN, primary contact, verification status and directory listing. Newest first.',
     needsDb: true,
     columns: [
-      { key: 'user_id',           label: 'User ID' },
-      { key: 'login_name',        label: 'Login' },
-      { key: 'full_name',         label: 'Name' },
-      { key: 'email',             label: 'Email' },
-      { key: 'phone_number',      label: 'Phone' },
-      { key: 'is_active',         label: 'Active' },
-      { key: 'email_verified_at', label: 'Verified at' },
-      { key: 'created_at',        label: 'Created' },
-      { key: 'last_login_at',     label: 'Last login' }
+      { key: 'user_id',             label: 'User ID' },
+      { key: 'org_name',            label: 'Organization' },
+      { key: 'ein',                 label: 'EIN' },
+      { key: 'full_name',           label: 'Contact' },
+      { key: 'email',               label: 'Email' },
+      { key: 'phone',               label: 'Phone' },
+      { key: 'city',                label: 'City' },
+      { key: 'verification_status', label: 'Verification' },
+      { key: 'verified_at',         label: 'Decided at' },
+      { key: 'verified_by',         label: 'Decided by' },
+      { key: 'is_listed',           label: 'Listed' },
+      { key: 'is_active',           label: 'Login active' },
+      { key: 'email_verified_at',   label: 'Email verified' },
+      { key: 'created_at',          label: 'Signed up' },
+      { key: 'last_login_at',       label: 'Last login' }
     ],
     async fetch({ db }) {
       const rows = await db.allAsync(`
-        SELECT user_id, login_name, first_name, last_name, email,
-               phone_number, is_active,
-               email_verified_at, created_at, last_login_at
-          FROM users
-         ORDER BY created_at DESC, user_id DESC`);
+        SELECT u.user_id, u.first_name, u.last_name, u.email, u.phone_number, u.is_active,
+               u.email_verified_at, u.created_at, u.last_login_at,
+               o.name AS org_name, o.ein, o.phone AS org_phone, o.city, o.verification_status,
+               o.verified_at, o.verified_by, o.is_listed, o.org_id
+          FROM users u LEFT JOIN organizations o ON o.user_id = u.user_id
+         ORDER BY u.created_at DESC, u.user_id DESC`);
       return rows.map(r => ({
         ...r,
         full_name: composeFullName(r),
+        phone: r.org_phone || r.phone_number || '',
+        verification_status: r.org_id ? (r.verification_status || 'unverified') : 'no profile',
+        is_listed: r.org_id ? yesNo(r.is_listed) : '',
         is_active: yesNo(r.is_active)
       }));
     }
   },
 
-  'members-unverified': {
-    label: 'Unverified members',
-    description: 'Accounts that have not confirmed their email address. These accounts cannot sign in to the web app until verified (or marked verified from Members).',
+  'nonprofits-pending': {
+    label: 'Nonprofits pending verification',
+    description: 'Organizations waiting for a board member to verify them (Nonprofits → IRS / ProPublica lookup). They are not in the public directory until verified.',
     needsDb: true,
     columns: [
-      { key: 'user_id',      label: 'User ID' },
-      { key: 'login_name',   label: 'Login' },
-      { key: 'full_name',    label: 'Name' },
-      { key: 'email',        label: 'Email' },
-      { key: 'phone_number', label: 'Phone' },
-      { key: 'created_at',   label: 'Created' }
+      { key: 'user_id',    label: 'User ID' },
+      { key: 'org_name',   label: 'Organization' },
+      { key: 'ein',        label: 'EIN' },
+      { key: 'full_name',  label: 'Contact' },
+      { key: 'email',      label: 'Email' },
+      { key: 'city',       label: 'City' },
+      { key: 'created_at', label: 'Signed up' }
     ],
     async fetch({ db }) {
       const rows = await db.allAsync(`
-        SELECT user_id, login_name, first_name, last_name, email,
-               phone_number, created_at
-          FROM users
-         WHERE email_verified_at IS NULL
-         ORDER BY created_at DESC, user_id DESC`);
+        SELECT u.user_id, u.first_name, u.last_name, u.email, o.name AS org_name, o.ein, o.city, o.created_at
+          FROM organizations o JOIN users u ON u.user_id = o.user_id
+         WHERE o.verification_status = 'unverified'
+         ORDER BY o.created_at ASC, o.org_id ASC`);
       return rows.map(r => ({ ...r, full_name: composeFullName(r) }));
     }
   },
 
   'events-all': {
     label: 'Events',
-    description: 'Every event on the website, published or not, soonest first.',
+    description: 'Every event, published or draft, soonest first. Times are UTC as stored.',
     needsDb: true,
     columns: [
-      { key: 'event_id',     label: 'Event ID' },
-      { key: 'title',        label: 'Title' },
-      { key: 'starts_at',    label: 'Starts' },
-      { key: 'ends_at',      label: 'Ends' },
-      { key: 'location',     label: 'Location' },
-      { key: 'is_published', label: 'Published' },
-      { key: 'description',  label: 'Description' },
-      { key: 'created_at',   label: 'Created' },
-      { key: 'updated_at',   label: 'Updated' }
+      { key: 'event_id',         label: 'Event ID' },
+      { key: 'title',            label: 'Title' },
+      { key: 'slug',             label: 'Slug' },
+      { key: 'starts_at',        label: 'Starts (UTC)' },
+      { key: 'ends_at',          label: 'Ends (UTC)' },
+      { key: 'venue_name',       label: 'Venue' },
+      { key: 'city',             label: 'City' },
+      { key: 'is_published',     label: 'Published' },
+      { key: 'registration_url', label: 'Registration link' },
+      { key: 'beneficiaries',    label: 'Beneficiaries' },
+      { key: 'has_flyer',        label: 'Flyer' },
+      { key: 'summary',          label: 'Summary' },
+      { key: 'updated_at',       label: 'Updated' }
     ],
     async fetch({ db }) {
       const rows = await db.allAsync(`
-        SELECT event_id, title, description, location, starts_at, ends_at,
-               is_published, created_at, updated_at
+        SELECT event_id, title, slug, starts_at, ends_at, venue_name, city, is_published,
+               registration_url, flyer_path, summary, updated_at
           FROM events
          ORDER BY starts_at ASC, event_id ASC`);
-      return rows.map(r => ({ ...r, is_published: yesNo(r.is_published) }));
+      const bens = await db.allAsync('SELECT event_id, name, sort FROM event_beneficiaries ORDER BY event_id, sort');
+      const byEvent = new Map();
+      for (const b of bens) {
+        const k = Number(b.event_id);
+        if (!byEvent.has(k)) byEvent.set(k, []);
+        if (b.name) byEvent.get(k).push(b.name);
+      }
+      return rows.map(r => ({
+        ...r,
+        is_published: yesNo(r.is_published),
+        has_flyer: r.flyer_path ? 'yes' : 'no',
+        beneficiaries: (byEvent.get(Number(r.event_id)) || []).join('; ')
+      }));
+    }
+  },
+
+  'raffles-all': {
+    label: 'Raffles',
+    description: 'Every raffle with its status, ticket details, drawing and winning ticket.',
+    needsDb: true,
+    columns: [
+      { key: 'raffle_id',         label: 'Raffle ID' },
+      { key: 'title',             label: 'Title' },
+      { key: 'slug',              label: 'Slug' },
+      { key: 'status',            label: 'Status' },
+      { key: 'is_published',      label: 'Published' },
+      { key: 'ticket_price_text', label: 'Ticket price' },
+      { key: 'total_tickets',     label: 'Total tickets' },
+      { key: 'drawing_at',        label: 'Drawing (UTC)' },
+      { key: 'drawing_location',  label: 'Drawing location' },
+      { key: 'winning_ticket',    label: 'Winning ticket' },
+      { key: 'beneficiary',       label: 'Benefits' },
+      { key: 'claim_preset',      label: 'Claim preset' },
+      { key: 'photos',            label: 'Prize photos' },
+      { key: 'updated_at',        label: 'Updated' }
+    ],
+    async fetch({ db }) {
+      const rows = await db.allAsync(`
+        SELECT r.raffle_id, r.title, r.slug, r.status, r.is_published, r.ticket_price_text, r.total_tickets,
+               r.drawing_at, r.drawing_location, r.winning_ticket, r.beneficiary_text, r.claim_preset, r.updated_at,
+               o.name AS org_name
+          FROM raffles r LEFT JOIN organizations o ON o.org_id = r.beneficiary_org_id
+         ORDER BY r.raffle_id DESC`);
+      const counts = await db.allAsync('SELECT raffle_id, COUNT(*) AS c FROM raffle_images GROUP BY raffle_id');
+      const n = new Map(counts.map(c => [Number(c.raffle_id), Number(c.c)]));
+      return rows.map(r => ({
+        ...r,
+        is_published: yesNo(r.is_published),
+        beneficiary: [r.org_name, r.beneficiary_text].filter(Boolean).join(' — '),
+        photos: n.get(Number(r.raffle_id)) || 0
+      }));
     }
   },
 
   'login-lockouts': {
     label: 'Login lockouts',
-    description: 'Every lockout row (member accounts and IP addresses) with failure counts and whether the lock is still in force.',
+    description: 'Every lockout row (nonprofit logins and IP addresses) with failure counts and whether the lock is still in force.',
     needsDb: true,
     columns: [
       { key: 'id',             label: 'ID' },

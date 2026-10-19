@@ -9,7 +9,8 @@
 //   3. Web App website — the REMOTE HTML fragments (what the Web App Website
 //      page edits), over the same transport.
 //   4. Web App DATABASE — mmoa_web_app.db (or the MySQL database) itself:
-//      member accounts, tokens, lockouts, events. Read/written through the
+//      nonprofit accounts + profiles, events, raffles, board, categories,
+//      cities, tokens, lockouts — every table the live schema has. Read/written through the
 //      admin console's OWN db handle, so it works for whichever engine is
 //      configured (SQLite local / remote, or MySQL). Exported as a portable,
 //      engine-neutral JSON table dump.
@@ -40,19 +41,24 @@ const WA_SECTION_KEYS = WA_SECTIONS.map(s => s.key);
 const WA_WEBSITE_LABELS = WA_SECTIONS.reduce((m, s) => { m[s.key] = s.label; return m; }, {});
 
 // ── Web App rebuild bundles ───────────────────────────────────────────
-// One .json file = config + website (HTML sections, windows.json, images) +
+// One .json file = config + website (HTML sections, images) + uploads
+// (uploads/** — event flyers, raffle and nonprofit photos, board photos) +
 // database, so a rebuilt Web App comes back in ONE restore instead of
-// three. Bundles live on this console's disk (backups/, gitignored) so
+// several. Bundles live on this console's disk (backups/, gitignored) so
 // Restore can pick from a list and no browser upload limit fights the
 // images; download is offered too. Over SSM a single file read is capped at
-// ~24 KB, so an image that can't be captured is listed in skippedImages and
-// surfaced as a warning rather than silently dropped.
+// ~24 KB, so an image or upload that can't be captured is listed in
+// skippedImages / uploads.skipped and surfaced as a warning rather than
+// silently dropped (restores write through writeFileChunked, so size is no
+// problem in that direction). Bundles made before v2 may carry
+// website.windows (the dropped HTML/windows.json); it is ignored.
 const BUNDLE_DIR = path.join(__dirname, '..', 'backups');
 const BUNDLE_TYPE = 'web-app-bundle';
 const BUNDLE_NAME_RE = /^[A-Za-z0-9._-]+\.json$/;
 const IMAGE_EXT = /\.(png|jpe?g|gif|webp|svg)$/i;
-const WINDOWS_REL_PATH = 'HTML/windows.json';
 const IMAGES_REL_DIR = 'HTML/images';
+const UPLOADS_REL_DIR = 'uploads';
+const uploadsHelper = require('../helpers/webAppUploads');
 const RESTORE_CONFIRM = 'RESTORE';
 const MAINT_TITLE = 'Scheduled maintenance';
 const MAINT_MESSAGE = 'We are performing maintenance and will be back shortly.';
@@ -93,14 +99,14 @@ const SETTINGS_LABELS = {
   port: 'Port', appTitle: 'App title', appSubtitle: 'App subtitle', publicBaseUrl: 'Public base URL',
   server: 'Server / TLS', sessionKeyMode: 'Session key mode', sessionMaxAgeHours: 'Session max age',
   passwordMinLength: 'Password min length', database: 'Database', security: 'Security',
-  theme: 'Appearance (theme)', webApp: 'Web App access'
+  theme: 'Appearance (theme)', webApp: 'Web App access', timeZone: 'Event time zone'
 };
 const WA_CONFIG_LABELS = {
   port: 'Port', appTitle: 'App title', appSubtitle: 'App subtitle', orgName: 'Organization name',
   publicBaseUrl: 'Public base URL', server: 'Server / TLS', email: 'Email',
   sessionKeyMode: 'Session key mode', sessionKeys: 'Session keys', sessionMaxAgeHours: 'Session max age',
   passwordMinLength: 'Password min length', passwordResetTokenTtlHours: 'Password reset token TTL',
-  allowMemberRegistration: 'Allow member registration', maintenanceCommand: 'Maintenance command',
+  allowMemberRegistration: 'Allow nonprofit sign-ups', site: 'Public site info (phone / EIN / Facebook)', uploads: 'Uploads', maintenanceCommand: 'Maintenance command',
   database: 'Database', security: 'Security', aws: 'AWS (SES credentials)'
 };
 
@@ -120,7 +126,7 @@ function normalizeArray(v) {
 const BACKUP_KEYS = [
   'port', 'appTitle', 'appSubtitle', 'publicBaseUrl',
   'server', 'sessionKeyMode', 'sessionMaxAgeHours', 'passwordMinLength',
-  'database', 'security', 'theme', 'webApp'
+  'database', 'security', 'theme', 'webApp', 'timeZone'
 ];
 
 function stripForExport(value) {
@@ -344,12 +350,12 @@ function databaseRestoreForm(action, engine) {
         r.readAsText(f);
       }
     }">
-    <div class="flash-error text-xs"><strong>Danger:</strong> this REPLACES the entire <code class="font-mono">${escapeHtml(engine)}</code> database — every member account, token, lockout, and event — with the uploaded file. Existing data is deleted. Stop the Web App (or enable Maintenance Mode) before restoring.</div>
+    <div class="flash-error text-xs"><strong>Danger:</strong> this REPLACES the entire <code class="font-mono">${escapeHtml(engine)}</code> database — every nonprofit account and profile, event, raffle, board role, category, city, token and lockout — with the uploaded file. Image files under uploads/ are not touched (they are in a rebuild bundle, not here). Existing data is deleted. Stop the Web App (or enable Maintenance Mode) before restoring.</div>
     <div>
       <label class="label">Database backup file (.json)</label>
       <input class="${FILE_INPUT_CLS}" type="file" name="backup" accept="application/json,.json" required x-on:change="onFile(\$event)">
       <p class="mt-2 text-xs text-slate-500" x-show="fileName" x-cloak>Selected: <span class="font-mono" x-text="fileName"></span></p>
-      <p class="mt-2 text-xs text-slate-500" x-show="ok && meta" x-cloak>Backup engine: <span class="font-mono" x-text="meta.engine || 'unknown'"></span> · <span x-text="meta.tableCount ?? '?'"></span> tables · <span x-text="meta.rowCount ?? '?'"></span> rows</p>
+      <p class="mt-2 text-xs text-slate-500" x-show="ok && meta" x-cloak>Backup engine: <span class="font-mono" x-text="(meta && meta.engine) || 'unknown'"></span> · <span x-text="(meta && meta.tableCount) ?? '?'"></span> tables · <span x-text="(meta && meta.rowCount) ?? '?'"></span> rows</p>
       <p class="mt-2 text-xs text-red-600 dark:text-red-400" x-show="parseError" x-cloak x-text="parseError"></p>
     </div>
     <div x-show="ok" x-cloak>
@@ -488,6 +494,8 @@ module.exports = function (db, appConfig, appConfigModule) {
     if (!sections.length) problems.push('website: no HTML sections');
     else if (missingSections.length) warnings.push(`website: ${missingSections.length} section(s) not in the bundle (${missingSections.join(', ')}) — those files stay as they are on the host`);
     const images = (web.images && typeof web.images === 'object') ? Object.keys(web.images) : [];
+    const up = (j && j.uploads) || {};
+    const uploadFiles = (up.files && typeof up.files === 'object') ? Object.keys(up.files).filter(uploadsHelper.isValidRel) : [];
     const dbm = (j && j.database) || {};
     const tables = (dbm.tables && typeof dbm.tables === 'object' && !Array.isArray(dbm.tables)) ? Object.keys(dbm.tables) : [];
     if (!tables.length) problems.push('database: no tables');
@@ -497,8 +505,9 @@ module.exports = function (db, appConfig, appConfigModule) {
       exportedAt: meta.exportedAt || null, exportedFrom: meta.exportedFrom || null, via: meta.via || null,
       engine: (dbm._meta && dbm._meta.engine) || meta.engine || null,
       configKeys: cfgOk ? Object.keys(cfg).filter(k => !k.startsWith('_')).length : 0,
-      sections: sections.length, windows: !!(web.windows && typeof web.windows === 'object'),
+      sections: sections.length,
       images: images.length, skippedImages: Array.isArray(web.skippedImages) ? web.skippedImages : [],
+      uploads: uploadFiles.length, skippedUploads: Array.isArray(up.skipped) ? up.skipped : [],
       tables: tables.length, rows,
       warnings
     };
@@ -525,7 +534,7 @@ module.exports = function (db, appConfig, appConfigModule) {
     return { name: n, path: p, bundle: JSON.parse(fs.readFileSync(p, 'utf8')) };
   }
 
-  // Capture everything: config + website (sections, windows.json, images) via
+  // Capture everything: config + website (sections, images) + uploads/** via
   // the transport, database via this console's own handle.
   async function buildBundle(progress = () => {}) {
     if (!db || !db.available) throw new Error('Database is not available (Settings → Web App).');
@@ -535,12 +544,12 @@ module.exports = function (db, appConfig, appConfigModule) {
     progress('Configuration', 'in_progress', 'reading config.json');
     const { json: config } = await waConfig.readRemoteConfig(accessor);
     progress('Configuration', 'ok', `${Object.keys(config).filter(k => !k.startsWith('_')).length} top-level keys`);
-    progress('Website', 'in_progress', 'HTML sections + windows.json');
+    progress('Website', 'in_progress', 'HTML sections');
 
     const fragPaths = WA_SECTION_KEYS.map(k => waConfig.joinPath(accessor.appPath, 'HTML/' + k + '.html'));
-    const winPath = waConfig.joinPath(accessor.appPath, WINDOWS_REL_PATH);
     const imgDir = waConfig.joinPath(accessor.appPath, IMAGES_REL_DIR);
-    const b = await accessor.readBundle({ files: [...fragPaths, winPath], dirs: [imgDir] }, { encoding: 'utf8' });
+    const upDirs = uploadsHelper.KINDS.map(k => waConfig.joinPath(accessor.appPath, UPLOADS_REL_DIR + '/' + k));
+    const b = await accessor.readBundle({ files: fragPaths, dirs: [imgDir, ...upDirs] }, { encoding: 'utf8' });
 
     const sections = {};
     WA_SECTION_KEYS.forEach((k, i) => {
@@ -548,12 +557,7 @@ module.exports = function (db, appConfig, appConfigModule) {
       if (f && typeof f.content === 'string' && !f.err) sections[k] = f.content;
       else warnings.push(`website section "${k}" not captured${f && f.err ? ': ' + f.err : ' (missing on the host)'}`);
     });
-    let windows = null;
-    const w = b.files[winPath];
-    if (w && typeof w.content === 'string' && !w.err) {
-      try { windows = JSON.parse(w.content); } catch (e) { warnings.push('HTML/windows.json is not valid JSON — not captured'); }
-    }
-    progress('Website', 'ok', `${Object.keys(sections).length} sections${windows ? ' + windows.json' : ''}`);
+    progress('Website', 'ok', `${Object.keys(sections).length} sections`);
     const images = {}, skippedImages = [];
     const names = ((b.dirs[imgDir] || {}).names || []).filter(n => IMAGE_EXT.test(n)).sort();
     progress('Images', 'in_progress', `${names.length} to capture`);
@@ -568,6 +572,29 @@ module.exports = function (db, appConfig, appConfigModule) {
     }
 
     progress('Images', skippedImages.length ? 'warn' : 'ok', `${Object.keys(images).length} captured${skippedImages.length ? `, ${skippedImages.length} skipped` : ''}`);
+
+    // uploads/<kind>/<random>.<ext> — only names matching the uploads
+    // contract are captured (stray temp files are not).
+    const upNames = [];
+    uploadsHelper.KINDS.forEach((k, i) => {
+      for (const n of ((b.dirs[upDirs[i]] || {}).names || [])) {
+        const rel = `${k}/${n}`;
+        if (uploadsHelper.isValidRel(rel)) upNames.push(rel);
+      }
+    });
+    upNames.sort();
+    progress('Uploads', 'in_progress', `${upNames.length} to capture`);
+    const upFiles = {}, skippedUploads = [];
+    for (const rel of upNames) {
+      try {
+        const buf = await accessor.readFile(waConfig.joinPath(accessor.appPath, UPLOADS_REL_DIR + '/' + rel));
+        upFiles[rel] = Buffer.from(buf).toString('base64');
+      } catch (e) {
+        skippedUploads.push(rel);
+        warnings.push(`upload "${rel}" skipped: ${e.message || e}`);
+      }
+    }
+    progress('Uploads', skippedUploads.length ? 'warn' : 'ok', `${Object.keys(upFiles).length} captured${skippedUploads.length ? `, ${skippedUploads.length} skipped` : ''}`);
     progress('Database', 'in_progress', 'dumping every table');
     const database = await buildDatabaseBackup();
     progress('Database', 'ok', `${database._meta.tableCount} tables / ${database._meta.rowCount} rows`);
@@ -578,7 +605,8 @@ module.exports = function (db, appConfig, appConfigModule) {
         via: accessor.describe(), engine: db.engine, warnings
       },
       config,
-      website: { sections, windows, images, skippedImages },
+      website: { sections, images, skippedImages },
+      uploads: { files: upFiles, skipped: skippedUploads },
       database
     };
   }
@@ -613,6 +641,11 @@ module.exports = function (db, appConfig, appConfigModule) {
       const r = await accessor.runCommand(`mkdir -p -- ${shq(dir)} && test -w ${shq(dir)} && echo __WA_W__`, { timeoutMs: 20000 });
       add('Write to HTML/images', /__WA_W__/.test(r.stdout || ''), r.stderr || '');
     } catch (e) { add('Write to HTML/images', false, e.message || String(e)); }
+    try {
+      const dir = waConfig.joinPath(accessor.appPath, UPLOADS_REL_DIR);
+      const r = await accessor.runCommand(`mkdir -p -- ${shq(dir)} && test -w ${shq(dir)} && echo __WA_W__`, { timeoutMs: 20000 });
+      add('Write to uploads/', /__WA_W__/.test(r.stdout || ''), r.stderr || '');
+    } catch (e) { add('Write to uploads/', false, e.message || String(e)); }
     add('Database available', !!(db && db.available), db ? `${db.engine || ''}${db.statusMessage ? ' — ' + db.statusMessage : ''}`.trim() : 'no database handle');
     return { ok: checks.every(c => c.ok), checks };
   }
@@ -632,7 +665,7 @@ module.exports = function (db, appConfig, appConfigModule) {
     await waConfig.writeRemoteConfig(accessor, json);
     steps.push({ step: 'Configuration', ok: true, detail: `${nKeys} top-level keys written to config.json` });
     progress('Configuration', 'ok', `${nKeys} top-level keys`);
-    progress('Website', 'in_progress', 'HTML sections, windows.json, images');
+    progress('Website', 'in_progress', 'HTML sections, images');
 
     const web = bundle.website || {};
     const secs = (web.sections && typeof web.sections === 'object') ? web.sections : {};
@@ -642,22 +675,29 @@ module.exports = function (db, appConfig, appConfigModule) {
       await accessor.writeFile(waConfig.joinPath(accessor.appPath, 'HTML/' + k + '.html'), secs[k]);
       nSec++;
     }
-    let winNote = '';
-    if (web.windows && typeof web.windows === 'object' && !Array.isArray(web.windows)) {
-      await accessor.writeFile(waConfig.joinPath(accessor.appPath, WINDOWS_REL_PATH), JSON.stringify(web.windows, null, 2) + '\n');
-      winNote = ', windows.json';
-    }
     const imgDir = waConfig.joinPath(accessor.appPath, IMAGES_REL_DIR);
     const imgNames = (web.images && typeof web.images === 'object')
       ? Object.keys(web.images).filter(x => IMAGE_EXT.test(x) && /^[A-Za-z0-9._-]+$/.test(x)) : [];
-    if (imgNames.length) await accessor.runCommand(`mkdir -p -- ${shq(imgDir)}`, { timeoutMs: 20000 });
     let nImg = 0;
     for (const x of imgNames) {
-      await accessor.writeFile(waConfig.joinPath(imgDir, x), Buffer.from(String(web.images[x]), 'base64'));
+      // Chunked: mkdir -p + atomic write, ≤40 KB SSM pieces on EC2.
+      await accessor.writeFileChunked(waConfig.joinPath(imgDir, x), Buffer.from(String(web.images[x]), 'base64'));
       nImg++;
     }
-    steps.push({ step: 'Website', ok: true, detail: `${nSec} HTML sections${winNote}, ${nImg} images` });
-    progress('Website', 'ok', `${nSec} sections${winNote}, ${nImg} images`);
+    steps.push({ step: 'Website', ok: true, detail: `${nSec} HTML sections, ${nImg} images` });
+    progress('Website', 'ok', `${nSec} sections, ${nImg} images`);
+
+    // uploads/** — same chunked transport; only contract-shaped paths.
+    const up = (bundle.uploads && bundle.uploads.files && typeof bundle.uploads.files === 'object') ? bundle.uploads.files : {};
+    const upRels = Object.keys(up).filter(uploadsHelper.isValidRel);
+    progress('Uploads', 'in_progress', `${upRels.length} files`);
+    let nUp = 0;
+    for (const rel of upRels) {
+      await accessor.writeFileChunked(waConfig.joinPath(accessor.appPath, UPLOADS_REL_DIR + '/' + rel), Buffer.from(String(up[rel]), 'base64'));
+      nUp++;
+    }
+    steps.push({ step: 'Uploads', ok: true, detail: `${nUp} files written to uploads/` });
+    progress('Uploads', 'ok', `${nUp} files`);
 
     const tables = (bundle.database && bundle.database.tables && typeof bundle.database.tables === 'object') ? bundle.database.tables : null;
     if (!tables) throw new Error('The bundle has no database tables.');
@@ -687,7 +727,7 @@ module.exports = function (db, appConfig, appConfigModule) {
         <td class="py-2 pr-3 font-mono text-xs break-all">${escapeHtml(b.name)}</td>
         <td class="py-2 pr-3 whitespace-nowrap text-slate-500">${escapeHtml(b.mtime.replace('T', ' ').slice(0, 16))}</td>
         <td class="py-2 pr-3 whitespace-nowrap text-slate-500">${fmtBytes(b.size)}</td>
-        <td class="py-2 pr-3 text-xs text-slate-600 dark:text-slate-300">${s.valid ? `${s.configKeys} config keys · ${s.sections} sections${s.windows ? ' · windows' : ''} · ${s.images} images${s.skippedImages && s.skippedImages.length ? ` (${s.skippedImages.length} skipped)` : ''} · ${s.tables} tables / ${s.rows} rows` : escapeHtml((s.problems || []).join('; '))}</td>
+        <td class="py-2 pr-3 text-xs text-slate-600 dark:text-slate-300">${s.valid ? `${s.configKeys} config keys · ${s.sections} sections · ${s.images} images${s.skippedImages && s.skippedImages.length ? ` (${s.skippedImages.length} skipped)` : ''} · ${s.uploads || 0} uploads${s.skippedUploads && s.skippedUploads.length ? ` (${s.skippedUploads.length} skipped)` : ''} · ${s.tables} tables / ${s.rows} rows` : escapeHtml((s.problems || []).join('; '))}</td>
         <td class="py-2">${badge}${warn}</td>
         <td class="py-2 text-right whitespace-nowrap">
           <a class="btn-secondary text-xs px-2 py-1" href="/backup-restore/bundle/download/${encodeURIComponent(b.name)}" download>Download</a>
@@ -775,7 +815,7 @@ module.exports = function (db, appConfig, appConfigModule) {
             this.stopWatch(); await this.pollOnce();
             if (!r.ok) { this.say('err', 'Backup failed: ' + (r.error || 'unknown error')); await this.offerDisableMaintenance('The backup FAILED.'); return; }
             const s = r.summary || {};
-            this.say('ok', 'Saved ' + r.name + ' — ' + s.configKeys + ' config keys, ' + s.sections + ' sections, ' + s.images + ' images, ' + s.tables + ' tables / ' + s.rows + ' rows.');
+            this.say('ok', 'Saved ' + r.name + ' — ' + s.configKeys + ' config keys, ' + s.sections + ' sections, ' + s.images + ' images, ' + (s.uploads || 0) + ' uploads, ' + s.tables + ' tables / ' + s.rows + ' rows.');
             (s.warnings || []).forEach(w => this.say('warn', w));
             await this.offerDisableMaintenance('The backup finished.');
             this.say('info', 'Reloading the bundle list…');
@@ -798,7 +838,7 @@ module.exports = function (db, appConfig, appConfigModule) {
             const r = await this.post('/backup-restore/bundle/verify', { name: this.selected });
             if (!r.ok) { this.say('err', r.error || 'Verify failed'); return; }
             const s = r.summary;
-            this.say(s.valid ? 'ok' : 'err', (s.valid ? 'Bundle is complete: ' : 'Bundle has problems: ') + (s.valid ? (s.configKeys + ' config keys, ' + s.sections + ' HTML sections' + (s.windows ? ' + windows.json' : '') + ', ' + s.images + ' images, ' + s.tables + ' tables / ' + s.rows + ' rows (' + (s.engine || '?') + ')') : s.problems.join('; ')));
+            this.say(s.valid ? 'ok' : 'err', (s.valid ? 'Bundle is complete: ' : 'Bundle has problems: ') + (s.valid ? (s.configKeys + ' config keys, ' + s.sections + ' HTML sections, ' + s.images + ' images, ' + (s.uploads || 0) + ' uploads, ' + s.tables + ' tables / ' + s.rows + ' rows (' + (s.engine || '?') + ')') : s.problems.join('; ')));
             (s.warnings || []).forEach(w => this.say('warn', w));
           } finally { this.busy = ''; }
         },
@@ -818,7 +858,7 @@ module.exports = function (db, appConfig, appConfigModule) {
             this.say('ok', 'Bundle verified.');
             const go = await window.uiConfirm('Restore ' + this.selected + ' now? This REPLACES the Web App configuration, website files and the ENTIRE database.', { title: 'Restore the Web App?', confirmLabel: 'Restore now', cancelLabel: 'Cancel' });
             if (!go) { this.say('info', 'Restore canceled.'); await this.offerDisableMaintenance('The restore was canceled.'); return; }
-            this.say('info', 'Step 4/4 — restoring (configuration → website → database)…');
+            this.say('info', 'Step 4/4 — restoring (configuration → website → uploads → database)…');
             this.sw.op = null; this.startWatch();
             const r = await this.post('/backup-restore/bundle/restore', { name: this.selected, confirm: this.confirmText.trim() });
             this.stopWatch(); await this.pollOnce();
@@ -838,8 +878,8 @@ module.exports = function (db, appConfig, appConfigModule) {
       <div class="grid lg:grid-cols-2 gap-6">
         <section>
           <h3 class="text-base font-semibold text-slate-900 dark:text-slate-100">Web App Full Backup</h3>
-          <p class="mt-1 text-sm text-slate-500 dark:text-slate-400">One click captures the configuration, the website (HTML sections, window styling, images) and the whole database into a single bundle on this console.</p>
-          <div class="mt-3 text-xs text-amber-600 dark:text-amber-400"><strong>Sensitive:</strong> a bundle holds the Web App's secrets (SMTP / AWS credentials, session keys) and member password hashes. Treat it like the database.</div>
+          <p class="mt-1 text-sm text-slate-500 dark:text-slate-400">One click captures the configuration, the website (HTML sections, images), every uploaded image (uploads/ — flyers, prize, nonprofit and board photos) and the whole database into a single bundle on this console. Over EC2 (SSM) files larger than ~18 KB can't be read and are listed as warnings — use SSH or Local access for a complete bundle.</p>
+          <div class="mt-3 text-xs text-amber-600 dark:text-amber-400"><strong>Sensitive:</strong> a bundle holds the Web App's secrets (SMTP / AWS credentials, session keys) and nonprofit password hashes. Treat it like the database.</div>
           <div class="mt-4">
             <button type="button" class="btn-primary" x-on:click="fullBackup()" :disabled="!!busy" :class="busy ? 'opacity-50 cursor-not-allowed' : ''">
               <span x-show="busy !== 'backup'">Web App Full Backup</span><span x-show="busy === 'backup'">Backing up…</span>
@@ -848,7 +888,7 @@ module.exports = function (db, appConfig, appConfigModule) {
         </section>
         <section>
           <h3 class="text-base font-semibold text-slate-900 dark:text-slate-100">Web App Full Restore</h3>
-          <p class="mt-1 text-sm text-slate-500 dark:text-slate-400">After the Web App is redeployed: point <a class="text-brand-600 hover:underline" href="/settings/web-app">Settings → Web App</a> at the new instance, select a bundle below, then run the guided restore — it tests access, offers Maintenance Mode, verifies the bundle, restores configuration → website → database, and finishes with the Web App restart the new config needs.</p>
+          <p class="mt-1 text-sm text-slate-500 dark:text-slate-400">After the Web App is redeployed: point <a class="text-brand-600 hover:underline" href="/settings/web-app">Settings → Web App</a> at the new instance, select a bundle below, then run the guided restore — it tests access, offers Maintenance Mode, verifies the bundle, restores configuration → website → uploads → database, and finishes with the Web App restart the new config needs.</p>
           ${dbReady ? '' : `<div class="mt-3 flash-error text-xs">Database is not available — the restore can't run until <a class="underline" href="/settings/web-app">Settings → Web App</a> reaches it.</div>`}
           <div class="mt-4 flex flex-wrap items-center gap-2">
             <button type="button" class="btn-secondary" x-on:click="testAccess()" :disabled="!!busy">Test access to the Web App</button>
@@ -1030,12 +1070,12 @@ module.exports = function (db, appConfig, appConfigModule) {
 
     // ── Group 3: Web App website (remote HTML fragments) ──
     const waWebsiteGroup = `
-      ${groupHeading('Web App website', 'The Web App landing-page HTML section files (what Web App Website edits).')}
+      ${groupHeading('Web App website', 'The website copy HTML section files — hero, about, help, partner, footer (what Web App Website edits).')}
       ${!waReady ? notConfiguredCard() : `
       <div class="grid lg:grid-cols-2 gap-6">
         <section class="card surface-target card-pad">
           <h3 class="text-base font-semibold text-slate-900 dark:text-slate-100">Backup</h3>
-          <p class="mt-1 text-sm text-slate-500 dark:text-slate-400">Download all ${WA_SECTION_KEYS.length} landing-page HTML sections in one JSON file. (Images are not included.)</p>
+          <p class="mt-1 text-sm text-slate-500 dark:text-slate-400">Download all ${WA_SECTION_KEYS.length} website HTML sections in one JSON file. (Images are not included.)</p>
           ${downloadBtn('/backup-restore/web-app-website/export')}
         </section>
         <section class="card surface-target card-pad">
@@ -1054,7 +1094,7 @@ module.exports = function (db, appConfig, appConfigModule) {
     const dbReady = !!(db && db.available);
     const dbEngine = (db && db.engine) || 'none';
     const dbGroup = `
-      ${groupHeading('Web App database', 'The Web App database itself — member accounts, tokens, lockouts, and events. This is the one store with no other copy.')}
+      ${groupHeading('Web App database', 'The Web App database itself — nonprofit accounts and profiles, events, raffles, board, categories and cities, tokens and lockouts. This is the one store with no other copy. (Uploaded images live in uploads/ — use a rebuild bundle to capture them too.)')}
       ${!dbReady ? `<div class="card surface-target card-pad text-sm text-slate-500 dark:text-slate-400">
         Database is not available (engine: <code class="font-mono">${escapeHtml(dbEngine)}</code>). Check <a class="text-brand-600 hover:underline" href="/settings/web-app">Settings → Web App</a>.
       </div>` : `
@@ -1062,7 +1102,7 @@ module.exports = function (db, appConfig, appConfigModule) {
         <section class="card surface-target card-pad">
           <h3 class="text-base font-semibold text-slate-900 dark:text-slate-100">Backup</h3>
           <p class="mt-1 text-sm text-slate-500 dark:text-slate-400">Download a full snapshot of the <code class="font-mono">${escapeHtml(dbEngine)}</code> database as JSON — every table, all rows. The format is engine-neutral, so a SQLite backup can be restored into MySQL and vice-versa.</p>
-          <div class="mt-3 text-xs text-amber-600 dark:text-amber-400"><strong>Sensitive:</strong> includes member bcrypt password hashes. Store securely.</div>
+          <div class="mt-3 text-xs text-amber-600 dark:text-amber-400"><strong>Sensitive:</strong> includes nonprofit bcrypt password hashes. Store securely.</div>
           ${downloadBtn('/backup-restore/database/export')}
         </section>
         <section class="card surface-target card-pad">
@@ -1074,7 +1114,7 @@ module.exports = function (db, appConfig, appConfigModule) {
 
     // ── Group 0: Web App rebuild (one bundle for everything) ──
     const rebuildGroup = `
-      ${groupHeading('Web App rebuild', 'One bundle — configuration + website (HTML sections, window styling, images) + database — so a rebuilt Web App comes back in a single restore instead of three. Bundles are kept in <code class="font-mono">backups/</code> on this console and can be downloaded.')}
+      ${groupHeading('Web App rebuild', 'One bundle — configuration + website (HTML sections, images) + uploads + database — so a rebuilt Web App comes back in a single restore instead of three. Bundles are kept in <code class="font-mono">backups/</code> on this console and can be downloaded.')}
       ${!waReady ? notConfiguredCard() : rebuildCard(listBundles(), dbReady)}`;
 
     const body = `

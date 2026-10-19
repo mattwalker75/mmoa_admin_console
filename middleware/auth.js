@@ -1,7 +1,7 @@
 // middleware/auth.js — admin-only auth gates + password helpers.
 //
 // The admin console only serves its own operators (local_admins.json — see
-// routes/public.js). Members in the web app's `users` table can NOT sign
+// routes/public.js). Nonprofit accounts in the web app's `users` table can NOT sign
 // in here; every page is gated by
 // requireAdmin, which only accepts the session written by the local login.
 

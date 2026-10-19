@@ -47,7 +47,7 @@ The local file design is a **break-glass capability**: even with the
 DB unreachable, an operator can log in, navigate the UI, fix the
 connection from Settings → Web App (Database section), and resume.
 
-The `users` table in the web app's DB holds member accounts (there are
+The `users` table in the web app's DB holds nonprofit accounts (there are
 no roles), not operators of this console. They cannot sign in here. See
 [routes/public.js](../routes/public.js) — the login lookup is always
 `localAdmins.findByUsername(...)`, never a DB query.
@@ -248,7 +248,7 @@ otherwise damaging the file would let anyone mint a fresh admin. The file
 is also written atomically (temp + rename, created `0600`) so a crash
 mid-write can't truncate it into that corrupt state in the first place.
 
-## Data Browser and Members write safety
+## Data Browser and Nonprofits write safety
 
 The console writes the web app's database directly, so these pages carry
 their own guard rails (details at the top of
@@ -268,7 +268,7 @@ their own guard rails (details at the top of
   a quoted SQL literal (quote-aware placeholder substitution).
 - **Hash columns are read-only.** Any column named `*password_hash*` or
   `*_hash` is shown masked and can't be written from the Data Browser.
-  Member passwords are set from **Members → Reset password** (bcrypt cost
+  Nonprofit passwords are set from **Nonprofits → Reset password** (bcrypt cost
   10 — identical to the web app). A NOT NULL hash column on an inserted
   row gets the sentinel `no_login`, which is not a bcrypt hash and so can
   never authenticate.
@@ -276,8 +276,24 @@ their own guard rails (details at the top of
   primary key are read-only.
 - **Every delete goes through `uiConfirm`.**
 
-Member creation pre-checks login name
+Nonprofits → Edit account pre-checks login name
 (case-insensitive) and email uniqueness.
+
+## Uploads, Markdown and outbound calls
+
+- **Uploads** are accepted only as JPEG / PNG / WebP **by magic bytes**
+  (the browser's type and filename are ignored), at most 8 MB, stored
+  under a random 16-hex name the console chooses. Every path that reaches
+  a shell command or the filesystem is re-validated against
+  `^(events|raffles|orgs|board)/[0-9a-f]{16}\.(jpg|png|webp)$` and
+  single-quoted, so a hand-edited DB row can't point `rm -f` elsewhere.
+- **Markdown-lite** previews use a verbatim copy of the web app's
+  renderer, which HTML-escapes the whole input first and only allows
+  http / https / mailto links — the preview pane's `x-html` only ever
+  receives that output.
+- **ProPublica lookup** is a server-side GET to
+  `projects.propublica.org` with only the 9 EIN digits in the URL and a
+  10 s timeout; the response is reduced to a few display fields.
 
 ## File permissions in production
 
@@ -287,7 +303,7 @@ Sensitive files on disk:
 | -------------------- | ------------------------------------------- | ---------------- |
 | `local_admins.json`  | bcrypt hashes                               | `0600` (auto-set on every write) |
 | `config.json`        | session keys (if `fixed`), Web App SSH private key / EC2 access keys, MySQL password | `0600` |
-| `backups/*.json`     | web app rebuild bundles: its config.json secrets + member password hashes | `0600` |
+| `backups/*.json`     | web app rebuild bundles: its config.json secrets + nonprofit password hashes + uploaded images | `0600` |
 | `public/images/*`    | uploaded background images                  | default |
 
 ```bash
@@ -304,7 +320,8 @@ or modifies AWS resources.
 Things this console deliberately does *not* implement, because they
 belong in `mmoa_web_app`:
 
-- **Member self-service** (signup, login, verify email, forgot password).
+- **Nonprofit self-service** (signup, login, verify email, forgot password,
+  editing their own directory profile and photos).
 - **Email sending** (verification, password reset).
 - **SSO / OAuth.**
 - **Multi-factor auth.** This is left as a future enhancement —

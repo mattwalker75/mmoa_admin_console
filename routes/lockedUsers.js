@@ -4,7 +4,7 @@
 //   POST /locked-users/:id/unlock → DELETE the row, clearing the lockout
 //
 // The web app's login flow (mmoa_web_app middleware/loginLockout.js) records
-// a row in `login_lockouts` per scope (a member account or a source IP). After
+// a row in `login_lockouts` per scope (a nonprofit login or a source IP). After
 // security.loginLockout.maxFailures failed attempts (default 10) the scope is
 // locked for lockoutSeconds (default 300) via `locked_until_ms` (epoch ms). A row is "currently locked" when
 // locked_until_ms > now; once that timestamp passes the lock has lapsed on its
@@ -37,7 +37,7 @@ async function safeAll(db, sql, params) {
 function scopeLabel(scope) {
   const s = String(scope || '').toLowerCase();
   if (s === 'ip') return 'IP address';
-  if (s === 'user' || s === 'account') return 'Member account';
+  if (s === 'user' || s === 'account') return 'Nonprofit login';
   return scope || '—';
 }
 
@@ -131,7 +131,7 @@ module.exports = function (db, appConfig) {
         <header class="flex items-start justify-between mb-6 gap-4">
           <div>
             <h1 class="text-2xl font-bold text-slate-900 dark:text-slate-100">Locked Users</h1>
-            <p class="mt-1 text-sm text-slate-500 dark:text-slate-400">Member accounts and IP addresses temporarily blocked from the web app's login after too many failed attempts (default 10 failures → 5-minute lockout; see Web App Settings → Security). Unlock clears the block immediately.</p>
+            <p class="mt-1 text-sm text-slate-500 dark:text-slate-400">Nonprofit logins and IP addresses temporarily blocked from the web app's login after too many failed attempts (default 10 failures → 5-minute lockout; see Web App Settings → Security). Unlock clears the block immediately.</p>
           </div>
           <div class="text-right shrink-0">
             <div class="text-2xl font-semibold text-slate-900 dark:text-slate-100" x-text="lockedCount"></div>

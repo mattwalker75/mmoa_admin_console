@@ -20,8 +20,13 @@ const defaults = {
   sessionMaxAgeHours: 8,
   passwordMinLength: 8,
 
-  // The console reads and writes the WEB APP's database (members, events,
-  // tokens, lockouts). How it is reached follows webApp.mode below: in local
+  // The zone event / raffle date-time fields are entered and shown in
+  // (helpers/localTime.js). The database stores UTC; Anna, Texas is Central
+  // time. Any IANA zone name works; an invalid one falls back to Chicago.
+  timeZone: 'America/Chicago',
+
+  // The console reads and writes the WEB APP's database (nonprofits, events,
+  // raffles, board, directory lists, tokens, lockouts). How it is reached follows webApp.mode below: in local
   // mode the SQLite file is opened directly; in ssh / ec2 mode SQLite queries
   // run ON the web-app host through the transport (db/remoteSqlite.js).
   // MySQL is always a direct connection from this console.
@@ -36,7 +41,7 @@ const defaults = {
     session: { secure: false, httpOnly: true, sameSite: 'strict' },
     password: {
       // Complexity rules applied at admin creation / password change time,
-      // and to member passwords set from the Members page. (Login itself
+      // and to nonprofit passwords set from the Nonprofits page. (Login itself
       // doesn't re-check rules — the bcrypt hash is the source of truth —
       // but new/changed passwords must satisfy these.)
       minLength: 8,

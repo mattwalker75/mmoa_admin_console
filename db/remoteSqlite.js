@@ -34,8 +34,8 @@
 //     migrations of its own.
 //   * Each statement is its own sqlite3 process, so connection-level
 //     PRAGMAs (foreign_keys) do not persist between calls: ON DELETE CASCADE
-//     is NOT enforced here. Callers that delete parent rows (Members →
-//     Delete) remove the child rows explicitly.
+//     is NOT enforced here. Callers that delete parent rows (Nonprofits
+//     → Delete, Events / Raffles → Delete) remove the child rows explicitly.
 
 const webAppAccess = require('../helpers/webAppAccess');
 

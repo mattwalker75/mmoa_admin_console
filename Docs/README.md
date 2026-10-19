@@ -17,8 +17,8 @@ and then come back to these pages for depth.
   Web App Settings page edits.
 - **[security.md](security.md)** — auth model (local-file admins,
   break-glass design), session cookies, password rules, brute-force
-  throttling, helmet/CSP, input limits, Data Browser / Members write
-  safety.
+  throttling, helmet/CSP, input limits, Data Browser / Nonprofits write
+  safety, uploads.
 - **[database.md](database.md)** — the dual-engine DB abstraction, remote
   SQLite, offline / "dead-DB" mode, the schema this app expects from
   `mmoa_web_app`, and how the Data Browser introspects it.

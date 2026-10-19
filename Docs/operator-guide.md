@@ -20,9 +20,10 @@ Your own name, email and password. Username can't be changed here.
 ## Dashboard
 
 At-a-glance counts. Tiles link to the page that explains them:
-members, verified / unverified / inactive accounts,
-events (all / published), and accounts / IPs currently locked out of the
-web app's login. A red banner means the database couldn't be reached.
+nonprofits verified / pending verification / rejected, upcoming published
+events, event drafts, open raffles, logins currently locked out, and
+console admins. Below them, the **Pending verification** list — each name
+opens that nonprofit. A red banner means the database couldn't be reached.
 
 ## Admins
 
@@ -30,44 +31,88 @@ Who can sign in to **this console**. Re-using a username replaces that
 admin's email / name / password. You can't remove yourself or the last
 admin.
 
-## Members
+## Events
 
-Every account in the web app.
+The website is where events live (Facebook posts just link to them).
 
-- **Search / filter** by name, email, login or phone; or show
-  only unverified / inactive accounts. Click a row for details.
-- **Create member** — every account is a member (there are no roles). Leave
-  "Email verified" ticked if you know the address is right (unverified
-  members can't sign in). Untick "Set a password" for a no-login account;
-  the member can use **Forgot password** on the website later.
-- **Modify member** — name, login, email, phone, active, verified.
-- **Mark verified / unverified** — quick toggle. Marking verified also
-  invalidates any outstanding verification link.
-- **Reset password** — sets a new password immediately (same bcrypt
-  hashing as the website) and invalidates outstanding reset links. Use
-  this when someone is locked out of their email.
-- **Delete member** — removes the account and its outstanding links.
-  Asks for confirmation; can't be undone (restore from a database backup
-  if needed).
+- **Upcoming / Past / Drafts** — upcoming means published and starting no
+  more than 12 hours ago (the website's rule). Drafts are not on the site.
+- **New event** — title, optional URL slug (made from the title; changing
+  it later breaks links already shared), summary (≤ 200 characters, shown
+  on cards), start / end in **Central time** (`timeZone` in this console's
+  config), description, venue / address / city, optional map link (blank =
+  the site builds a Google Maps search from the address), registration
+  link (a Stripe Payment Link or any https page) with its button label and
+  note, and **beneficiaries** — pick a directory organization (the site
+  links to its profile while it's verified and listed) or type a name and
+  link.
+- **Description** — Markdown-lite: blank line = paragraph, `**bold**`,
+  `*italic*`, `[text](https://…)`, lines starting `- ` for bullets. The
+  **Preview** beside the box uses the website's own renderer.
+- **Flyer / cover** — appear after the event is saved. Pick a photo; your
+  browser shrinks it to 1600 px and uploads it to the website's
+  `uploads/events/`. Replacing or removing one deletes the old file.
+- **Publish / Unpublish**, **View on site** (needs Public base URL under
+  Web App Settings → General) and **Delete** (also deletes the image files).
 
-The detail page also shows outstanding verification / reset links and
-whether the account is currently locked out.
+## Raffles
+
+Same pattern as events. Tickets are sold **in person only** (Texas law),
+so "How to buy" carries that wording and there is no payment link.
+
+- **Claim requirements** — one per line. **Firearm preset** / **Standard
+  preset** fill the box (you can still edit it).
+- **Status** — Draft → Open (selling) → Closed (sales ended) → Drawn
+  (enter the winning ticket number), one step at a time; each step can be
+  undone one step back. The website lists open, closed and drawn raffles
+  that are published, and shows the winning ticket only once drawn.
+- **Flyer** and up to **8 prize photos** (with alt text; ◀ ▶ to reorder).
+
+## Nonprofits
+
+Every organization with a login on the website ("Need Help?" directory).
+New sign-ups start **Pending verification** and are not in the public
+directory until a board member verifies them.
+
+- **Search / filter** by verification status, whether the organization
+  listed or hid its profile, and account state.
+- The detail page shows the **whole profile**, including fields the
+  organization marked hidden (each field is tagged public / hidden), its
+  contacts, categories, cities and photos (**Remove** takes down an
+  inappropriate photo and deletes the file).
+- **IRS / ProPublica lookup** runs automatically: the IRS name, city /
+  state, ruling date, NTEE code and 501(c) subsection for the EIN — or
+  "not found" (new organizations can take months to appear; use the IRS
+  Tax Exempt Organization Search link).
+- **Verify / Mark rejected / Reset to unverified**, with a private note.
+- Account actions: activate / deactivate the login, mark the email
+  verified, reset password, edit account, and **Delete** (removes the
+  account, the profile, its contacts / categories / cities / photo files;
+  events and raffles that named it keep the name without the link).
+
+## Categories & Cities
+
+The services and service areas organizations pick and visitors search by.
+Order here is the website's order (▲ ▼). **Deactivate** hides one from the
+website and the portal without touching organizations that already chose
+it; **Delete** is only offered when no organization uses it. Category
+slugs appear in links (`/need-help?category=food`) — avoid changing them.
+
+## Board
+
+The board roles on the About page, in order: role, description, the
+person holding it (blank = open) and their photo. Add or remove roles.
 
 ## Data Browser
 
-Direct access to every table — mainly for **events**, which have no
-dedicated page:
+Direct access to every table, for anything the pages above don't cover:
 
-- **Events:** Data Browser → `events` → **Insert row** to add one
-  (`title`, `starts_at` as `YYYY-MM-DD HH:MM:SS` in UTC, optional
-  `description`, `location`, `ends_at`; `is_published` 1 = shown on the
-  website). Open a row to edit or delete it. Changes show on the website
-  on the next page load.
 - Search matches text columns, or an id when you type a number. Click a
   column heading to sort.
-- Password hashes are masked and read-only — use Members → Reset password.
-- Edits bypass the website's own validation, so be careful with
-  `users` (prefer Members) and token tables.
+- Password hashes are masked and read-only — use Nonprofits → Reset
+  password.
+- Edits bypass the website's own validation and don't delete image files
+  — prefer the dedicated pages.
 
 ## Locked Users
 
@@ -78,25 +123,23 @@ Web App Settings → Security). **Unlock** clears the block immediately.
 
 ## Reports
 
-All members, unverified members, events, login lockouts and console
-admins. **View** opens the rows in-app; **Download CSV** saves them
+All nonprofits, nonprofits pending verification, events, raffles, login
+lockouts and console admins. **View** opens the rows in-app; **Download CSV** saves them
 (cells that look like spreadsheet formulas are neutralised).
 
 ## Web App Website
 
-Edit the public site's five sections — **Hero**, **Mission**, **Events
-heading** (the event cards come from the database), **Get involved**,
-**Footer**:
+Edit the website's fixed copy — **Home hero**, **About — our story**,
+**How you can help**, **Partner With Us** and **Footer**. Events, raffles,
+the board and the directory come from the database (their own pages).
 
-- Each card has **Window styling** (background, border, size, corner tag,
-  advanced CSS) and **Content** (the section's HTML). Save them
-  separately; changes are live on the next page load — no restart.
-  **Preview** shows the unsaved content in its window.
-- Keep the `{{tokens}}` (`{{appTitle}}`, `{{orgName}}`, `{{year}}`,
-  `{{eventCount}}`) — the website fills them in.
+- Each card holds that section's HTML. Saves are live on the next page
+  load — no restart. **Preview** shows the unsaved HTML on the site's dark
+  palette.
+- Keep the `{{tokens}}` (`{{appTitle}}`, `{{orgName}}`, `{{year}}`) — the
+  website fills them in.
 - **Images** — upload, then copy the `<img src="/content/images/…">` tag
-  into a section. On EC2 (SSM) access only small images transfer
-  reliably.
+  into a section. Works in every access mode.
 - **Maintenance Mode** — Enable (with a title and message), Disable, or
   Status. Visitors see the maintenance page while it's on.
 
@@ -118,16 +161,21 @@ in the file, including secrets, is left alone — and then offers to
   password-reset links on screen. Turn it off as soon as email works.
 - **Email → AWS (SES credentials)** — only needed with the AWS SES
   transport.
+- **General → Public site info** — phone, EIN and Facebook URL shown in the
+  site's header / footer, and the portal's max upload size.
 - The **power bar** (Start / Stop / Restart) runs the commands set under
   Settings → Web App.
 
 ## Backup/Restore
 
 - **Web App rebuild** — one click captures configuration + website
-  (sections, window styling, images) + database into a bundle under
-  `backups/` on this machine. **Full Restore** walks through: test access
-  → optional Maintenance Mode → verify the bundle → restore configuration
-  → website → database, then prompts for the web app restart. Use it
+  (sections, images) + every uploaded image (`uploads/` — flyers, prize,
+  nonprofit and board photos) + database into a bundle under `backups/` on
+  this machine. Over EC2 (SSM) access, uploads larger than ~18 KB can't be
+  read and are listed as warnings — use SSH / Local for a complete bundle.
+  **Full Restore** walks through: test access → optional Maintenance Mode
+  → verify the bundle → restore configuration → website → uploads →
+  database, then prompts for the web app restart. Use it
   after the web app server is rebuilt.
 - **Console settings** — this console's config (excluding session keys
   and admin passwords).
@@ -142,7 +190,7 @@ store them like the database.
 ## Settings
 
 - **Security** — password rules for console admins and for passwords you
-  set on Members; login throttling for this console (restart to apply).
+  set on Nonprofits; login throttling for this console (restart to apply).
 - **Appearance** — light / dark, backgrounds, translucency. Live.
 - **Web App** — how the console reaches the website: **Local** (same
   machine), **Remote via SSH** (host, user, private key), or **Remote on

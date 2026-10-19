@@ -139,6 +139,14 @@
   .table-base tbody tr:hover td { @apply bg-slate-50 dark:bg-slate-800/40; }
   .table-base tbody tr:last-child td { @apply border-b-0; }
 
+  /* Rendered Markdown-lite (event / raffle description preview, nonprofit
+     descriptions). Preflight strips list bullets and margins, so put the
+     basics back for this one container. */
+  .md-preview p { @apply mb-2 last:mb-0; }
+  .md-preview ul { @apply mb-2 list-disc pl-5; }
+  .md-preview a { @apply text-brand-600 underline dark:text-brand-300; }
+  .md-preview strong { @apply font-semibold; }
+
   /* Toggle switch (theme mode). */
   .toggle { @apply relative inline-block h-6 w-11 flex-none cursor-pointer; }
   .toggle input { @apply sr-only; }

@@ -116,8 +116,10 @@ app.use((req, res, next) => {
 });
 
 // 64 KB is enough for the largest forms: a website HTML fragment (JSON
-// POST from Web App Website), a pasted SSH private key, and a Data Browser
-// row with long TEXT columns. Everything else is well under 10 KB.
+// POST from Web App Website), a pasted SSH private key, a Data Browser row
+// with long TEXT columns, and an event / raffle form with its Markdown
+// description. Everything else is well under 10 KB. Image uploads are
+// multipart (multer, 8 MB) and don't go through these parsers.
 app.use(express.urlencoded({ extended: false, limit: '64kb' }));
 app.use(express.json({ limit: '64kb' }));
 app.use(enforceInputLimits);
@@ -185,7 +187,12 @@ app.use('/', require('./routes/dataBrowser')(db, appConfig));
 app.use('/', require('./routes/reports')(db, appConfig));
 app.use('/', require('./routes/backup')(db, appConfig, appConfigModule));
 app.use('/', require('./routes/profile')(appConfig));
-app.use('/', require('./routes/members')(db, appConfig));
+app.use('/', require('./routes/uploads')(appConfig));
+app.use('/', require('./routes/events')(db, appConfig));
+app.use('/', require('./routes/raffles')(db, appConfig));
+app.use('/', require('./routes/nonprofits')(db, appConfig));
+app.use('/', require('./routes/directory')(db, appConfig));
+app.use('/', require('./routes/board')(db, appConfig));
 app.use('/', require('./routes/admin')(db, appConfig));
 
 app.use((req, res) => {

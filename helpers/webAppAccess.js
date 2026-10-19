@@ -15,6 +15,7 @@
 //   runCommand(command, opts) -> { code, stdout, stderr, timedOut }
 //   readFile(remotePath, opts) -> Buffer (default) or string (opts.encoding)
 //   writeFile(remotePath, content)
+//   writeFileChunked(remotePath, buffer) -> { bytes, chunks }
 //   exists(remotePath) -> boolean
 //   readBundle(spec, opts) -> batched fetch, see below
 //   test() -> { ok, message, details }
@@ -31,7 +32,19 @@
 //
 // Every writeFile is atomic in all three modes (temp file + rename/mv), so an
 // interrupted save can never leave the web app's config.json or a website
-// fragment truncated. The EC2 mode reads through SSM, whose inline output is
+// fragment truncated.
+//
+// writeFileChunked is the transport for BINARY uploads of any size (event
+// flyers, prize photos, board photos, bundle restores of uploads/**). It also
+// creates the target directory (mkdir -p) and is atomic the same way:
+//   local — mkdir + temp file + rename.
+//   ssh   — mkdir -p, SFTP-write a temp file, `mv -f` into place.
+//   ec2   — SSM Run Command can't carry a large payload, so the file is sent
+//           as base64 pieces, each its own SSM command of at most ~40 KB
+//           (after the runAsUser wrap), appended to a temp file; a final
+//           command checks the size (`stat -c %s`, falling back to `wc -c`)
+//           and only then `mv`s it into place. A failed piece removes the
+//           temp file, so a half-sent upload never becomes the real file. The EC2 mode reads through SSM, whose inline output is
 // capped at ~24 KB — readFile refuses (rather than truncates) anything near
 // that cap, so a read-modify-write can't save a damaged file back.
 //
@@ -59,6 +72,30 @@ function requireSsh2() {
 // single quotes as '\''. Safe for arbitrary content (paths, base64 blobs).
 function shQuote(s) {
   return `'` + String(s).replace(/'/g, `'\\''`) + `'`;
+}
+
+// Parent directory of a POSIX path ('a/b/c.jpg' → 'a/b').
+function dirOf(p) {
+  const s = String(p || '');
+  const i = s.lastIndexOf('/');
+  return i > 0 ? s.slice(0, i) : (i === 0 ? '/' : '.');
+}
+
+function toBuffer(content) {
+  return Buffer.isBuffer(content) ? content : Buffer.from(content == null ? '' : String(content), 'utf8');
+}
+
+// Largest base64 piece per SSM command for writeFileChunked. The whole
+// command must stay at or under SSM_MAX_COMMAND_BYTES (~40 KB). When the EC2
+// accessor runs as another user, wrap() base64-encodes the ENTIRE command
+// again (+33%) inside `su - user -c '…'`, so the piece has to be smaller.
+// The ~300 bytes of slack cover the printf/base64/redirect text and the
+// temp path. Always a multiple of 4 so every piece decodes on its own.
+const SSM_MAX_COMMAND_BYTES = 40000;
+function ssmChunkChars(runAsUser) {
+  const budget = SSM_MAX_COMMAND_BYTES - 600;
+  const raw = runAsUser ? Math.floor(budget * 3 / 4) - 200 : budget;
+  return raw - (raw % 4);
 }
 
 // Prefix a command with a `cd` into `cwd` so it runs from that directory.
@@ -177,6 +214,13 @@ function localAccessor(cfg) {
       const tmp = remotePath + '.wa-tmp';
       await fs.promises.writeFile(tmp, content);
       await fs.promises.rename(tmp, remotePath);
+    },
+    async writeFileChunked(remotePath, buffer) {
+      // Local disk has no payload limit: one atomic write (+ mkdir -p).
+      const buf = toBuffer(buffer);
+      await fs.promises.mkdir(dirOf(remotePath), { recursive: true });
+      await self.writeFile(remotePath, buf);
+      return { bytes: buf.length, chunks: 1 };
     },
     async exists(remotePath) {
       try { await fs.promises.access(remotePath); return true; }
@@ -354,6 +398,27 @@ function sshAccessor(cfg) {
         }
       });
     },
+    writeFileChunked(remotePath, buffer) {
+      // SFTP streams any size, so "chunked" here just means: mkdir -p the
+      // target directory, SFTP the bytes to a temp file, `mv -f` into place —
+      // all on one connection.
+      const buf = toBuffer(buffer);
+      return withConnection(async (conn) => {
+        const mk = await exec(conn, `mkdir -p -- ${shQuote(dirOf(remotePath))}`, { timeoutMs: 30000 });
+        if (mk.code !== 0) throw new Error(`Could not create ${dirOf(remotePath)}: ${(mk.stderr || '').trim() || 'exit ' + mk.code}`);
+        const sftp = await getSftp(conn);
+        const tmp = remotePath + '.wa-tmp';
+        await new Promise((resolve, reject) => {
+          sftp.writeFile(tmp, buf, (err) => err ? reject(err) : resolve());
+        });
+        const r = await exec(conn, `mv -f ${shQuote(tmp)} ${shQuote(remotePath)}`, { timeoutMs: 30000 });
+        if (r.code !== 0) {
+          await exec(conn, `rm -f -- ${shQuote(tmp)}`, { timeoutMs: 30000 }).catch(() => {});
+          throw new Error(`Could not move ${tmp} into place: ${(r.stderr || '').trim() || 'exit ' + r.code}`);
+        }
+        return { bytes: buf.length, chunks: 1 };
+      });
+    },
     exists(remotePath) {
       return withConnection(async (conn) => {
         const sftp = await getSftp(conn);
@@ -504,6 +569,35 @@ function ec2Accessor(cfg) {
         throw new Error(`Could not write ${remotePath} via SSM: ${r.stderr || r.status}`);
       }
     },
+    async writeFileChunked(remotePath, buffer) {
+      const buf = toBuffer(buffer);
+      const tmp = remotePath + '.wa-tmp';
+      const b64 = buf.toString('base64');
+      const per = ssmChunkChars(runAsUser);
+      const fail = async (what, r) => {
+        try { await ssmRun(`rm -f -- ${shQuote(tmp)}`, { timeoutMs: 30000 }); } catch (e) { /* best effort */ }
+        throw new Error(`Could not upload ${remotePath} via SSM (${what}): ${(r && (r.stderr || r.status)) || 'no response'}`);
+      };
+      // 1) target dir + empty temp file.
+      let r = await ssmRun(`mkdir -p -- ${shQuote(dirOf(remotePath))} && : > ${shQuote(tmp)}`, { timeoutMs: 60000, comment: 'Admin console upload (start)' });
+      if (r.status !== 'Success') await fail('mkdir', r);
+      // 2) append each base64 piece (decoded on the host).
+      let chunks = 0;
+      for (let off = 0; off < b64.length; off += per) {
+        const piece = b64.slice(off, off + per);
+        r = await ssmRun(`printf '%s' ${shQuote(piece)} | base64 -d >> ${shQuote(tmp)}`, { timeoutMs: 60000, comment: 'Admin console upload (chunk)' });
+        if (r.status !== 'Success') await fail(`chunk ${chunks + 1}`, r);
+        chunks++;
+      }
+      // 3) verify the byte count, then move into place.
+      r = await ssmRun(
+        `sz=$(stat -c %s ${shQuote(tmp)} 2>/dev/null || wc -c < ${shQuote(tmp)}); sz=$(echo $sz | tr -d ' '); ` +
+        `if [ "$sz" = "${buf.length}" ]; then mv -f ${shQuote(tmp)} ${shQuote(remotePath)} && echo __WA_UPLOAD_OK__; ` +
+        `else echo "size mismatch: got $sz, expected ${buf.length}" >&2; rm -f -- ${shQuote(tmp)}; exit 3; fi`,
+        { timeoutMs: 60000, comment: 'Admin console upload (finish)' });
+      if (r.status !== 'Success' || !/__WA_UPLOAD_OK__/.test(r.stdout || '')) await fail('verify', r);
+      return { bytes: buf.length, chunks };
+    },
     async exists(remotePath) {
       const r = await ssmRun(`test -e ${shQuote(remotePath)} && echo __WA_EXISTS__ || echo __WA_MISSING__`);
       return /__WA_EXISTS__/.test(r.stdout || '');
@@ -628,6 +722,9 @@ function createAccessorFromConfig(appConfig) {
 
 module.exports = {
   VALID_MODES,
+  SSM_MAX_COMMAND_BYTES,
+  ssmChunkChars,
+  shQuote,
   getMode,
   isConfigured,
   createAccessor,

@@ -55,8 +55,13 @@ const FIELDS = {
     { path: 'sessionKeyMode', label: 'Session key mode', type: 'select', options: [['auto-generate', 'auto-generate'], ['fixed', 'fixed']] },
     { path: 'sessionMaxAgeHours', label: 'Session max age (hours)', type: 'number', min: 1, max: 720, def: 8 },
     { path: 'passwordResetTokenTtlHours', label: 'Password reset token TTL (hours)', type: 'number', min: 1, max: 720, def: 2 },
-    { path: 'allowMemberRegistration', label: 'Allow new member sign-ups', type: 'toggle', def: true },
-    { path: 'maintenanceCommand', label: 'Maintenance Command', type: 'text', hint: 'Command run on the Web App server (from its install directory) to put it into / take it out of maintenance. Default ./scripts/maintenance.sh' }
+    { path: 'allowMemberRegistration', label: 'Allow new nonprofit sign-ups', type: 'toggle', def: true, hint: 'Off hides the website\'s nonprofit sign-up; existing logins keep working.' },
+    { path: 'maintenanceCommand', label: 'Maintenance Command', type: 'text', hint: 'Command run on the Web App server (from its install directory) to put it into / take it out of maintenance. Default ./scripts/maintenance.sh' },
+    { type: 'heading', label: 'Public site info', hint: 'Shown in the website header / footer (GET /api/site).' },
+    { path: 'site.phone', label: 'Phone', type: 'text', hint: 'e.g. (214) 763-5546' },
+    { path: 'site.ein', label: 'EIN', type: 'text', hint: 'e.g. 33-4035685' },
+    { path: 'site.facebookUrl', label: 'Facebook page URL', type: 'text', hint: 'e.g. https://www.facebook.com/missionmenofanna' },
+    { path: 'uploads.maxMb', label: 'Max image upload (MB)', type: 'number', min: 1, max: 8, def: 8, hint: 'Server-side cap for nonprofit portal photo uploads (browsers shrink photos before sending). The console always allows up to 8 MB.' }
   ],
   email: [
     { path: 'email.transport', label: 'Transport', type: 'select', controller: true, options: [['console', 'console (dev → log)'], ['smtp', 'SMTP'], ['ses', 'AWS SES']] },
@@ -83,7 +88,7 @@ const FIELDS = {
     { type: 'heading', label: 'Login throttling (per IP)' },
     { path: 'security.rateLimiting.auth.maxAttempts', label: 'Max failed attempts', type: 'number', min: 1, max: 1000, def: 10 },
     { path: 'security.rateLimiting.auth.windowSeconds', label: 'Window (seconds)', type: 'number', min: 30, max: 86400, def: 300 },
-    { type: 'heading', label: 'Login lockout', hint: 'Locks a member account / IP after repeated failures. Current locks are listed under Locked Users.' },
+    { type: 'heading', label: 'Login lockout', hint: 'Locks a nonprofit login / IP after repeated failures. Current locks are listed under Locked Users.' },
     { path: 'security.loginLockout.enabled', label: 'Enabled', type: 'toggle', def: true, controller: true },
     { path: 'security.loginLockout.maxFailures', label: 'Failures before lockout', type: 'number', min: 1, max: 1000, def: 10, showWhen: "c['security.loginLockout.enabled']" },
     { path: 'security.loginLockout.lockoutSeconds', label: 'Lockout duration (seconds)', type: 'number', min: 10, max: 86400, def: 300, showWhen: "c['security.loginLockout.enabled']" },

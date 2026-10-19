@@ -89,16 +89,19 @@ function sidebar(appConfig, user, activeNav) {
       ${navItem('/', 'Dashboard', '⌂', activeNav === 'home')}
       ${navItem('/admins', 'Admins', '★', activeNav === 'admins')}
       <hr class="my-2 border-t-2 border-slate-600">
-      ${navItem('/members', 'Members', '☺', activeNav === 'members')}
+      ${navItem('/events', 'Events', '📅', activeNav === 'events')}
+      ${navItem('/raffles', 'Raffles', '🎟', activeNav === 'raffles')}
+      ${navItem('/nonprofits', 'Nonprofits', '☺', activeNav === 'nonprofits')}
+      ${navItem('/categories-cities', 'Categories & Cities', '⌖', activeNav === 'categories-cities')}
+      ${navItem('/board', 'Board', '♜', activeNav === 'board')}
       ${navItem('/data', 'Data Browser', '▦', activeNav === 'data')}
       ${navItem('/locked-users', 'Locked Users', '🔒', activeNav === 'locked-users')}
       ${navItem('/reports', 'Reports', '▤', activeNav === 'reports')}
       <hr class="my-2 border-t-2 border-slate-600">
       ${navItem('/web-app-website', 'Web App Website', '🖥', activeNav === 'web-app-website')}
       ${navItem('/web-app-logs', 'Web App Logs', '📄', activeNav === 'web-app-logs')}
-      ${navItem('/web-app-settings', 'Web App Settings', '🛠', activeNav === 'web-app-settings')}
-      <hr class="my-2 border-t-2 border-slate-600">
       ${navItem('/backup-restore', 'Backup/Restore', '⇅', activeNav === 'backup')}
+      ${navItem('/web-app-settings', 'Web App Settings', '🛠', activeNav === 'web-app-settings')}
       ${navItem('/settings', 'Settings', '⚒', activeNav === 'settings')}
     </nav>
     <div class="border-t-2 border-slate-600 px-4 py-4 space-y-3">
@@ -149,6 +152,7 @@ ${body}
   <title>${fullTitle}</title>
   <link rel="stylesheet" href="/css/tailwind.css?v=${assetVer('css/tailwind.css')}">
   ${themeCss(appConfig, false)}
+  <script defer src="/js/image-upload.js?v=${assetVer('js/image-upload.js')}"></script>
   <script defer src="/js/alpine.min.js?v=${assetVer('js/alpine.min.js')}"></script>
 </head>
 <body>

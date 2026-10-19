@@ -1,0 +1,549 @@
+// routes/events.js — the website's events (the web app's `events` +
+// `event_beneficiaries` tables). The website is the source of truth for
+// events; Facebook only links to it, so this is where the board publishes.
+//
+//   GET  /events?tab=upcoming|past|drafts  → list
+//   GET  /events/new                       → blank form
+//   POST /events                           → create (then add flyer / cover)
+//   GET  /events/:id                       → edit form + images + actions
+//   POST /events/:id                       → save
+//   POST /events/:id/publish               → state=1 publish / state=0 unpublish
+//   POST /events/:id/delete                → delete row, beneficiaries, image files
+//   POST /events/:id/image/:slot           → upload flyer | cover (multipart "image")
+//   POST /events/:id/image/:slot/remove    → clear flyer | cover (deletes the file)
+//
+// Times: starts_at / ends_at are stored as UTC 'YYYY-MM-DD HH:MM:SS'; the form
+// works in the organization's zone (appConfig.timeZone, default
+// America/Chicago) — see helpers/localTime.js. "Upcoming" uses the web app's
+// rule: published and starts_at ≥ now − 12 h.
+//
+// The description is Markdown-lite (helpers/markdownLite.js — the console's
+// copy of the web app's renderer); the preview pane renders it with the same
+// rules through POST /markdown-preview.
+//
+// Beneficiaries: each row is either a directory organization (org_id — the
+// public page links to it only while that org is verified + listed) or free
+// text + optional URL. Rows are replaced wholesale on save (DELETE + INSERT in
+// one transaction), so the table needs no primary key of its own. The org's
+// name is copied into `name` too, so the row still reads sensibly if the
+// organization is later deleted (org_id → NULL).
+
+const express = require('express');
+const { page, flash } = require('../views/layout');
+const { escapeHtml, jsAttrStr } = require('../views/escapeHtml');
+const { requireAdmin } = require('../middleware/auth');
+const kit = require('../helpers/pageKit');
+const lt = require('../helpers/localTime');
+const uploads = require('../helpers/webAppUploads');
+
+const TABS = [
+  { key: 'upcoming', label: 'Upcoming' },
+  { key: 'past', label: 'Past' },
+  { key: 'drafts', label: 'Drafts' }
+];
+const SLOTS = { flyer: 'flyer_path', cover: 'cover_path' };
+const TEXTAREA_CLS = 'block w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900 shadow-sm focus:border-brand-500 focus:outline-none focus:ring-2 focus:ring-brand-500/30 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100';
+
+const EVENT_COLS = `event_id, slug, title, summary, description_md, starts_at, ends_at, venue_name,
+  address, city, map_url, flyer_path, cover_path, registration_url, registration_label,
+  registration_note, beneficiaries_text, is_published, created_at, updated_at`;
+
+function upcomingCutoff() { return kit.sqlTime(-12 * 3600 * 1000); }
+
+// Read + validate the posted form. Returns { values, fields, bens, error }.
+// `values` echoes the inputs back into the form on an error.
+function readForm(b, appConfig) {
+  const values = {
+    title: b.title || '', slug: b.slug || '', summary: b.summary || '', description_md: b.description_md || '',
+    starts_local: b.starts_at || '', ends_local: b.ends_at || '', venue_name: b.venue_name || '',
+    address: b.address || '', city: b.city || '', map_url: b.map_url || '',
+    registration_url: b.registration_url || '', registration_label: b.registration_label || '',
+    registration_note: b.registration_note || '', beneficiaries_text: b.beneficiaries_text || '',
+    is_published: kit.yes(b.is_published), bens_json: b.beneficiaries_json || '[]'
+  };
+  const fail = (error) => ({ values, error });
+
+  const title = kit.str(b.title, 200);
+  if (!title) return fail('Title is required.');
+  const slugIn = kit.str(b.slug, 80);
+  const slug = slugIn ? kit.slugify(slugIn) : kit.slugify(title);
+  if (!slug || !kit.SLUG_RE.test(slug)) return fail('The URL slug may only contain lowercase letters, digits and dashes.');
+  const summary = kit.str(b.summary);
+  if (summary && summary.length > 200) return fail('The summary must be 200 characters or fewer.');
+  const starts = lt.localInputToUtc(b.starts_at, appConfig);
+  if (!starts) return fail('Start date and time are required.');
+  const ends = lt.localInputToUtc(b.ends_at, appConfig);
+  if (ends === undefined) return fail('The end date/time is not valid.');
+  if (ends && ends < starts) return fail('The event ends before it starts.');
+  const map = kit.urlField(b.map_url, 'Map link');
+  if (map.error) return fail(map.error);
+  const reg = kit.urlField(b.registration_url, 'Registration link');
+  if (reg.error) return fail(reg.error);
+
+  let bensIn;
+  try { bensIn = JSON.parse(b.beneficiaries_json || '[]'); } catch (e) { return fail('Beneficiaries could not be read — reload the page and try again.'); }
+  if (!Array.isArray(bensIn)) bensIn = [];
+  const bens = [];
+  for (const x of bensIn.slice(0, 30)) {
+    const orgId = kit.idParam(x && x.org_id);
+    const name = kit.str(x && x.name, 200);
+    const u = kit.urlField(x && x.url, 'Beneficiary link');
+    if (u.error) return fail(u.error);
+    if (!orgId && !name) continue; // blank row
+    bens.push({ org_id: orgId, name, url: orgId ? null : u.value });
+  }
+
+  return {
+    values,
+    bens,
+    fields: {
+      slug, title, summary, description_md: kit.str(b.description_md, 20000),
+      starts_at: starts, ends_at: ends || null,
+      venue_name: kit.str(b.venue_name, 200), address: kit.str(b.address, 300), city: kit.str(b.city, 100),
+      map_url: map.value, registration_url: reg.value,
+      registration_label: kit.str(b.registration_label, 100) || 'Register & pay',
+      registration_note: kit.str(b.registration_note, 255),
+      beneficiaries_text: kit.str(b.beneficiaries_text, 2000),
+      is_published: kit.yes(b.is_published) ? 1 : 0
+    }
+  };
+}
+
+function valuesFromRow(e, bens, appConfig) {
+  return {
+    title: e.title || '', slug: e.slug || '', summary: e.summary || '', description_md: e.description_md || '',
+    starts_local: lt.utcToLocalInput(e.starts_at, appConfig), ends_local: lt.utcToLocalInput(e.ends_at, appConfig),
+    venue_name: e.venue_name || '', address: e.address || '', city: e.city || '', map_url: e.map_url || '',
+    registration_url: e.registration_url || '', registration_label: e.registration_label || 'Register & pay',
+    registration_note: e.registration_note || '', beneficiaries_text: e.beneficiaries_text || '',
+    is_published: !!Number(e.is_published),
+    bens_json: JSON.stringify((bens || []).map(x => ({ org_id: x.org_id ? Number(x.org_id) : '', name: x.name || '', url: x.url || '' })))
+  };
+}
+
+// Load the orgs a beneficiary can point at (any status; the public page only
+// links verified + listed ones) and the city names for the datalist.
+async function loadPickers(db) {
+  const orgs = await kit.safeAll(db, 'SELECT org_id, name, verification_status, is_listed FROM organizations ORDER BY LOWER(name)', []);
+  const cities = await kit.safeAll(db, 'SELECT name FROM cities WHERE is_active = 1 ORDER BY sort, name', []);
+  return { orgs: orgs.rows, cities: cities.rows.map(r => r.name), err: orgs.err || cities.err };
+}
+
+function markdownHint() {
+  return `<p class="mt-1 text-xs text-slate-500 dark:text-slate-400">Formatting: blank line = new paragraph · <code>**bold**</code> · <code>*italic*</code> · <code>[link text](https://…)</code> · lines starting <code>- </code> make a bullet list. No HTML.</p>`;
+}
+
+// Description textarea + live preview (same renderer as the website).
+function markdownField(name, label, value, rows) {
+  return `<div data-md-init="${escapeHtml(JSON.stringify(value || ''))}"
+       x-data="{ text: '', html: '', timer: null, showPreview: true,
+         init() { this.text = JSON.parse(this.$el.dataset.mdInit); this.render(); this.$watch('text', () => { clearTimeout(this.timer); this.timer = setTimeout(() => this.render(), 300); }); },
+         async render() {
+           try {
+             const r = await fetch('/markdown-preview', { method: 'POST', headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' }, body: JSON.stringify({ text: this.text }) });
+             const j = await r.json(); this.html = j.html || '';
+           } catch (e) { /* keep the last preview */ }
+         } }">
+    <div class="flex items-center justify-between">
+      <label class="label" for="md-${escapeHtml(name)}">${escapeHtml(label)}</label>
+      <label class="inline-flex items-center gap-2 text-xs text-slate-500 dark:text-slate-400"><input type="checkbox" x-model="showPreview" class="h-4 w-4"> Preview</label>
+    </div>
+    <div class="grid gap-3" :class="showPreview ? 'lg:grid-cols-2' : ''">
+      <textarea id="md-${escapeHtml(name)}" name="${escapeHtml(name)}" rows="${rows || 10}" maxlength="20000" x-model="text" class="${TEXTAREA_CLS}"></textarea>
+      <div x-show="showPreview" class="md-preview rounded-lg border border-dashed border-slate-300 dark:border-slate-700 px-4 py-3 text-sm overflow-auto" style="max-height: 24rem">
+        <div x-show="!html" class="text-slate-400 italic">Preview appears here.</div>
+        <div x-html="html"></div>
+      </div>
+    </div>
+    ${markdownHint()}
+  </div>`;
+}
+
+function beneficiariesEditor(benJson, orgs) {
+  const orgOpts = orgs.map(o => {
+    const st = o.verification_status === 'verified' ? (Number(o.is_listed) ? '' : ' (hidden)') : ` (${o.verification_status})`;
+    return `<option value="${Number(o.org_id)}">${escapeHtml(o.name + st)}</option>`;
+  }).join('');
+  return `<div data-bens="${escapeHtml(benJson || '[]')}"
+       x-data="{ rows: [],
+         init() { this.rows = JSON.parse(this.$el.dataset.bens || '[]').map(r => ({ org_id: r.org_id ? String(r.org_id) : '', name: r.name || '', url: r.url || '' })); },
+         add() { this.rows.push({ org_id: '', name: '', url: '' }); },
+         remove(i) { this.rows.splice(i, 1); },
+         move(i, d) { const j = i + d; if (j < 0 || j >= this.rows.length) return; const t = this.rows[i]; this.rows[i] = this.rows[j]; this.rows[j] = t; },
+         get json() { return JSON.stringify(this.rows); } }">
+    <input type="hidden" name="beneficiaries_json" :value="json">
+    <div class="flex items-center justify-between">
+      <span class="label mb-0">Beneficiaries</span>
+      <button type="button" class="btn-secondary text-xs px-3 py-1" x-on:click="add()">＋ Add beneficiary</button>
+    </div>
+    <p class="mt-1 text-xs text-slate-500 dark:text-slate-400">Pick an organization from the Need Help directory (the site links to its profile while it is verified and listed) or type a name and optional link.</p>
+    <div class="mt-3 space-y-2">
+      <template x-for="(r, i) in rows" :key="i">
+        <div class="grid grid-cols-1 md:grid-cols-12 gap-2 items-center rounded-lg border border-slate-200 dark:border-slate-700 p-2">
+          <select class="input md:col-span-4" x-model="r.org_id" aria-label="Directory organization">
+            <option value="">— Not in the directory —</option>
+            ${orgOpts}
+          </select>
+          <input class="input md:col-span-3" type="text" maxlength="200" x-model="r.name" :placeholder="r.org_id ? '(uses the organization name)' : 'Name *'" :disabled="!!r.org_id" aria-label="Name">
+          <input class="input md:col-span-3" type="url" maxlength="1000" x-model="r.url" :placeholder="r.org_id ? '(links to the profile)' : 'https://… (optional)'" :disabled="!!r.org_id" aria-label="Link">
+          <div class="md:col-span-2 flex items-center justify-end gap-1">
+            <button type="button" class="btn-ghost text-xs px-2 py-1" x-on:click="move(i, -1)" aria-label="Move up">▲</button>
+            <button type="button" class="btn-ghost text-xs px-2 py-1" x-on:click="move(i, 1)" aria-label="Move down">▼</button>
+            <button type="button" class="btn-ghost text-xs px-2 py-1 text-red-600" x-on:click="remove(i)" aria-label="Remove">✕</button>
+          </div>
+        </div>
+      </template>
+      <p x-show="!rows.length" class="text-sm text-slate-400 italic">No beneficiaries listed.</p>
+    </div>
+  </div>`;
+}
+
+function eventForm(action, v, pickers, isNew, zone) {
+  const val = (k) => escapeHtml(v[k] || '');
+  const cityList = pickers.cities.map(c => `<option value="${escapeHtml(c)}">`).join('');
+  return `<form method="POST" action="${action}" class="space-y-6">
+    <section class="card surface-target card-pad space-y-4">
+      <h2 class="text-sm font-semibold uppercase tracking-wider text-slate-500 dark:text-slate-400">Event</h2>
+      <div class="grid sm:grid-cols-2 gap-4">
+        <div class="sm:col-span-2">
+          <label class="label" for="ev-title">Title *</label>
+          <input id="ev-title" class="input" type="text" name="title" required maxlength="200" value="${val('title')}">
+        </div>
+        <div>
+          <label class="label" for="ev-slug">URL slug</label>
+          <input id="ev-slug" class="input font-mono" type="text" name="slug" maxlength="80" pattern="[a-z0-9-]*" value="${val('slug')}" placeholder="made from the title when blank">
+          <p class="mt-1 text-xs text-slate-500 dark:text-slate-400">The page address: <code>/events/&lt;slug&gt;</code>. Changing it breaks links already shared on Facebook.</p>
+        </div>
+        <div>
+          <label class="label" for="ev-summary">Summary <span class="text-xs font-normal text-slate-400">(≤ 200 characters, shown on cards)</span></label>
+          <input id="ev-summary" class="input" type="text" name="summary" maxlength="200" value="${val('summary')}">
+        </div>
+        <div>
+          <label class="label" for="ev-starts">Starts * <span class="text-xs font-normal text-slate-400">(${escapeHtml(zone)})</span></label>
+          <input id="ev-starts" class="input" type="datetime-local" name="starts_at" required value="${val('starts_local')}">
+        </div>
+        <div>
+          <label class="label" for="ev-ends">Ends <span class="text-xs font-normal text-slate-400">(optional)</span></label>
+          <input id="ev-ends" class="input" type="datetime-local" name="ends_at" value="${val('ends_local')}">
+        </div>
+      </div>
+      ${markdownField('description_md', 'Description', v.description_md, 10)}
+    </section>
+
+    <section class="card surface-target card-pad space-y-4">
+      <h2 class="text-sm font-semibold uppercase tracking-wider text-slate-500 dark:text-slate-400">Where</h2>
+      <div class="grid sm:grid-cols-2 gap-4">
+        <div><label class="label" for="ev-venue">Venue name</label>
+          <input id="ev-venue" class="input" type="text" name="venue_name" maxlength="200" value="${val('venue_name')}"></div>
+        <div><label class="label" for="ev-city">City</label>
+          <input id="ev-city" class="input" type="text" name="city" maxlength="100" list="ev-cities" value="${val('city')}">
+          <datalist id="ev-cities">${cityList}</datalist></div>
+        <div class="sm:col-span-2"><label class="label" for="ev-address">Address</label>
+          <input id="ev-address" class="input" type="text" name="address" maxlength="300" value="${val('address')}"></div>
+        <div class="sm:col-span-2"><label class="label" for="ev-map">Map link <span class="text-xs font-normal text-slate-400">(optional — blank builds a Google Maps search from the address)</span></label>
+          <input id="ev-map" class="input" type="url" name="map_url" maxlength="1000" value="${val('map_url')}" placeholder="https://maps.app.goo.gl/…"></div>
+      </div>
+    </section>
+
+    <section class="card surface-target card-pad space-y-4">
+      <h2 class="text-sm font-semibold uppercase tracking-wider text-slate-500 dark:text-slate-400">Registration</h2>
+      <div class="grid sm:grid-cols-2 gap-4">
+        <div class="sm:col-span-2"><label class="label" for="ev-reg">Registration / payment link <span class="text-xs font-normal text-slate-400">(a Stripe Payment Link or any https:// page; blank = no button)</span></label>
+          <input id="ev-reg" class="input" type="url" name="registration_url" maxlength="1000" value="${val('registration_url')}" placeholder="https://buy.stripe.com/…"></div>
+        <div><label class="label" for="ev-reglabel">Button label</label>
+          <input id="ev-reglabel" class="input" type="text" name="registration_label" maxlength="100" value="${val('registration_label') || 'Register &amp; pay'}"></div>
+        <div><label class="label" for="ev-regnote">Note next to the button</label>
+          <input id="ev-regnote" class="input" type="text" name="registration_note" maxlength="255" value="${val('registration_note')}" placeholder="e.g. $25 entry per vehicle"></div>
+      </div>
+    </section>
+
+    <section class="card surface-target card-pad space-y-4">
+      <h2 class="text-sm font-semibold uppercase tracking-wider text-slate-500 dark:text-slate-400">Who it benefits</h2>
+      ${beneficiariesEditor(v.bens_json, pickers.orgs)}
+      <div><label class="label" for="ev-bentext">Beneficiaries note <span class="text-xs font-normal text-slate-400">(optional free text shown with the list)</span></label>
+        <textarea id="ev-bentext" name="beneficiaries_text" rows="2" maxlength="2000" class="${TEXTAREA_CLS}">${escapeHtml(v.beneficiaries_text || '')}</textarea></div>
+    </section>
+
+    <div class="flex items-center justify-between gap-4 flex-wrap">
+      <label class="inline-flex items-center gap-2 text-sm text-slate-700 dark:text-slate-200">
+        <input type="checkbox" name="is_published" value="1" class="h-4 w-4" ${v.is_published ? 'checked' : ''}>
+        Published <span class="text-xs text-slate-500">(visible on the website)</span>
+      </label>
+      <div class="flex items-center gap-2">
+        <a href="/events" class="btn-secondary">Cancel</a>
+        <button type="submit" class="btn-primary">${isNew ? 'Create event' : 'Save changes'}</button>
+      </div>
+    </div>
+  </form>`;
+}
+
+function imageSlotCard(eventId, slot, label, hint, rel) {
+  return `<div class="rounded-lg border border-slate-200 dark:border-slate-700 p-3 space-y-2">
+    <div class="flex items-center justify-between gap-2">
+      <div><div class="text-sm font-semibold text-slate-900 dark:text-slate-100">${escapeHtml(label)}</div>
+        <div class="text-xs text-slate-500 dark:text-slate-400">${escapeHtml(hint)}</div></div>
+      ${rel ? `<form method="POST" action="/events/${eventId}/image/${slot}/remove" class="m-0"
+            x-data x-on:submit.prevent="window.uiConfirmSubmit($event.target, 'Remove the ${slot}? The file is deleted from the Web App.', { title: 'Remove image', confirmLabel: 'Remove' })">
+          <button type="submit" class="btn-danger text-xs px-3 py-1">Remove</button></form>` : ''}
+    </div>
+    ${rel ? `<a href="/wa-uploads/${escapeHtml(rel)}" target="_blank" rel="noopener">${kit.uploadImg(rel, label, 'max-h-48 w-auto rounded-lg border border-slate-200 dark:border-slate-700')}</a>
+             <div class="font-mono text-xs text-slate-400">uploads/${escapeHtml(rel)}</div>`
+          : `<p class="text-sm text-slate-400 italic">None yet.</p>`}
+    ${kit.uploadForm(`/events/${eventId}/image/${slot}`, rel ? 'Replace' : 'Upload')}
+  </div>`;
+}
+
+module.exports = function (db, appConfig) {
+  const router = express.Router();
+
+  // ── List ────────────────────────────────────────────────────────────
+  router.get('/events', requireAdmin, async (req, res) => {
+    const user = req.session.user;
+    const tab = TABS.some(t => t.key === req.query.tab) ? req.query.tab : 'upcoming';
+    const cut = upcomingCutoff();
+    const q = {
+      upcoming: ['WHERE is_published = 1 AND starts_at >= ? ORDER BY starts_at ASC, event_id ASC', [cut]],
+      past: ['WHERE is_published = 1 AND starts_at < ? ORDER BY starts_at DESC, event_id DESC', [cut]],
+      drafts: ['WHERE is_published = 0 ORDER BY starts_at ASC, event_id ASC', []]
+    };
+    const { rows, err } = await kit.safeAll(db,
+      `SELECT event_id, slug, title, starts_at, venue_name, city, is_published, flyer_path FROM events ${q[tab][0]}`, q[tab][1]);
+    const counts = {};
+    for (const t of TABS) {
+      const where = q[t.key][0].replace(/ ORDER BY.*$/, '');
+      const { value } = await kit.safeGet(db, `SELECT COUNT(*) AS c FROM events ${where}`, q[t.key][1], null);
+      counts[t.key] = value && value.c != null ? Number(value.c) : null;
+    }
+    const tabs = TABS.map(t => `<a href="/events?tab=${t.key}" class="px-3 py-1.5 rounded-lg text-sm font-semibold ${t.key === tab ? 'bg-brand-600 text-white' : 'text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800'}">${t.label}${counts[t.key] != null ? ` <span class="opacity-70">(${counts[t.key]})</span>` : ''}</a>`).join('');
+    const tbody = rows.map(e => `
+      <tr class="cursor-pointer" data-href="/events/${Number(e.event_id)}" x-on:click="window.location = $el.dataset.href">
+        <td class="whitespace-nowrap text-xs text-slate-500">${escapeHtml(lt.formatLocal(e.starts_at, appConfig))}</td>
+        <td class="font-medium text-slate-900 dark:text-slate-100"><a class="hover:underline" href="/events/${Number(e.event_id)}">${escapeHtml(e.title)}</a>
+          <div class="font-mono text-xs text-slate-400">/events/${escapeHtml(e.slug)}</div></td>
+        <td>${escapeHtml([e.venue_name, e.city].filter(Boolean).join(' · ') || '—')}</td>
+        <td>${Number(e.is_published) ? '<span class="pill-running">Published</span>' : '<span class="pill-terminated">Draft</span>'}
+            ${e.flyer_path ? '' : ' <span class="pill-pending" title="No flyer uploaded">no flyer</span>'}</td>
+      </tr>`).join('');
+    const body = `
+      ${kit.pageHeader('Events', 'What the website lists under Events. Times are shown in ' + lt.zoneOf(appConfig) + '.',
+        `<a href="/events/new" class="btn-primary"><span aria-hidden="true">＋</span><span>New event</span></a>`)}
+      ${flash('error', req.query.error)}
+      ${flash('success', req.query.msg)}
+      ${kit.dbBanner(err)}
+      <nav class="mb-4 flex items-center gap-2" aria-label="Event lists">${tabs}</nav>
+      <div class="table-wrap surface-target" x-data>
+        <table class="table-base">
+          <thead><tr><th>When</th><th>Title</th><th>Where</th><th>Status</th></tr></thead>
+          <tbody>${tbody || `<tr><td colspan="4" class="text-center py-8 text-slate-400">${err ? 'Unavailable.' : 'No events here.'}</td></tr>`}</tbody>
+        </table>
+      </div>`;
+    res.send(page({ title: 'Events', body, appConfig, user, activeNav: 'events' }));
+  });
+
+  // ── New ─────────────────────────────────────────────────────────────
+  async function renderNew(req, res, values, error) {
+    const pickers = await loadPickers(db);
+    const v = values || { registration_label: 'Register & pay', bens_json: '[]', is_published: false };
+    const body = `
+      <div class="mb-4"><a class="text-sm text-brand-600 hover:underline" href="/events">← Back to events</a></div>
+      ${kit.pageHeader('New event', 'Save it first — the flyer and cover image uploads appear once the event exists.')}
+      ${flash('error', error)}
+      ${kit.dbBanner(pickers.err)}
+      <div class="max-w-5xl">${eventForm('/events', v, pickers, true, lt.zoneOf(appConfig))}</div>`;
+    res.status(error ? 400 : 200).send(page({ title: 'New event', body, appConfig, user: req.session.user, activeNav: 'events' }));
+  }
+
+  router.get('/events/new', requireAdmin, (req, res) => renderNew(req, res, null, null));
+
+  async function writeBeneficiaries(eventId, bens) {
+    // Org names are looked up BEFORE the transaction (remote SQLite: no
+    // reads inside one).
+    const ids = [...new Set(bens.filter(x => x.org_id).map(x => x.org_id))];
+    const names = new Map();
+    if (ids.length) {
+      const rows = await db.allAsync(`SELECT org_id, name FROM organizations WHERE org_id IN (${ids.map(() => '?').join(',')})`, ids);
+      for (const r of rows) names.set(Number(r.org_id), r.name);
+    }
+    await db.transaction(async (tx) => {
+      await tx.runAsync('DELETE FROM event_beneficiaries WHERE event_id = ?', [eventId]);
+      let sort = 1;
+      for (const x of bens) {
+        if (x.org_id && !names.has(x.org_id)) continue; // org vanished meanwhile
+        await tx.runAsync('INSERT INTO event_beneficiaries (event_id, org_id, name, url, sort) VALUES (?, ?, ?, ?, ?)',
+          [eventId, x.org_id || null, x.org_id ? names.get(x.org_id) : x.name, x.org_id ? null : x.url, sort++]);
+      }
+    });
+  }
+
+  router.post('/events', requireAdmin, async (req, res) => {
+    const r = readForm(req.body || {}, appConfig);
+    if (r.error) return renderNew(req, res, r.values, r.error);
+    const f = r.fields;
+    try {
+      f.slug = await kit.uniqueSlug(db, 'events', 'event_id', f.slug, 0);
+      const now = kit.sqlTime();
+      const ins = await db.runAsync(`INSERT INTO events (slug, title, summary, description_md, starts_at, ends_at, venue_name,
+          address, city, map_url, registration_url, registration_label, registration_note, beneficiaries_text,
+          is_published, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [f.slug, f.title, f.summary, f.description_md, f.starts_at, f.ends_at, f.venue_name, f.address, f.city,
+         f.map_url, f.registration_url, f.registration_label, f.registration_note, f.beneficiaries_text,
+         f.is_published, now, now]);
+      let id = ins && ins.lastID ? Number(ins.lastID) : null;
+      if (!id) { const row = await db.getAsync('SELECT event_id FROM events WHERE slug = ?', [f.slug]); id = row && Number(row.event_id); }
+      if (r.bens.length) await writeBeneficiaries(id, r.bens);
+      console.log(`[events] ${req.session.user.username} created event #${id} (${f.slug})`);
+      res.redirect(`/events/${id}?msg=` + encodeURIComponent('Event created. Add the flyer and cover image below.'));
+    } catch (err) {
+      console.error('[events] create failed:', err);
+      renderNew(req, res, r.values, 'Create failed: ' + (err.message || 'unknown error'));
+    }
+  });
+
+  // ── Edit ────────────────────────────────────────────────────────────
+  async function renderEdit(req, res, id, values, error) {
+    const user = req.session.user;
+    const { value: e, err } = await kit.safeGet(db, `SELECT ${EVENT_COLS} FROM events WHERE event_id = ?`, [id], null);
+    if (err || !e) {
+      return res.status(err ? 200 : 404).send(page({ title: 'Event', appConfig, user, activeNav: 'events',
+        body: `${kit.pageHeader(err ? 'Event' : 'Event not found')}${kit.dbBanner(err)}<p><a class="text-brand-600 hover:underline" href="/events">← Back to events</a></p>` }));
+    }
+    const bens = await kit.safeAll(db, 'SELECT org_id, name, url, sort FROM event_beneficiaries WHERE event_id = ? ORDER BY sort', [id]);
+    const pickers = await loadPickers(db);
+    const v = values || valuesFromRow(e, bens.rows, appConfig);
+    const base = await kit.webAppPublicUrl(appConfig);
+    const published = !!Number(e.is_published);
+    const viewLink = base
+      ? `<a class="btn-secondary" href="${escapeHtml(base + '/events/' + e.slug)}" target="_blank" rel="noopener">View on site <span aria-hidden="true">↗</span></a>`
+      : `<span class="btn-secondary opacity-50 cursor-not-allowed" title="Set publicBaseUrl under Web App Settings → General">View on site ↗</span>`;
+    const actions = `${viewLink}
+      <form method="POST" action="/events/${id}/publish" class="m-0">
+        <input type="hidden" name="state" value="${published ? '0' : '1'}">
+        <button type="submit" class="${published ? 'btn-secondary' : 'btn-primary'}">${published ? 'Unpublish' : 'Publish'}</button>
+      </form>
+      <form method="POST" action="/events/${id}/delete" class="m-0" x-data
+            x-on:submit.prevent="window.uiConfirmSubmit($event.target, ${jsAttrStr('Delete the event "' + e.title + '"? Its flyer and cover image files are deleted too. This cannot be undone.')}, { title: 'Delete event', confirmLabel: 'Delete' })">
+        <button type="submit" class="btn-danger">Delete</button>
+      </form>`;
+    const body = `
+      <div class="mb-4"><a class="text-sm text-brand-600 hover:underline" href="/events">← Back to events</a></div>
+      ${kit.pageHeader(e.title, `${lt.formatLocal(e.starts_at, appConfig)} · ${published ? 'Published' : 'Draft (not on the website)'}`, actions)}
+      ${flash('error', error || req.query.error)}
+      ${flash('success', req.query.msg)}
+      ${kit.dbBanner(bens.err || pickers.err)}
+      <div class="max-w-5xl space-y-6">
+        <section class="card surface-target card-pad">
+          <h2 class="text-sm font-semibold uppercase tracking-wider text-slate-500 dark:text-slate-400 mb-3">Images</h2>
+          <div class="grid md:grid-cols-2 gap-4">
+            ${imageSlotCard(id, 'flyer', 'Flyer', 'The full flyer — visitors can open it full size and download it.', e.flyer_path)}
+            ${imageSlotCard(id, 'cover', 'Cover photo', 'Wide photo for the event card and page header (optional).', e.cover_path)}
+          </div>
+          <p class="mt-3 text-xs text-slate-500 dark:text-slate-400">JPEG, PNG or WebP. Your browser shrinks photos to 1600 px before uploading.</p>
+        </section>
+        ${eventForm(`/events/${id}`, v, pickers, false, lt.zoneOf(appConfig))}
+      </div>`;
+    res.status(error ? 400 : 200).send(page({ title: e.title, body, appConfig, user, activeNav: 'events' }));
+  }
+
+  router.get('/events/:id', requireAdmin, async (req, res) => {
+    const id = kit.idParam(req.params.id);
+    if (!id) return res.redirect('/events?error=Invalid+event+id');
+    renderEdit(req, res, id, null, null);
+  });
+
+  router.post('/events/:id', requireAdmin, async (req, res) => {
+    const id = kit.idParam(req.params.id);
+    if (!id) return res.redirect('/events?error=Invalid+event+id');
+    const r = readForm(req.body || {}, appConfig);
+    if (r.error) return renderEdit(req, res, id, r.values, r.error);
+    const f = r.fields;
+    try {
+      const exists = await db.getAsync('SELECT event_id FROM events WHERE event_id = ?', [id]);
+      if (!exists) return res.redirect('/events?error=Event+not+found');
+      f.slug = await kit.uniqueSlug(db, 'events', 'event_id', f.slug, id);
+      await db.runAsync(`UPDATE events SET slug = ?, title = ?, summary = ?, description_md = ?, starts_at = ?, ends_at = ?,
+          venue_name = ?, address = ?, city = ?, map_url = ?, registration_url = ?, registration_label = ?,
+          registration_note = ?, beneficiaries_text = ?, is_published = ?, updated_at = ? WHERE event_id = ?`,
+        [f.slug, f.title, f.summary, f.description_md, f.starts_at, f.ends_at, f.venue_name, f.address, f.city,
+         f.map_url, f.registration_url, f.registration_label, f.registration_note, f.beneficiaries_text,
+         f.is_published, kit.sqlTime(), id]);
+      await writeBeneficiaries(id, r.bens);
+      res.redirect(`/events/${id}?msg=Event+saved.`);
+    } catch (err) {
+      console.error('[events] update failed:', err);
+      renderEdit(req, res, id, r.values, 'Save failed: ' + (err.message || 'unknown error'));
+    }
+  });
+
+  router.post('/events/:id/publish', requireAdmin, async (req, res) => {
+    const id = kit.idParam(req.params.id);
+    if (!id) return res.redirect('/events?error=Invalid+event+id');
+    const on = (req.body && req.body.state) === '1';
+    try {
+      const r = await db.runAsync('UPDATE events SET is_published = ?, updated_at = ? WHERE event_id = ?', [on ? 1 : 0, kit.sqlTime(), id]);
+      if (!r.changes) return res.redirect('/events?error=Event+not+found');
+      res.redirect(`/events/${id}?msg=` + encodeURIComponent(on ? 'Published — it is on the website now.' : 'Unpublished — hidden from the website.'));
+    } catch (err) {
+      res.redirect(`/events/${id}?error=` + encodeURIComponent('Update failed: ' + (err.message || err)));
+    }
+  });
+
+  router.post('/events/:id/delete', requireAdmin, async (req, res) => {
+    const id = kit.idParam(req.params.id);
+    if (!id) return res.redirect('/events?error=Invalid+event+id');
+    try {
+      const e = await db.getAsync('SELECT event_id, title, flyer_path, cover_path FROM events WHERE event_id = ?', [id]);
+      if (!e) return res.redirect('/events?error=Event+not+found');
+      await db.transaction(async (tx) => {
+        await tx.runAsync('DELETE FROM event_beneficiaries WHERE event_id = ?', [id]);
+        await tx.runAsync('DELETE FROM events WHERE event_id = ?', [id]);
+      });
+      await uploads.removeFiles(appConfig, [e.flyer_path, e.cover_path]);
+      console.log(`[events] ${req.session.user.username} deleted event #${id} (${e.title})`);
+      res.redirect('/events?msg=' + encodeURIComponent(`Event "${e.title}" deleted.`));
+    } catch (err) {
+      console.error('[events] delete failed:', err);
+      res.redirect(`/events/${id}?error=` + encodeURIComponent('Delete failed: ' + (err.message || err)));
+    }
+  });
+
+  // ── Flyer / cover ───────────────────────────────────────────────────
+  router.post('/events/:id/image/:slot', requireAdmin, kit.withImage((req) => `/events/${encodeURIComponent(req.params.id)}`, async (req, res) => {
+    const id = kit.idParam(req.params.id);
+    const col = SLOTS[req.params.slot];
+    const back = `/events/${id}`;
+    if (!id || !col) return kit.reply(req, res, '/events', false, 'Unknown image slot.');
+    const e = await db.getAsync(`SELECT event_id, ${col} AS old FROM events WHERE event_id = ?`, [id]);
+    if (!e) return kit.reply(req, res, '/events', false, 'Event not found.');
+    let saved;
+    try { saved = await uploads.saveImage(appConfig, 'events', req.file && req.file.buffer); }
+    catch (err) { return kit.reply(req, res, back, false, err.message || 'Upload failed'); }
+    try {
+      await db.runAsync(`UPDATE events SET ${col} = ?, updated_at = ? WHERE event_id = ?`, [saved.rel, kit.sqlTime(), id]);
+    } catch (err) {
+      await uploads.removeFiles(appConfig, saved.rel);
+      return kit.reply(req, res, back, false, 'Saving failed: ' + (err.message || err));
+    }
+    if (e.old && e.old !== saved.rel) await uploads.removeFiles(appConfig, e.old);
+    kit.reply(req, res, back, true, `${req.params.slot === 'flyer' ? 'Flyer' : 'Cover photo'} uploaded.`);
+  }));
+
+  router.post('/events/:id/image/:slot/remove', requireAdmin, async (req, res) => {
+    const id = kit.idParam(req.params.id);
+    const col = SLOTS[req.params.slot];
+    if (!id || !col) return res.redirect('/events?error=Unknown+image');
+    try {
+      const e = await db.getAsync(`SELECT ${col} AS old FROM events WHERE event_id = ?`, [id]);
+      if (!e) return res.redirect('/events?error=Event+not+found');
+      await db.runAsync(`UPDATE events SET ${col} = NULL, updated_at = ? WHERE event_id = ?`, [kit.sqlTime(), id]);
+      await uploads.removeFiles(appConfig, e.old);
+      res.redirect(`/events/${id}?msg=Image+removed.`);
+    } catch (err) {
+      res.redirect(`/events/${id}?error=` + encodeURIComponent('Remove failed: ' + (err.message || err)));
+    }
+  });
+
+  return router;
+};
+
+module.exports.markdownField = markdownField;
+module.exports.TEXTAREA_CLS = TEXTAREA_CLS;

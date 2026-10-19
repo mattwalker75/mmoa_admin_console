@@ -2,8 +2,10 @@
 
 Internal operator console for the **Mission Men of Anna** web app
 ([`mmoa_web_app`](../mmoa_web_app)). It reads and writes the web app's
-database (members, events, tokens, lockouts), edits the web app's
-`config.json` and website content, tails its log, starts / stops /
+database (nonprofit accounts + directory profiles, events, raffles, the
+board, directory categories / cities, tokens, lockouts), uploads images
+to the web app host, edits the web app's `config.json` and website copy,
+tails its log, starts / stops /
 restarts it, and backs everything up — whether the web app runs on this
 same machine, on a server reachable over SSH, or on an EC2 instance
 reachable only through AWS Systems Manager.
@@ -25,18 +27,32 @@ It is a port of `car_show_admin_console` with the car-show-only domain
 - **Three ways to reach the web app** — `local`, `ssh` (pasted private
   key), `ec2` (SSM Run Command). Every file write is atomic; SSM reads
   refuse anything near the ~24 KB output cap rather than truncate it.
-- **Members** — search, create, edit, verify / unverify, reset password
-  (bcrypt cost 10, same as the web app), delete.
+- **Events & Raffles** — the website is the source of truth for both
+  (Facebook only links to it). Create / edit / publish, Markdown-lite
+  descriptions with a live preview (same renderer as the website), flyer /
+  cover / prize-photo uploads, event beneficiaries, raffle claim presets
+  (Firearm / Standard) and the draft → open → closed → drawn workflow.
+- **Nonprofits** — the only web-app logins are other nonprofits, each with
+  a "Need Help?" directory profile. Review the whole profile (hidden fields
+  too), check the EIN with the built-in **IRS / ProPublica lookup**, then
+  Verify / Mark rejected / Reset; plus account actions (activate,
+  email-verified, reset password, edit, delete with every child row and
+  photo file).
+- **Categories & Cities** and **Board** — the directory's lookup lists and
+  the About page's board roles / names / photos.
+- **Image uploads to the web app host** in every access mode — the
+  browser shrinks photos to 1600 px first; EC2 mode sends them as ≤ 40 KB
+  SSM pieces (`webAppAccess.writeFileChunked`).
 - **Data Browser** — every table in the live DB; paginate, search, edit,
   insert, delete by primary key. Identifiers come only from the live
   schema, values are always bound, password hashes are masked + read-only.
-- **Web App Website / Logs / Settings** — edit the HTML sections, window
-  styling, images and Maintenance Mode; tail `logs/app.log`; edit the web
+- **Web App Website / Logs / Settings** — edit the website copy (hero,
+  about, help, partner, footer), images and Maintenance Mode; tail `logs/app.log`; edit the web
   app's `config.json` with read-modify-write (unexposed keys and secrets
   preserved) and a power bar with a restart-pending prompt.
 - **Reports** (CSV / in-app view) and **Backup / Restore** (console
   settings, web-app config, website, an engine-neutral database dump, and
-  one-file rebuild bundles).
+  one-file rebuild bundles that also carry `uploads/**`).
 - **Live appearance theming** and **brute-force protection** carried over
   unchanged from the reference console.
 
@@ -79,25 +95,31 @@ node scripts/create-local-admin.js <username> <email> '<name>' '<password>'
 | Tab                  | Purpose |
 | -------------------- | ------- |
 | **Profile**          | Edit your own name / email / password. |
-| **Dashboard**        | Counts: members, verified / unverified / inactive, events, locked IPs / accounts, console admins. |
+| **Dashboard**        | Nonprofits verified / pending / rejected, upcoming events, event drafts, open raffles, locked logins, console admins + the "Pending verification" list. |
 | **Admins**           | Add / replace / remove local-file console admins. |
-| **Members**          | The web app's accounts — list, search, create, edit, verify, reset password, delete. |
+| **Events**           | Upcoming / past / drafts; create, edit, publish, flyer + cover, beneficiaries, delete, View on site. |
+| **Raffles**          | Same pattern + claim presets, prize photos (≤ 8, reorder), status workflow with winning ticket. |
+| **Nonprofits**       | Accounts + directory profiles; ProPublica lookup; Verify / Reject / Reset; account actions. (`/members` redirects here.) |
+| **Categories & Cities** | The directory's service categories and cities — add, rename, reorder, activate / deactivate, delete when unused. |
+| **Board**            | Board roles, person names, photos, order. |
 | **Data Browser**     | Generic table browser / editor for the whole web-app database. |
 | **Locked Users**     | Current login lockouts (accounts and IPs) with Unlock. |
-| **Reports**          | Members, unverified members, events, lockouts, console admins — view or CSV. |
-| **Web App Website**  | HTML sections, window styling, images, Maintenance Mode. |
+| **Reports**          | Nonprofits (all / pending), events, raffles, lockouts, console admins — view or CSV. |
+| **Web App Website**  | Website copy sections (hero, about, help, partner, footer), images, Maintenance Mode. |
 | **Web App Logs**     | Tail of the web app's `logs/app.log`. |
-| **Web App Settings** | The web app's `config.json` (General, Email, Security, Database, Server) + Start / Stop / Restart. |
-| **Backup/Restore**   | JSON exports / restores and one-file rebuild bundles. |
+| **Backup/Restore**   | JSON exports / restores and one-file rebuild bundles (incl. `uploads/**`). |
+| **Web App Settings** | The web app's `config.json` (General incl. public site info, Email, Security, Database, Server) + Start / Stop / Restart. |
 | **Settings**         | This console: Security, Appearance, Web App (access mode, database, lifecycle commands, Test connection). |
 
-## Admins vs. members
+## Admins vs. nonprofits
 
-- **Console admins** — operators of *this* app. Live in
+- **Console admins** — MMoA board members operating *this* app. Live in
   `local_admins.json`, never in the DB. Managed under **Admins**.
-- **Members** — rows in the web app's `users` table (no roles — every
-  account is a member). They can't sign in here; the web app has no admin
-  surface of its own — this console is it. Managed under **Members**.
+- **Nonprofits** — rows in the web app's `users` table, each with one
+  `organizations` profile. Logins exist only so other nonprofits can keep
+  their "Need Help?" listing current. They can't sign in here; the web app
+  has no admin surface of its own — this console is it. Managed under
+  **Nonprofits**.
 
 ## Cookie name
 
@@ -118,6 +140,10 @@ helpers/localAdmins.js          Read/write/lookup over local_admins.json
 helpers/webAppAccess.js         local / ssh / ec2 transport (run, read, write, readBundle, test)
 helpers/webAppConfig.js         Read-modify-write of the web app's config.json; restart-pending flag
 helpers/dbSchema.js             Live-schema introspection for the Data Browser and Backup
+helpers/webAppUploads.js        uploads/<kind>/<16-hex>.<ext> contract: magic bytes, save, delete
+helpers/markdownLite.js         VERBATIM copy of mmoa_web_app/helpers/markdownLite.js (keep identical)
+helpers/localTime.js            Event / raffle times: org time zone (timeZone) ↔ stored UTC
+helpers/pageKit.js              Shared bits for the content pages (safeGet, slugs, reorder, upload widget)
 helpers/awsSsm.js               SSM Run Command (ec2 mode); awsLog.js / awsClientKey.js support it
 views/layout.js                 HTML shell, sidebar, themeCss, restart prompt, confirm dialog
 views/escapeHtml.js             escapeHtml + jsAttrStr
@@ -125,7 +151,12 @@ routes/setup.js                 First-run "create the first admin" gate
 routes/public.js                /login, /logout (LOCAL FILE auth only)
 routes/profile.js               /profile + /profile/password
 routes/admin.js                 Dashboard + console admin CRUD
-routes/members.js               Members pages
+routes/events.js                Events
+routes/raffles.js               Raffles
+routes/nonprofits.js            Nonprofits (+ ProPublica lookup, /members redirect)
+routes/directory.js             Categories & Cities
+routes/board.js                 Board
+routes/uploads.js               /wa-uploads image proxy + /markdown-preview
 routes/dataBrowser.js           Data Browser
 routes/lockedUsers.js           Locked Users
 routes/reports.js               Reports registry + CSV / JSON
@@ -137,6 +168,7 @@ routes/settings.js              Settings (Security, Appearance, Web App)
 scripts/create-local-admin.js   Command-line admin seeding
 public/js/ui-confirm.js         CSP-safe confirm dialog (window.uiConfirm)
 public/js/wa-preview.js         Website section preview popup
+public/js/image-upload.js       Browser-side resize (≤ 1600 px JPEG) + upload
 tailwind.input.css              Tailwind v4 source
 START_APP.sh                    Convenience boot script
 local_admins.json               GITIGNORED — bcrypt hashes for console admins
@@ -171,12 +203,17 @@ chmod 0700 backups
 ## Known gaps
 
 - **SSH and EC2 modes need a real host to verify.** They are ported
-  as-is from the reference console (plus atomic SSH writes); local mode
-  and all three database engines were exercised end to end.
+  as-is from the reference console (plus atomic SSH writes). The v2 upload
+  path was exercised against a local ssh2 test server and a mocked SSM
+  executor; local mode and all three database engines end to end.
+- **EC2 (SSM) reads are capped at ~18 KB of file.** Thumbnails in ec2 mode
+  are fetched from the web app's public `/uploads` URL instead, and a
+  rebuild bundle made over SSM skips (and lists) any upload larger than
+  that. Use SSH or local access for a complete bundle.
 - **Remote SQLite doesn't enforce foreign keys** (one `sqlite3` process
-  per statement). Members → Delete removes child token rows explicitly;
-  a raw Data Browser delete of a `users` row on a remote SQLite database
-  leaves its tokens behind.
+  per statement). Nonprofits / Events / Raffles → Delete remove child rows
+  explicitly; a raw Data Browser delete of a parent row on a remote SQLite
+  database leaves its children behind.
 - **Secrets in `config.json`.** The SSH private key, EC2 access keys and
   the MySQL password live there. Keep it out of version control once
   filled in, and `chmod 0600`.

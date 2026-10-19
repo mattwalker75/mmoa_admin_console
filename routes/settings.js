@@ -169,7 +169,7 @@ module.exports = function (db, appConfig, appConfigModule) {
         <section class="card surface-target card-pad space-y-4">
           <div>
             <h2 class="text-base font-semibold text-slate-900 dark:text-slate-100">Password complexity</h2>
-            <p class="mt-0.5 text-xs text-slate-500 dark:text-slate-400">Applied when a console admin password is created or changed, and to member passwords set from the Members page. Existing passwords keep working until they're changed.</p>
+            <p class="mt-0.5 text-xs text-slate-500 dark:text-slate-400">Applied when a console admin password is created or changed, and to nonprofit passwords set from the Nonprofits page. Existing passwords keep working until they're changed.</p>
           </div>
 
           <div class="grid sm:grid-cols-2 gap-4">

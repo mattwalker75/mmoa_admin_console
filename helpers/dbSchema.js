@@ -102,7 +102,7 @@ function primaryKey(columns) {
 }
 
 // Password / token hash columns: shown masked and never writable from the
-// generic editors (use Members → Reset password, which bcrypts properly).
+// generic editors (use Nonprofits → Reset password, which bcrypts properly).
 function isHashColumn(name) {
   return /password_hash/i.test(name) || /_hash$/i.test(name);
 }

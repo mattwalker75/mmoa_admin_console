@@ -59,7 +59,17 @@ From the shared build contract (both engines, same columns):
 | `email_verification_tokens` | `token_id`, `user_id` (FK cascade), `token`, `expires_at`, `consumed_at`, `created_at` |
 | `password_reset_tokens` | same shape |
 | `login_lockouts` | `id`, `scope` (`ip` / account), `scope_key`, `fail_count`, `locked_until_ms` (epoch ms), `last_failed_at`, `updated_at`, `created_at` |
-| `events` | `event_id`, `title`, `description`, `location`, `starts_at`, `ends_at`, `is_published`, `created_at`, `updated_at` |
+| `organizations` | `org_id`, `user_id` (1:1), `name`, `ein`, address / contact / social fields, `description_md`, `hours`, `what_to_bring`, `public_fields` (JSON array), `is_listed`, `verification_status` (`unverified` / `verified` / `rejected`), `verified_at`, `verified_by`, `verification_note`, `created_at`, `updated_at` |
+| `org_contacts`, `org_images` (`path` relative to `uploads/`), `org_categories`, `org_cities` | children of `organizations` |
+| `categories` / `cities` | `category_id` / `city_id`, `slug` (categories), `name`, `sort`, `is_active` |
+| `events` | `event_id`, `slug`, `title`, `summary`, `description_md`, `starts_at`, `ends_at` (UTC), venue / address / city / `map_url`, `flyer_path`, `cover_path`, `registration_url` / `_label` / `_note`, `beneficiaries_text`, `is_published`, `created_at`, `updated_at` |
+| `event_beneficiaries` | `event_id`, `org_id` (nullable), `name`, `url`, `sort` — no primary key; replaced wholesale on save |
+| `raffles` / `raffle_images` | the raffle fields incl. `status` (`draft` / `open` / `closed` / `drawn`), `winning_ticket`, `claim_requirements`, `claim_preset`, `beneficiary_org_id`; prize photos with `path`, `alt`, `sort` |
+| `board_members` | `board_id`, `role_title`, `role_description`, `person_name`, `photo_path`, `sort` |
+
+Remote SQLite (ssh / ec2) has no foreign-key enforcement and no reads
+inside a transaction, so every page above reads first, then writes, and
+deletes / nulls child rows itself.
 
 Portability rules followed by every query here:
 
@@ -76,10 +86,15 @@ Portability rules followed by every query here:
 
 | Page | Writes |
 | ---- | ------ |
-| Members → Create | `INSERT INTO users` (`password_hash` bcrypt or `no_login`) |
-| Members → Modify / Verify | `UPDATE users`; verifying also stamps `consumed_at` on open verification tokens |
-| Members → Reset password | `UPDATE users SET password_hash`; consumes open reset tokens |
-| Members → Delete | one transaction: delete the member's tokens, then the user |
+| Nonprofits → Verification | `UPDATE organizations` (`verification_status`, `verified_at`, `verified_by`, `verification_note`) |
+| Nonprofits → account actions | `UPDATE users` (active, email verified + consume open verification tokens, account fields, `password_hash` + consume open reset tokens) |
+| Nonprofits → Delete | read photo paths, then one transaction: null `event_beneficiaries.org_id` / `raffles.beneficiary_org_id`, delete `org_images`, `org_contacts`, `org_categories`, `org_cities`, `organizations`, the user's tokens and the user; then `rm -f` the photo files |
+| Events → Create / Save | `INSERT` / `UPDATE events`; beneficiaries replaced (`DELETE` + `INSERT`) in one transaction; slug made unique (`-2`, `-3`, …) |
+| Events / Raffles / Board → image upload | file first (`writeFileChunked`), then `UPDATE … SET *_path` / `INSERT INTO raffle_images`; the replaced file is deleted; a failed DB write deletes the new file |
+| Events / Raffles → Delete | one transaction (children, then the row), then the image files |
+| Raffles → Status | `UPDATE raffles SET status, winning_ticket … WHERE status = <current>` (one step at a time) |
+| Categories & Cities / Board / prize photos → reorder | `sort` renumbered 1..n in one transaction |
+| Categories & Cities → Delete | `DELETE … WHERE id = ? AND NOT EXISTS (SELECT 1 FROM org_* …)` — refused while in use |
 | Locked Users → Unlock | `DELETE FROM login_lockouts WHERE id = ?` |
 | Data Browser | `UPDATE` / `INSERT` / `DELETE` on any table, by primary key |
 | Backup → Database restore | every table present in both the backup and the live schema is emptied and reloaded in one transaction, with FK checks off (`PRAGMA foreign_keys = OFF` around it on SQLite, `SET FOREIGN_KEY_CHECKS = 0` inside it on MySQL) |
