@@ -1,0 +1,13 @@
+node_modules/
+*.log
+.env
+.DS_Store
+# Local admin credentials (bcrypt hashes) — never commit.
+local_admins.json
+local_admins.json.tmp
+# Atomic-write temp file for config.json.
+config.json.tmp
+# Web App rebuild bundles (contain secrets + password hashes) — never commit.
+backups/
+# Background images uploaded from Settings → Appearance.
+public/images/

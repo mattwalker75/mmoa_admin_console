@@ -1,0 +1,156 @@
+/* tailwind.input.css — source for Tailwind v4. Compiled by `npm run build:css`
+   into public/css/tailwind.css. The @source directives tell Tailwind v4 which
+   files to scan for class names (no postcss/JS config required). */
+
+@import "tailwindcss";
+
+@source "./routes/**/*.js";
+@source "./views/**/*.js";
+@source "./scripts/**/*.js";
+@source "./public/js/**/*.js";
+@source "./app.js";
+
+/* Class-based dark mode so we can toggle dark on <html> from server state. */
+@custom-variant dark (&:where(.dark, .dark *));
+
+@theme {
+  --color-brand-50:  #f5f3ff;
+  --color-brand-100: #ede9fe;
+  --color-brand-200: #ddd6fe;
+  --color-brand-300: #c4b5fd;
+  --color-brand-400: #a78bfa;
+  --color-brand-500: #8b5cf6;
+  --color-brand-600: #7c3aed;
+  --color-brand-700: #6d28d9;
+  --color-brand-800: #5b21b6;
+  --color-brand-900: #4c1d95;
+
+  --font-sans: "Inter", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+}
+
+/* Base resets/typography. */
+@layer base {
+  html { font-family: var(--font-sans); }
+  body { @apply bg-slate-50 text-slate-900 antialiased; }
+  .dark body { @apply bg-slate-950 text-slate-100; }
+
+  h1, h2, h3, h4 { @apply font-semibold tracking-tight; }
+
+  /* Hide Alpine-cloaked elements until Alpine initializes, so conditionally
+     shown groups (x-show) and other deferred UI don't flash on first paint. */
+  [x-cloak] { display: none !important; }
+}
+
+/* Small set of named component classes for things used in many places.
+   Everything else stays as utility classes inline in the markup. */
+@layer components {
+  .btn,
+  .btn-primary,
+  .btn-secondary,
+  .btn-danger,
+  .btn-ghost {
+    @apply inline-flex items-center justify-center gap-2 rounded-lg px-4 py-2 text-sm font-semibold
+           shadow-sm transition focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-500/50
+           disabled:opacity-50 disabled:cursor-not-allowed;
+  }
+  .btn-primary  { @apply bg-brand-600 text-white hover:bg-brand-700; }
+  .btn-secondary{ @apply bg-white text-slate-700 ring-1 ring-slate-200 hover:bg-slate-50
+                       dark:bg-slate-900 dark:text-slate-100 dark:ring-slate-700 dark:hover:bg-slate-800; }
+  .btn-danger   { @apply bg-red-600 text-white hover:bg-red-700; }
+  .btn-ghost    { @apply text-slate-600 hover:bg-slate-100 dark:text-slate-300 dark:hover:bg-slate-800; }
+
+  .input {
+    @apply block w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900
+           shadow-sm placeholder:text-slate-400 focus:border-brand-500 focus:outline-none
+           focus:ring-2 focus:ring-brand-500/30
+           dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100 dark:placeholder:text-slate-500
+           h-[2.375rem];
+    /* Explicit height (not just min-height) pins <select> and <input> to
+       exactly the same visual height. min-h alone left selects shorter on
+       some browsers due to the chevron's intrinsic styling overriding the
+       computed content box. Note: textareas in this app do NOT use the
+       .input class, so the fixed height here is safe. */
+  }
+
+  .label { @apply block text-sm font-medium text-slate-700 dark:text-slate-200 mb-1.5; }
+
+  /* A disabled <fieldset> greys out every control inside it so the whole
+     group reads as "not editable here" rather than merely inert. */
+  fieldset:disabled .input,
+  fieldset:disabled textarea { @apply bg-slate-100 text-slate-500 cursor-not-allowed
+                                      dark:bg-slate-800 dark:text-slate-400; }
+  fieldset:disabled .toggle,
+  fieldset:disabled button   { @apply opacity-50 cursor-not-allowed; }
+
+  .card {
+    @apply rounded-2xl border border-slate-200 bg-white shadow-sm
+           dark:border-slate-800 dark:bg-slate-900;
+  }
+
+  .card-pad { @apply p-6; }
+
+  .nav-item {
+    @apply flex items-center gap-3 rounded-lg px-3 py-2 text-sm font-medium text-slate-300
+           hover:bg-slate-800 hover:text-white transition;
+  }
+  .nav-item.active { @apply bg-brand-600 text-white shadow; }
+
+  /* Status pills — generic good / pending / bad / neutral badges
+     (verified, active, locked, valid bundle, …). */
+  .pill,
+  .pill-running,
+  .pill-pending,
+  .pill-failed,
+  .pill-terminated {
+    @apply inline-flex items-center whitespace-nowrap rounded-full px-2.5 py-0.5 text-xs font-semibold;
+  }
+  .pill-running       { @apply bg-emerald-100 text-emerald-800 dark:bg-emerald-900/40 dark:text-emerald-300; }
+  .pill-pending       { @apply bg-amber-100 text-amber-800 dark:bg-amber-900/40 dark:text-amber-300; }
+  .pill-failed        { @apply bg-red-100 text-red-800 dark:bg-red-900/40 dark:text-red-300; }
+  .pill-terminated    { @apply bg-slate-200 text-slate-700 dark:bg-slate-800 dark:text-slate-300; }
+
+  .flash,
+  .flash-error,
+  .flash-warn,
+  .flash-info,
+  .flash-ok    { @apply rounded-lg p-3 text-sm border; }
+  .flash-error { @apply bg-red-50 border-red-200 text-red-800
+                       dark:bg-red-950/40 dark:border-red-900 dark:text-red-200; }
+  .flash-warn  { @apply bg-amber-50 border-amber-300 text-amber-900
+                       dark:bg-amber-950/40 dark:border-amber-800 dark:text-amber-200; }
+  .flash-info  { @apply bg-brand-50 border-brand-300 text-brand-900
+                       dark:bg-brand-900/40 dark:border-brand-800 dark:text-brand-200; }
+  .flash-ok    { @apply bg-emerald-50 border-emerald-200 text-emerald-800
+                       dark:bg-emerald-950/40 dark:border-emerald-900 dark:text-emerald-200; }
+
+  .table-wrap {
+    @apply overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm
+           dark:border-slate-800 dark:bg-slate-900;
+  }
+  .table-base { @apply w-full text-left text-sm; }
+  .table-base thead th {
+    @apply px-4 py-3 text-xs font-semibold uppercase tracking-wider text-slate-500
+           bg-slate-50 border-b border-slate-200
+           dark:text-slate-400 dark:bg-slate-800/50 dark:border-slate-800;
+  }
+  .table-base tbody td {
+    @apply px-4 py-3 border-b border-slate-100 dark:border-slate-800/60 text-slate-700 dark:text-slate-200;
+  }
+  .table-base tbody tr:hover td { @apply bg-slate-50 dark:bg-slate-800/40; }
+  .table-base tbody tr:last-child td { @apply border-b-0; }
+
+  /* Toggle switch (theme mode). */
+  .toggle { @apply relative inline-block h-6 w-11 flex-none cursor-pointer; }
+  .toggle input { @apply sr-only; }
+  .toggle .slider {
+    @apply absolute inset-0 rounded-full bg-slate-300 transition;
+  }
+  .toggle .slider::before {
+    content: "";
+    @apply absolute left-0.5 top-0.5 h-5 w-5 rounded-full bg-white shadow transition;
+  }
+  .toggle input:checked + .slider { @apply bg-brand-600; }
+  .toggle input:checked + .slider::before { transform: translateX(20px); }
+  .dark .toggle .slider { @apply bg-slate-700; }
+  .dark .toggle input:checked + .slider { @apply bg-brand-500; }
+}

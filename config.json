@@ -1,0 +1,98 @@
+{
+  "port": 3005,
+  "appTitle": "MMoA Admin Console",
+  "appSubtitle": "",
+  "publicBaseUrl": "http://localhost:3005",
+  "server": {
+    "ssl": false,
+    "keyPath": "",
+    "certPath": "",
+    "trustProxy": false
+  },
+  "sessionKeyMode": "auto-generate",
+  "sessionKeys": [
+    "",
+    ""
+  ],
+  "sessionMaxAgeHours": 8,
+  "passwordMinLength": 8,
+  "database": {
+    "engine": "sqlite",
+    "sqlite": {
+      "filename": "../mmoa_web_app/mmoa_web_app.db"
+    },
+    "mysql": {
+      "host": "localhost",
+      "port": 3306,
+      "database": "mmoa_web_app",
+      "user": "mmoa_app",
+      "password": "",
+      "connectionLimit": 5
+    }
+  },
+  "security": {
+    "rateLimiting": {
+      "auth": {
+        "windowSeconds": 300,
+        "maxAttempts": 10
+      }
+    },
+    "headers": {
+      "enabled": true,
+      "contentSecurityPolicy": true
+    },
+    "session": {
+      "secure": false,
+      "httpOnly": true,
+      "sameSite": "strict"
+    },
+    "password": {
+      "minLength": 8,
+      "requireUpper": false,
+      "requireLower": false,
+      "requireDigit": false,
+      "requireSymbol": false
+    }
+  },
+  "theme": {
+    "mode": "light",
+    "login": {
+      "backgroundImage": "",
+      "backgroundColor": "",
+      "cardOpacity": 1
+    },
+    "app": {
+      "backgroundImage": "",
+      "backgroundColor": "",
+      "surfaceOpacity": 1
+    }
+  },
+  "webApp": {
+    "mode": "local",
+    "local": {
+      "appPath": "../mmoa_web_app"
+    },
+    "ssh": {
+      "host": "",
+      "port": 22,
+      "username": "",
+      "privateKey": "",
+      "appPath": ""
+    },
+    "ec2": {
+      "runningInAws": false,
+      "accessKeyId": "",
+      "secretAccessKey": "",
+      "region": "us-east-1",
+      "instanceId": "",
+      "appPath": "/home/mmoa/mmoa_web_app",
+      "runAsUser": "mmoa"
+    },
+    "commands": {
+      "start": "./START_APP.sh",
+      "stop": "./STOP_APP.sh",
+      "restart": "./RESTART_APP.sh"
+    },
+    "restartPending": false
+  }
+}

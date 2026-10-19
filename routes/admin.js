@@ -1,0 +1,239 @@
+// routes/admin.js — admin-only pages.
+//   GET  /              → dashboard / system overview
+//   GET  /admins        → list / add / remove LOCAL admins (local_admins.json)
+//   POST /admins        → add or update a local admin
+//   POST /admins/delete → remove a local admin by username
+//
+// Ported from car_show_admin_console/routes/admin.js (dashboard + admins
+// sections). Members (the web app's `users` table) live in routes/members.js;
+// the car-show Deployments section, reaper and cleanup sweeper are gone.
+//
+// Every DB query is wrapped in safeGet / safeAll so a logged-in operator
+// can still navigate the UI when the web app's database is unreachable —
+// pages render with empty data + a "Database unavailable" banner.
+
+const express = require('express');
+const { page, flash } = require('../views/layout');
+const { escapeHtml } = require('../views/escapeHtml');
+const { requireAdmin, hashPassword, getPasswordRules, validatePassword } = require('../middleware/auth');
+const localAdmins = require('../helpers/localAdmins');
+
+function dbBanner(err) {
+  if (!err) return '';
+  return `<div class="flash-error mb-6">
+    <strong class="font-semibold">Database unavailable.</strong>
+    ${escapeHtml(err.message || 'unknown error')}. Some data on this page could not be loaded.
+  </div>`;
+}
+
+function pageHeader(title, subtitle, actions) {
+  return `<header class="flex items-start justify-between mb-8">
+    <div>
+      <h1 class="text-2xl font-bold text-slate-900 dark:text-slate-100">${escapeHtml(title)}</h1>
+      ${subtitle ? `<p class="mt-1 text-sm text-slate-500 dark:text-slate-400">${escapeHtml(subtitle)}</p>` : ''}
+    </div>
+    ${actions ? `<div class="flex items-center gap-2">${actions}</div>` : ''}
+  </header>`;
+}
+
+// One dashboard tile. `href` (optional) makes the whole tile a link to the
+// page that explains the number.
+function statCard(label, value, accent, href) {
+  const dot = accent || 'bg-brand-500';
+  const display = (value === null || value === undefined) ? '—' : String(value);
+  const inner = `<span class="inline-block w-2 h-10 rounded-full ${dot}"></span>
+    <div>
+      <div class="text-xs uppercase tracking-wider text-slate-500 dark:text-slate-400">${escapeHtml(label)}</div>
+      <div class="mt-1 text-2xl font-semibold text-slate-900 dark:text-slate-100">${escapeHtml(display)}</div>
+    </div>`;
+  return href
+    ? `<a href="${escapeHtml(href)}" class="stat-card card surface-target card-pad flex items-center gap-4 hover:ring-2 hover:ring-brand-500/30 transition">${inner}</a>`
+    : `<div class="stat-card card surface-target card-pad flex items-center gap-4">${inner}</div>`;
+}
+
+async function safeGet(db, sql, params, fallback) {
+  try { return { value: await db.getAsync(sql, params), err: null }; }
+  catch (err) { return { value: fallback, err }; }
+}
+
+module.exports = function (db, appConfig) {
+  const router = express.Router();
+
+  // ── Dashboard ─────────────────────────────────────────────────────────
+  // Counts only — every query is a portable COUNT(*). "Currently locked"
+  // binds JS's Date.now() against the epoch-ms column, so no engine-specific
+  // time function is needed.
+  router.get('/', requireAdmin, async (req, res) => {
+    const user = req.session.user;
+    const c = {};
+    let firstErr = null;
+    const now = Date.now();
+    for (const [key, sql, params] of [
+      ['members',      "SELECT COUNT(*) AS c FROM users WHERE role = 'member'", []],
+      ['webAdmins',    "SELECT COUNT(*) AS c FROM users WHERE role = 'admin'", []],
+      ['verified',     'SELECT COUNT(*) AS c FROM users WHERE email_verified_at IS NOT NULL', []],
+      ['unverified',   'SELECT COUNT(*) AS c FROM users WHERE email_verified_at IS NULL', []],
+      ['inactive',     'SELECT COUNT(*) AS c FROM users WHERE is_active = 0', []],
+      ['events',       'SELECT COUNT(*) AS c FROM events', []],
+      ['published',    'SELECT COUNT(*) AS c FROM events WHERE is_published = 1', []],
+      ['lockedIps',    "SELECT COUNT(*) AS c FROM login_lockouts WHERE scope = 'ip' AND locked_until_ms > ?", [now]],
+      ['lockedAccts',  "SELECT COUNT(*) AS c FROM login_lockouts WHERE scope <> 'ip' AND locked_until_ms > ?", [now]]
+    ]) {
+      const { value, err } = await safeGet(db, sql, params, { c: null });
+      c[key] = value && value.c != null ? Number(value.c) : null;
+      if (err && !firstErr) firstErr = err;
+    }
+    const localCount = localAdmins.count();
+
+    const body = `
+      ${pageHeader('Dashboard', `Welcome back, ${user.name || user.username}.`)}
+
+      ${dbBanner(firstErr)}
+
+      <section class="mb-10">
+        <h2 class="text-sm font-semibold uppercase tracking-wider text-slate-500 dark:text-slate-400 mb-3">Console</h2>
+        <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+          ${statCard('Console admins', localCount, 'bg-brand-500', '/admins')}
+        </div>
+      </section>
+
+      <section class="mb-10">
+        <h2 class="text-sm font-semibold uppercase tracking-wider text-slate-500 dark:text-slate-400 mb-3">Members</h2>
+        <div class="grid grid-cols-2 lg:grid-cols-5 gap-4">
+          ${statCard('Members', c.members, 'bg-indigo-500', '/members')}
+          ${statCard('Web app admins', c.webAdmins, 'bg-slate-500', '/members')}
+          ${statCard('Verified', c.verified, 'bg-emerald-500', '/members')}
+          ${statCard('Unverified', c.unverified, 'bg-amber-500', '/members')}
+          ${statCard('Inactive', c.inactive, 'bg-red-500', '/members')}
+        </div>
+      </section>
+
+      <section class="mb-10">
+        <h2 class="text-sm font-semibold uppercase tracking-wider text-slate-500 dark:text-slate-400 mb-3">Events</h2>
+        <div class="grid grid-cols-2 lg:grid-cols-4 gap-4">
+          ${statCard('Events', c.events, 'bg-sky-500', '/data/events')}
+          ${statCard('Published', c.published, 'bg-emerald-500', '/data/events')}
+        </div>
+      </section>
+
+      <section>
+        <h2 class="text-sm font-semibold uppercase tracking-wider text-slate-500 dark:text-slate-400 mb-3">Login lockouts (currently locked)</h2>
+        <div class="grid grid-cols-2 lg:grid-cols-4 gap-4">
+          ${statCard('Locked IPs', c.lockedIps, 'bg-red-500', '/locked-users')}
+          ${statCard('Locked accounts', c.lockedAccts, 'bg-orange-500', '/locked-users')}
+        </div>
+      </section>
+    `;
+    res.send(page({ title: 'Dashboard', body, appConfig, user, activeNav: 'home' }));
+  });
+
+  // ── Console admins (LOCAL FILE — no DB) ───────────────────────────────
+  router.get('/admins', requireAdmin, (req, res) => {
+    const user = req.session.user;
+    const rows = localAdmins.loadAll();
+    const myUsername = (user.username || '').toLowerCase();
+    const tbody = rows.map(a => {
+      const isSelf = a.username.toLowerCase() === myUsername;
+      return `
+        <tr>
+          <td class="font-mono font-semibold text-slate-900 dark:text-slate-100">${escapeHtml(a.username)}</td>
+          <td>${escapeHtml(a.email || '')}</td>
+          <td>${escapeHtml(a.name || '')}</td>
+          <td class="text-right">
+            ${!isSelf
+              ? `<form method="POST" action="/admins/delete" class="inline"
+                       x-data x-on:submit.prevent="window.uiConfirmSubmit($event.target, 'Remove this admin?', { title: 'Remove admin', confirmLabel: 'Remove' })">
+                   <input type="hidden" name="username" value="${escapeHtml(a.username)}">
+                   <button type="submit" class="btn-danger text-xs px-3 py-1.5">Remove</button>
+                 </form>`
+              : '<span class="text-xs text-slate-400">(you)</span>'}
+          </td>
+        </tr>
+      `;
+    }).join('');
+    const minLen = getPasswordRules(appConfig).minLength;
+    const body = `
+      ${pageHeader('Console admins', 'Operators who can sign in to this admin console. Stored locally in local_admins.json (gitignored). Web app accounts with role "admin" are managed under Members.')}
+      ${flash('error', req.query.error)}
+      ${flash('success', req.query.msg)}
+
+      <div class="grid lg:grid-cols-5 gap-6">
+        <div class="lg:col-span-3">
+          <div class="table-wrap surface-target">
+            <table class="table-base">
+              <thead><tr><th>Username</th><th>Email</th><th>Name</th><th class="text-right"></th></tr></thead>
+              <tbody>${tbody || '<tr><td colspan="4" class="text-center py-8 text-slate-400">No admins.</td></tr>'}</tbody>
+            </table>
+          </div>
+        </div>
+
+        <div class="lg:col-span-2">
+          <div class="card surface-target card-pad">
+            <h2 class="text-sm font-semibold text-slate-900 dark:text-slate-100">Add an admin</h2>
+            <p class="mt-1 text-xs text-slate-500 dark:text-slate-400">Re-using an existing username replaces that admin's record.</p>
+            <form method="POST" action="/admins" class="mt-4 space-y-3">
+              <div>
+                <label class="label" for="adm-user">Username</label>
+                <input id="adm-user" class="input" type="text" name="username" required autocomplete="username" maxlength="100" pattern="[A-Za-z0-9._\\-]+" title="Letters, digits, dot, dash, underscore">
+              </div>
+              <div>
+                <label class="label" for="adm-email">Email</label>
+                <input id="adm-email" class="input" type="email" name="email" required autocomplete="email" maxlength="255">
+              </div>
+              <div>
+                <label class="label" for="adm-name">Name</label>
+                <input id="adm-name" class="input" type="text" name="name" required autocomplete="name" maxlength="100">
+              </div>
+              <div>
+                <label class="label" for="adm-pw">Password</label>
+                <input id="adm-pw" class="input" type="password" name="password" required minlength="${minLen}" autocomplete="new-password">
+              </div>
+              <button type="submit" class="btn-primary w-full">Save admin</button>
+            </form>
+          </div>
+        </div>
+      </div>
+    `;
+    res.send(page({ title: 'Console admins', body, appConfig, user, activeNav: 'admins' }));
+  });
+
+  router.post('/admins', requireAdmin, async (req, res) => {
+    try {
+      const username = (req.body.username || '').trim().toLowerCase();
+      const email = (req.body.email || '').trim().toLowerCase();
+      const name = (req.body.name || '').trim();
+      const password = req.body.password || '';
+      const rules = getPasswordRules(appConfig);
+      if (!username || !email || !name || !password) return res.redirect('/admins?error=All+fields+are+required');
+      if (!/^[A-Za-z0-9._-]+$/.test(username)) {
+        return res.redirect('/admins?error=Username+may+only+contain+letters%2C+digits%2C+dot%2C+dash%2C+underscore');
+      }
+      const pwErr = validatePassword(password, rules);
+      if (pwErr) return res.redirect('/admins?error=' + encodeURIComponent(pwErr));
+
+      const password_hash = await hashPassword(password);
+      const existed = !!localAdmins.findByUsername(username);
+      localAdmins.upsert({ username, email, name, password_hash });
+      res.redirect('/admins?msg=' + encodeURIComponent(existed ? `Admin "${username}" updated.` : `Admin "${username}" added.`));
+    } catch (err) {
+      console.error('[admin] add local admin failed:', err);
+      res.redirect('/admins?error=Save+failed');
+    }
+  });
+
+  router.post('/admins/delete', requireAdmin, (req, res) => {
+    const username = (req.body.username || '').trim().toLowerCase();
+    if (!username) return res.redirect('/admins?error=Username+is+required');
+    if (username === (req.session.user.username || '').toLowerCase()) {
+      return res.redirect('/admins?error=You+cannot+remove+yourself');
+    }
+    if (localAdmins.count() <= 1) {
+      return res.redirect('/admins?error=At+least+one+admin+must+remain');
+    }
+    const removed = localAdmins.remove(username);
+    if (removed) return res.redirect('/admins?msg=' + encodeURIComponent(`Admin "${username}" removed.`));
+    res.redirect('/admins?error=Admin+not+found');
+  });
+
+  return router;
+};

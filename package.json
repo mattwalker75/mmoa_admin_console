@@ -1,0 +1,50 @@
+{
+  "name": "mmoa_admin_console",
+  "version": "0.1.0",
+  "description": "Operator-only admin console for the Mission Men of Anna web app (mmoa_web_app). Connects to the web app's database and host to manage members, data, website content, configuration, logs, and backups.",
+  "main": "app.js",
+  "scripts": {
+    "prestart": "npm run build:css && npm run copy:alpine",
+    "start": "node app.js",
+    "build:css": "tailwindcss -i ./tailwind.input.css -o ./public/css/tailwind.css --minify",
+    "watch:css": "tailwindcss -i ./tailwind.input.css -o ./public/css/tailwind.css --watch",
+    "copy:alpine": "node -e \"require('fs').copyFileSync('node_modules/alpinejs/dist/cdn.min.js', 'public/js/alpine.min.js')\""
+  },
+  "type": "commonjs",
+  "_dependencies_info": {
+    "@aws-sdk/client-ssm": "AWS Systems Manager SDK v3. Used by helpers/awsSsm.js for the 'Remote on EC2 (AWS)' Web App access mode — every command / file read / file write on the web app instance runs as an SSM Run Command (SendCommand + GetCommandInvocation polling). Lazy-required so the app still boots without it. This console never creates or modifies AWS resources.",
+    "alpinejs": "Tiny client-side reactivity framework — drives form-field show/hide, live previews, and confirm dialogs via inline x-data directives. Self-hosted at /js/alpine.min.js to satisfy CSP.",
+    "bcrypt": "Password hashing for console admin login and for member passwords set from the Members page (cost 10, same as the web app).",
+    "compression": "gzip response compression.",
+    "cookie-session": "Signed-cookie sessions for admin login state.",
+    "express": "HTTP routing + middleware.",
+    "express-rate-limit": "Per-IP throttling on the login endpoint.",
+    "helmet": "Security headers.",
+    "morgan": "HTTP request logging.",
+    "multer": "Multipart form-data parser used for background image uploads (Settings → Appearance), website image uploads, and backup file uploads.",
+    "mysql2": "MySQL driver (production).",
+    "sqlite3": "SQLite driver (local development / local-mode web app).",
+    "ssh2": "SSH/SFTP client used by helpers/webAppAccess.js for the 'Remote via SSH' Web App access mode (run commands, read/write files). Lazy-required so the app still boots without it.",
+    "@tailwindcss/cli": "(devDep) Standalone CLI used to compile tailwind.input.css → public/css/tailwind.css.",
+    "tailwindcss": "(devDep) Utility-first CSS framework. Built once at start time via the `build:css` script."
+  },
+  "dependencies": {
+    "@aws-sdk/client-ssm": "^3.1048.0",
+    "alpinejs": "^3.15.12",
+    "bcrypt": "^6.0.0",
+    "compression": "^1.8.1",
+    "cookie-session": "^2.1.1",
+    "express": "^5.2.1",
+    "express-rate-limit": "^8.2.1",
+    "helmet": "^8.1.0",
+    "morgan": "^1.10.1",
+    "multer": "^2.1.1",
+    "mysql2": "^3.16.2",
+    "sqlite3": "^5.1.7",
+    "ssh2": "^1.17.0"
+  },
+  "devDependencies": {
+    "@tailwindcss/cli": "^4.3.0",
+    "tailwindcss": "^4.3.0"
+  }
+}
