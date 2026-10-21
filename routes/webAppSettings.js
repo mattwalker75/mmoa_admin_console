@@ -61,6 +61,10 @@ const FIELDS = {
     { path: 'site.phone', label: 'Phone', type: 'text', hint: 'e.g. (214) 763-5546' },
     { path: 'site.ein', label: 'EIN', type: 'text', hint: 'e.g. 33-4035685' },
     { path: 'site.facebookUrl', label: 'Facebook page URL', type: 'text', hint: 'e.g. https://www.facebook.com/missionmenofanna' },
+    { path: 'site.donationEnabled', label: 'Show the "Donate" button', type: 'toggle', def: false, controller: true,
+      hint: 'Adds a "Donate" button to the website header that opens the donation link below in a new tab. Needs a valid link to turn on.',
+      guard: { js: () => donationUrlErrorJs("c['site.donationUrl']"), server: json => donationUrlError(waConfig.getPath(json, 'site.donationUrl')) } },
+    { path: 'site.donationUrl', label: 'Donation link', type: 'text', controller: true, hint: 'A payment link for donations, e.g. a Stripe Payment Link (https://donate.stripe.com/…). Also the {{donationUrl}} website token.' },
     { path: 'uploads.maxMb', label: 'Max image upload (MB)', type: 'number', min: 1, max: 8, def: 8, hint: 'Server-side cap for nonprofit portal photo uploads (browsers shrink photos before sending). The console always allows up to 8 MB.' }
   ],
   email: [
@@ -123,6 +127,25 @@ const FIELDS = {
 const TEXTAREA_CLS = 'block w-full font-mono text-xs rounded-lg border border-slate-200 bg-white px-3 py-2 text-slate-900 shadow-sm focus:border-brand-500 focus:outline-none focus:ring-2 focus:ring-brand-500/30 dark:border-slate-700 dark:bg-slate-950 dark:text-slate-100';
 
 // ── Render one field from its descriptor + the current remote JSON ─────────
+// Donation link check (server side of a toggle `guard`; the browser copy is
+// donationUrlErrorJs below). Same rule as the web app's
+// safeHttpUrl: an http(s) URL with a dotted host name. '' = OK.
+const DONATION_URL_MSG = 'Enter a valid donation link (starting with https://) before turning on the Donate button.';
+function donationUrlError(v) {
+  try {
+    const u = new URL(String(v || '').trim());
+    return /^https?:$/.test(u.protocol) && /\.[a-z]{2,}$/i.test(u.hostname) ? '' : DONATION_URL_MSG;
+  } catch (e) { return DONATION_URL_MSG; }
+}
+
+// Browser copy of donationUrlError as an Alpine expression (the console's
+// CSP allows no inline <script>, but Alpine expressions run via eval).
+function donationUrlErrorJs(arg) {
+  const m = JSON.stringify(DONATION_URL_MSG);
+  return `(function (v) { try { var u = new URL(String(v || '').trim()); `
+    + `return /^https?:$/.test(u.protocol) && /\\.[a-z]{2,}$/i.test(u.hostname) ? '' : ${m}; } catch (e) { return ${m}; } })(${arg})`;
+}
+
 function fieldHtml(d, json) {
   if (d.type === 'heading') {
     return `<div class="pt-2 border-t border-slate-200 dark:border-slate-800 first:border-0 first:pt-0">
@@ -152,12 +175,21 @@ function fieldHtml(d, json) {
 
   if (d.type === 'toggle') {
     const checked = (raw === undefined ? !!d.def : !!raw);
-    return `<div class="flex items-center gap-3 py-1">
-      <label class="toggle"><input type="checkbox" name="${name}" value="on" ${checked ? 'checked' : ''} ${model}><span class="slider"></span></label>
-      <div>
-        <div class="text-sm text-slate-900 dark:text-slate-100">${escapeHtml(d.label)}</div>
-        ${d.hint ? `<div class="text-xs text-slate-500 dark:text-slate-400">${escapeHtml(d.hint)}</div>` : ''}
+    // A `guard` refuses to switch the toggle ON while its expression returns
+    // an error message: the switch flips back off and the message shows
+    // under it. The form re-checks on submit; the server re-checks on save.
+    const guard = d.guard
+      ? `data-guard="${escapeHtml(d.guard.js())}" x-on:change="guardToggle($event.target, '${d.path}')"`
+      : '';
+    return `<div class="py-1">
+      <div class="flex items-center gap-3">
+        <label class="toggle"><input type="checkbox" name="${name}" value="on" ${checked ? 'checked' : ''} ${model} ${guard}><span class="slider"></span></label>
+        <div>
+          <div class="text-sm text-slate-900 dark:text-slate-100">${escapeHtml(d.label)}</div>
+          ${d.hint ? `<div class="text-xs text-slate-500 dark:text-slate-400">${escapeHtml(d.hint)}</div>` : ''}
+        </div>
       </div>
+      ${d.guard ? `<p class="mt-2 flash-error text-sm" role="alert" x-show="errs['${d.path}']" x-text="errs['${d.path}']" x-cloak></p>` : ''}
     </div>`;
   }
 
@@ -349,7 +381,13 @@ function renderBody({ tab, json, readErr, notConfigured, accessDesc, query, cmds
     ${waTabsNav(tab)}
     <form method="POST" action="/web-app-settings/${tab}" class="space-y-6 max-w-3xl"
           data-cinit="${escapeHtml(JSON.stringify(cInit))}"
-          x-data="{ c: {}, init() { this.c = JSON.parse(this.$el.dataset.cinit); } }">
+          x-data="{ c: {}, errs: {}, init() { this.c = JSON.parse(this.$el.dataset.cinit); },
+            guardMsg(el) { return el.checked ? (new Function('c', 'return ' + el.dataset.guard))(this.c) : ''; },
+            guardToggle(el, path) { const e = this.guardMsg(el); this.errs[path] = e; if (e) { el.checked = false; this.c[path] = false; } },
+            checkGuards(ev) { let bad = null;
+              this.$el.querySelectorAll('input[data-guard]').forEach(el => { const e = this.guardMsg(el); this.errs[el.name] = e; if (e && !bad) bad = el; });
+              if (bad) { ev.preventDefault(); bad.focus(); } } }"
+          x-on:submit="checkGuards($event)">
       <section class="card surface-target card-pad space-y-4">
         ${FIELDS[tab].map(d => {
           const h = fieldHtml(d, json);
@@ -455,6 +493,13 @@ module.exports = function (appConfig, appConfigModule) {
       const { json } = await waConfig.readRemoteConfig(accessor);
       const before = JSON.stringify(json);
       for (const d of FIELDS[tab]) applyField(d, json, b);
+      // Guarded toggles may only be ON when their check passes (e.g. the
+      // Donate button needs a valid link). Nothing is written on failure.
+      for (const d of FIELDS[tab]) {
+        if (!d.guard || !waConfig.getPath(json, d.path)) continue;
+        const msg = d.guard.server(json);
+        if (msg) return res.redirect(`/web-app-settings/${tab}?error=` + encodeURIComponent(msg));
+      }
       // Only touch the Web App when the form actually changed its
       // config.json. A Save with nothing edited must not rewrite the remote
       // file — and must not ask for a restart the web app doesn't need.
