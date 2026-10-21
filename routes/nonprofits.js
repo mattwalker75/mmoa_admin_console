@@ -302,7 +302,7 @@ module.exports = function (db, appConfig) {
     const { value: o, err: oErr } = await kit.safeGet(db, 'SELECT * FROM organizations WHERE user_id = ?', [id], null);
     let contacts = { rows: [] }, images = { rows: [] }, cats = { rows: [] }, cities = { rows: [] };
     if (o) {
-      contacts = await kit.safeAll(db, 'SELECT contact_id, name, role, email, phone, is_public FROM org_contacts WHERE org_id = ? ORDER BY sort, contact_id', [o.org_id]);
+      contacts = await kit.safeAll(db, 'SELECT * FROM org_contacts WHERE org_id = ? ORDER BY sort, contact_id', [o.org_id]);
       images = await kit.safeAll(db, 'SELECT image_id, path, alt FROM org_images WHERE org_id = ? ORDER BY sort, image_id', [o.org_id]);
       cats = await kit.safeAll(db, 'SELECT c.name, c.is_active FROM org_categories oc JOIN categories c ON c.category_id = oc.category_id WHERE oc.org_id = ? ORDER BY c.sort, c.name', [o.org_id]);
       cities = await kit.safeAll(db, 'SELECT c.name, c.is_active FROM org_cities ox JOIN cities c ON c.city_id = ox.city_id WHERE ox.org_id = ? ORDER BY c.sort, c.name', [o.org_id]);
@@ -338,7 +338,7 @@ module.exports = function (db, appConfig) {
       const contactsHtml = contacts.rows.length ? `<ul class="space-y-2">${contacts.rows.map(c => `<li class="text-sm">
           <span class="font-medium">${textOr(c.name)}</span>${c.role ? ` <span class="text-slate-500">— ${escapeHtml(c.role)}</span>` : ''}
           ${Number(c.is_public) ? '<span class="pill-running">public</span>' : '<span class="pill-terminated">hidden</span>'}
-          <div class="text-xs text-slate-500">${[c.email, c.phone].filter(Boolean).map(escapeHtml).join(' · ') || '—'}</div></li>`).join('')}</ul>`
+          <div class="text-xs text-slate-500">${[c.email, c.phone ? c.phone + (c.phone_ext ? ' ext. ' + c.phone_ext : '') : ''].filter(Boolean).map(escapeHtml).join(' · ') || '—'}</div></li>`).join('')}</ul>`
         : '<span class="text-slate-400">—</span>';
       const imagesHtml = images.rows.length ? `<div class="grid grid-cols-2 md:grid-cols-5 gap-3">${images.rows.map(im => `
           <div class="space-y-1">
@@ -359,7 +359,7 @@ module.exports = function (db, appConfig) {
           ${field('Name', textOr(o.name), true)}
           ${field('EIN', `<span class="font-mono">${textOr(o.ein)}</span>`, false)}
           ${field('Address', addr || '<span class="text-slate-400">—</span>', isPub('address'))}
-          ${field('Phone', textOr(o.phone), isPub('phone'))}
+          ${field('Phone', textOr(o.phone ? o.phone + (o.phone_ext ? ' ext. ' + o.phone_ext : '') : ''), isPub('phone'))}
           ${field('Public email', textOr(o.public_email), isPub('public_email'))}
           ${field('Website', linkOr(o.website_url), isPub('website_url'))}
           ${field('Facebook', linkOr(o.facebook_url), isPub('facebook_url'))}
