@@ -199,14 +199,24 @@ function uploadImg(rel, alt, cls) {
 // The shared upload widget: pick a file → the browser resizes it (canvas,
 // ≤1600 px, JPEG ~0.82, /js/image-upload.js) → POST multipart to `action`
 // → reload. Works without JS too (plain form post, original file).
+// The browser's own file box is hidden (Safari draws a thumbnail icon next to
+// the name; every browser words it differently): a "Choose File" button and
+// the chosen file's name stand in for it. The real input stays in the label,
+// so clicking the button — or Space / Enter when it has focus — opens the
+// picker.
 function uploadForm(action, label, opts) {
   const o = opts || {};
   return `<form method="POST" action="${escapeHtml(action)}" enctype="multipart/form-data" class="m-0 flex items-center gap-2 flex-wrap"
-      x-data="{ busy: false, err: '' }"
-      x-on:submit.prevent="busy = true; err = ''; window.macUploadImage($el.action, $refs.f.files[0], { alt: $refs.alt ? $refs.alt.value : '' })
+      x-data="{ busy: false, err: '', name: '' }"
+      x-on:submit.prevent="if (!$refs.f.files.length) { err = 'Choose a file first.'; return; }
+        busy = true; err = ''; window.macUploadImage($el.action, $refs.f.files[0], { alt: $refs.alt ? $refs.alt.value : '' })
         .then(r => { if (r.ok) window.location.reload(); else { err = r.error || 'Upload failed'; busy = false; } })">
-    <input x-ref="f" type="file" name="image" required accept="image/jpeg,image/png,image/webp"
-           class="block text-sm text-slate-600 dark:text-slate-300 file:mr-3 file:rounded-lg file:border-0 file:bg-brand-600 file:px-3 file:py-1.5 file:text-sm file:font-semibold file:text-white hover:file:bg-brand-700">
+    <label class="inline-flex items-center rounded-lg bg-brand-600 px-3 py-1.5 text-sm font-semibold text-white hover:bg-brand-700 cursor-pointer focus-within:ring-2 focus-within:ring-brand-500 focus-within:ring-offset-2 dark:focus-within:ring-offset-slate-900">
+      <input x-ref="f" type="file" name="image" accept="image/jpeg,image/png,image/webp" class="sr-only"
+             x-on:change="name = $event.target.files.length ? $event.target.files[0].name : ''; err = ''">
+      Choose File
+    </label>
+    <span class="text-sm text-slate-600 dark:text-slate-300 truncate max-w-[16rem]" x-text="name || 'No file chosen'" :title="name">No file chosen</span>
     ${o.alt ? `<input x-ref="alt" class="input max-w-xs" type="text" name="alt" maxlength="300" placeholder="Describe the photo (alt text)">` : ''}
     <button type="submit" class="btn-secondary text-sm" :disabled="busy">
       <span x-show="!busy">${escapeHtml(label || 'Upload')}</span><span x-show="busy" x-cloak>Uploading…</span>
