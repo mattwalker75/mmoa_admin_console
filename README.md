@@ -110,7 +110,7 @@ password is replaced by re-running the command above with the same username.
 | **Dashboard**        | Nonprofits verified / pending / rejected, upcoming events, event drafts, open raffles, locked logins, console admins + the "Pending verification" list. |
 | **Admins**           | Add / replace / remove local-file console admins. |
 | **Events**           | List filtered by a Show drop-down (All / Draft / Published / Archived); create, edit, Draft / Published / Archived switch, Preview pop-up, flyer + cover, beneficiaries, delete, View on site. |
-| **Raffles**          | Same pattern + claim presets, prize photos (≤ 8, reorder), status workflow with winning ticket. |
+| **Raffles**          | Same pattern (Draft / Published / Archived, Preview) + a separate stage (open → closed → drawn, with winning ticket), claim presets, prize photos (≤ 8, reorder). |
 | **Nonprofits**       | Accounts + directory profiles; ProPublica lookup; Verify / Reject / Reset; account actions. (`/members` redirects here.) |
 | **Categories & Cities** | The directory's service categories and cities — add, rename, reorder, activate / deactivate, delete when unused (never the built-in **Other**). |
 | **Board**            | Board roles, person names, photos, order. |

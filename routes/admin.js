@@ -77,7 +77,7 @@ module.exports = function (db, appConfig) {
       ['rejected',     "SELECT COUNT(*) AS c FROM organizations WHERE verification_status = 'rejected'", []],
       ['upcoming',     "SELECT COUNT(*) AS c FROM events WHERE status = 'published' AND starts_at >= ?", [upcomingCut]],
       ['drafts',       "SELECT COUNT(*) AS c FROM events WHERE status = 'draft'", []],
-      ['openRaffles',  "SELECT COUNT(*) AS c FROM raffles WHERE status = 'open'", []],
+      ['openRaffles',  "SELECT COUNT(*) AS c FROM raffles WHERE visibility = 'published' AND status = 'open'", []],
       ['lockedIps',    "SELECT COUNT(*) AS c FROM login_lockouts WHERE scope = 'ip' AND locked_until_ms > ?", [now]],
       ['lockedAccts',  "SELECT COUNT(*) AS c FROM login_lockouts WHERE scope <> 'ip' AND locked_until_ms > ?", [now]]
     ]) {
@@ -127,7 +127,7 @@ module.exports = function (db, appConfig) {
         <div class="grid grid-cols-2 lg:grid-cols-4 gap-4">
           ${statCard('Upcoming events', c.upcoming, 'bg-sky-500', '/events')}
           ${statCard('Event drafts', c.drafts, 'bg-slate-400', '/events?tab=drafts')}
-          ${statCard('Open raffles', c.openRaffles, 'bg-indigo-500', '/raffles?status=open')}
+          ${statCard('Open raffles', c.openRaffles, 'bg-indigo-500', '/raffles?status=published')}
         </div>
       </section>
 

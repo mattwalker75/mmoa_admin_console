@@ -64,7 +64,7 @@ From the shared build contract (both engines, same columns):
 | `categories` / `cities` | `category_id` / `city_id`, `slug` (categories), `name`, `sort`, `is_active`. The `other` category is built in: the web app re-adds it on every start, so the console locks its slug and refuses to delete it |
 | `events` | `event_id`, `slug`, `title`, `summary`, `description_md`, `starts_at`, `ends_at` (UTC), venue / address / city / `map_url`, `flyer_path`, `cover_path`, `registration_url` / `_label` / `_note`, `beneficiaries_text`, `status` (`draft` / `published` / `archived` — only published is public), `is_published` (legacy mirror: 1 only while published; the console keeps it in step), `preview_token` + `preview_expires_at` (the Preview button's 30-minute link), `is_latest` (1 on at most one event — the console clears the others — served at `/events/latest`), `created_at`, `updated_at` |
 | `event_beneficiaries` | `event_id`, `org_id` (nullable), `name`, `url`, `sort` — no primary key; replaced wholesale on save |
-| `raffles` / `raffle_images` | the raffle fields incl. `status` (`draft` / `open` / `closed` / `drawn`), `winning_ticket`, `claim_requirements`, `claim_preset`, `beneficiary_org_id`, `preview_token` + `preview_expires_at` (the Preview button's 30-minute link); prize photos with `path`, `alt`, `sort` |
+| `raffles` / `raffle_images` | the raffle fields incl. `visibility` (`draft` / `published` / `archived` — only published is public; `is_published` is a legacy mirror), `status` = the stage (`open` / `closed` / `drawn`; `draft` is a legacy value the web app converts on boot), `winning_ticket`, `claim_requirements`, `claim_preset`, `beneficiary_org_id`, `preview_token` + `preview_expires_at` (the Preview button's 30-minute link); prize photos with `path`, `alt`, `sort` |
 | `board_members` | `board_id`, `role_title`, `role_description`, `person_name`, `photo_path`, `sort` |
 
 Remote SQLite (ssh / ec2) has no foreign-key enforcement and no reads
@@ -92,7 +92,7 @@ Portability rules followed by every query here:
 | Events → Create / Save | `INSERT` / `UPDATE events`; beneficiaries replaced (`DELETE` + `INSERT`) in one transaction; slug made unique (`-2`, `-3`, …) |
 | Events / Raffles / Board → image upload | file first (`writeFileChunked`), then `UPDATE … SET *_path` / `INSERT INTO raffle_images`; the replaced file is deleted; a failed DB write deletes the new file |
 | Events / Raffles → Delete | one transaction (children, then the row), then the image files |
-| Raffles → Status | `UPDATE raffles SET status, winning_ticket … WHERE status = <current>` (one step at a time) |
+| Raffles → Stage | `UPDATE raffles SET status, winning_ticket … WHERE status = <current>` (one step at a time) |
 | Categories & Cities / Board / prize photos → reorder | `sort` renumbered 1..n in one transaction |
 | Categories & Cities → Delete | `DELETE … WHERE id = ? AND NOT EXISTS (SELECT 1 FROM org_* …)` — refused while in use |
 | Locked Users → Unlock | `DELETE FROM login_lockouts WHERE id = ?` |

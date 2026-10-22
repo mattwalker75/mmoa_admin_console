@@ -96,18 +96,28 @@ The website is where events live (Facebook posts just link to them).
 Same pattern as events. Tickets are sold **in person only** (Texas law),
 so "How to buy" carries that wording and there is no payment link.
 
-- **Show** drop-down — **All** (the default), **Draft**, **Open**,
-  **Closed** or **Drawn**, each with its count; picking one reloads the list.
+A raffle has two separate settings:
+
+- **Status** — **Draft** / **Published** / **Archived**, exactly like
+  events: only Published raffles are on the website. Change it with the
+  buttons at the top of the page or the bottom of the form (a click saves
+  the raffle, edits included).
+- **Stage** — **Open** (selling tickets) → **Closed** (sales ended) →
+  **Drawn** (enter the winning ticket number), one step at a time, each
+  undoable one step back. Stages work whatever the status, so you can take
+  a *draft* through every stage and **Preview** how the page looks at each
+  one before publishing. On the website, published Open / Closed raffles
+  are "current", Drawn ones "past"; the winning ticket shows only once drawn.
+
+- **Show** drop-down — **All** (the default), **Draft**, **Published** or
+  **Archived**, each with its count; the list shows each raffle's status
+  and stage.
 - **Preview** — the same pop-up as events: the raffle's real website page,
-  even while it's a draft or hidden (a banner says so), at Desktop / Phone
+  even while it's a draft or archived (a banner says so), at Desktop / Phone
   width. It shows the last *saved* version and needs the Web App running.
 
 - **Claim requirements** — one per line. **Firearm preset** / **Standard
   preset** fill the box (you can still edit it).
-- **Status** — Draft → Open (selling) → Closed (sales ended) → Drawn
-  (enter the winning ticket number), one step at a time; each step can be
-  undone one step back. The website lists open, closed and drawn raffles
-  that are published, and shows the winning ticket only once drawn.
 - **Flyer** and up to **8 prize photos** (with alt text; ◀ ▶ to reorder).
 
 ## Nonprofits

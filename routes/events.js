@@ -55,6 +55,7 @@ const { escapeHtml, jsAttrStr } = require('../views/escapeHtml');
 const { requireAdmin } = require('../middleware/auth');
 const kit = require('../helpers/pageKit');
 const preview = require('../helpers/sitePreview');
+const vis = require('../helpers/visibility');
 const lt = require('../helpers/localTime');
 const uploads = require('../helpers/webAppUploads');
 
@@ -67,18 +68,10 @@ const FILTERS = [
   { key: 'archived', label: 'Archived' }
 ];
 const OLD_TABS = { upcoming: 'published', past: 'published', drafts: 'draft', draft: 'draft', published: 'published', archived: 'archived' };
-const STATUSES = [
-  { key: 'draft', label: 'Draft', hint: 'Being prepared — not on the website yet.' },
-  { key: 'published', label: 'Published', hint: 'On the website now.' },
-  { key: 'archived', label: 'Archived', hint: 'Taken off the website; kept here for reference.' }
-];
-const STATUS_KEYS = STATUSES.map(s => s.key);
-
-function statusPill(s) {
-  if (s === 'published') return '<span class="pill-running">Published</span>';
-  if (s === 'archived') return '<span class="pill-terminated">Archived</span>';
-  return '<span class="pill-pending">Draft</span>';
-}
+// Draft / Published / Archived (shared with raffles: helpers/visibility.js).
+const STATUSES = vis.VISIBILITY;
+const STATUS_KEYS = vis.KEYS;
+const statusPill = vis.pill;
 
 // "no such column: status" → the web app hasn't been restarted since the
 // update that adds it.
@@ -88,31 +81,8 @@ function statusColumnHint(err) {
     : '';
 }
 
-// Draft / Published / Archived as a 3-position switch. Each button submits
-// the event form (form="ev-form") with set_status, so a click SAVES the
-// event — edits included — with that status; the current one is shown
-// selected. Used in the page header and at the bottom of the form, which
-// behave identically. On the New page the click creates the event with that
-// status.
-function statusButtons(current) {
-  return `<div class="inline-flex rounded-lg border border-slate-300 dark:border-slate-600 overflow-hidden divide-x divide-slate-300 dark:divide-slate-600" role="group" aria-label="Status — clicking one saves the event">
-      ${STATUSES.map(s => s.key === current
-        ? `<span class="px-3 py-2 text-sm font-semibold bg-brand-600 text-white" aria-current="true" title="${escapeHtml(s.hint)}">${s.label}</span>`
-        : `<button type="submit" form="ev-form" name="set_status" value="${s.key}" class="px-3 py-2 text-sm font-semibold text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800" title="${escapeHtml(s.hint)} Saves your changes too.">${s.label}</button>`).join('')}
-    </div>`;
-}
-
-// The bottom-of-form version: the buttons, the current status's meaning, and
-// a hidden field so plain "Save changes" keeps the status as it is.
-function statusSwitch(current) {
-  const s = STATUSES.find(x => x.key === current) || STATUSES[0];
-  return `<div>
-      <input type="hidden" name="status" value="${s.key}">
-      <div class="label">Status</div>
-      ${statusButtons(s.key)}
-      <p class="mt-1 text-xs text-slate-500 dark:text-slate-400">${escapeHtml(s.hint)} Click another status to switch — that saves the event.</p>
-    </div>`;
-}
+const statusButtons = (current) => vis.buttons(current, { formId: 'ev-form', noun: 'event' });
+const statusSwitch = (current) => vis.switcher(current, { formId: 'ev-form', noun: 'event' });
 
 const SLOTS = { flyer: 'flyer_path', cover: 'cover_path' };
 const TEXTAREA_CLS = 'block w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900 shadow-sm focus:border-brand-500 focus:outline-none focus:ring-2 focus:ring-brand-500/30 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100';

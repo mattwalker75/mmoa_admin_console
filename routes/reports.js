@@ -176,8 +176,8 @@ const REPORTS = {
       { key: 'raffle_id',         label: 'Raffle ID' },
       { key: 'title',             label: 'Title' },
       { key: 'slug',              label: 'Slug' },
-      { key: 'status',            label: 'Status' },
-      { key: 'is_published',      label: 'Published' },
+      { key: 'visibility',        label: 'Status' },
+      { key: 'status',            label: 'Stage' },
       { key: 'ticket_price_text', label: 'Ticket price' },
       { key: 'total_tickets',     label: 'Total tickets' },
       { key: 'drawing_at',        label: 'Drawing (UTC)' },
@@ -190,7 +190,7 @@ const REPORTS = {
     ],
     async fetch({ db }) {
       const rows = await db.allAsync(`
-        SELECT r.raffle_id, r.title, r.slug, r.status, r.is_published, r.ticket_price_text, r.total_tickets,
+        SELECT r.raffle_id, r.title, r.slug, r.status, r.visibility, r.ticket_price_text, r.total_tickets,
                r.drawing_at, r.drawing_location, r.winning_ticket, r.beneficiary_text, r.claim_preset, r.updated_at,
                o.name AS org_name
           FROM raffles r LEFT JOIN organizations o ON o.org_id = r.beneficiary_org_id
@@ -199,7 +199,6 @@ const REPORTS = {
       const n = new Map(counts.map(c => [Number(c.raffle_id), Number(c.c)]));
       return rows.map(r => ({
         ...r,
-        is_published: yesNo(r.is_published),
         beneficiary: [r.org_name, r.beneficiary_text].filter(Boolean).join(' — '),
         photos: n.get(Number(r.raffle_id)) || 0
       }));

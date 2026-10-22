@@ -1,15 +1,17 @@
 // routes/raffles.js — the website's raffles (the web app's `raffles` +
 // `raffle_images` tables).
 //
-//   GET  /raffles?status=all|draft|open|closed|drawn → list
+//   GET  /raffles?status=all|draft|published|archived → list ("Show" filter)
 //   GET  /raffles/new                      → blank form
 //   POST /raffles                          → create
-//   GET  /raffles/:id                      → edit form, status workflow, images
-//   POST /raffles/:id                      → save
-//   POST /raffles/:id/status               → move along draft → open → closed → drawn
-//                                            (or one step back); drawn needs the
+//   GET  /raffles/:id                      → edit form, stage card, images
+//   POST /raffles/:id                      → save (incl. visibility; the
+//                                            Draft / Published / Archived
+//                                            buttons submit it with set_status)
+//   POST /raffles/:id/status               → stage: open → closed → drawn (or
+//                                            one step back); drawn needs the
 //                                            winning ticket number
-//   POST /raffles/:id/publish              → state=1 / state=0
+//   POST /raffles/:id/preview              → JSON { url } (helpers/sitePreview)
 //   POST /raffles/:id/delete               → delete row, prize photos, files
 //   POST /raffles/:id/flyer                → upload the flyer (multipart "image")
 //   POST /raffles/:id/flyer/remove
@@ -24,6 +26,14 @@
 // 'firearm' / 'standard' when the list matches that preset exactly,
 // otherwise 'custom'. The web app shows winning_ticket only once status is
 // 'drawn'.
+//
+// Two separate settings, as on the website:
+//   visibility  draft | published | archived (helpers/visibility.js, same as
+//               events) — only published raffles are on the website;
+//               is_published is kept in step as a legacy mirror.
+//   status      the STAGE: open (selling tickets) → closed (sales ended) →
+//               drawn (winner announced). Stepped in ANY visibility, so a
+//               draft can be previewed in each stage before publishing.
 
 const express = require('express');
 const { page, flash } = require('../views/layout');
@@ -31,12 +41,15 @@ const { escapeHtml, jsAttrStr } = require('../views/escapeHtml');
 const { requireAdmin } = require('../middleware/auth');
 const kit = require('../helpers/pageKit');
 const preview = require('../helpers/sitePreview');
+const vis = require('../helpers/visibility');
 const lt = require('../helpers/localTime');
 const uploads = require('../helpers/webAppUploads');
 const { markdownField, TEXTAREA_CLS } = require('./events');
 
-const STATUSES = ['draft', 'open', 'closed', 'drawn'];
-const STATUS_LABEL = { draft: 'Draft', open: 'Open — selling tickets', closed: 'Closed — sales ended', drawn: 'Drawn — winner announced' };
+// Stages (raffles.status). 'draft' is only a legacy value — the web app
+// turns it into visibility draft + stage open when it starts.
+const STAGES = ['open', 'closed', 'drawn'];
+const STATUS_LABEL = { draft: 'Draft (old)', open: 'Open — selling tickets', closed: 'Closed — sales ended', drawn: 'Drawn — winner announced' };
 const STATUS_PILL = { draft: 'pill-terminated', open: 'pill-running', closed: 'pill-pending', drawn: 'pill-failed' };
 const MAX_IMAGES = 8;
 
@@ -71,7 +84,7 @@ function presetOf(text) {
 
 const RAFFLE_COLS = `raffle_id, slug, title, prize_description_md, flyer_path, total_tickets, ticket_price_text,
   drawing_at, drawing_location, how_to_buy, claim_requirements, claim_preset, beneficiary_org_id,
-  beneficiary_text, status, winning_ticket, is_published, created_at, updated_at`;
+  beneficiary_text, status, visibility, winning_ticket, is_published, created_at, updated_at`;
 
 function readForm(b, appConfig) {
   const values = {
@@ -80,7 +93,7 @@ function readForm(b, appConfig) {
     drawing_local: b.drawing_at || '', drawing_location: b.drawing_location || '',
     how_to_buy: b.how_to_buy || '', claim_requirements: b.claim_requirements || '',
     beneficiary_org_id: b.beneficiary_org_id || '', beneficiary_text: b.beneficiary_text || '',
-    is_published: kit.yes(b.is_published)
+    visibility: vis.fromForm(b, 'visibility')
   };
   const fail = (error) => ({ values, error });
   const title = kit.str(b.title, 200);
@@ -110,7 +123,8 @@ function readForm(b, appConfig) {
       claim_preset: claims ? presetOf(claims) : null,
       beneficiary_org_id: kit.idParam(b.beneficiary_org_id),
       beneficiary_text: kit.str(b.beneficiary_text, 500),
-      is_published: kit.yes(b.is_published) ? 1 : 0
+      visibility: values.visibility,
+      is_published: values.visibility === 'published' ? 1 : 0
     }
   };
 }
@@ -122,7 +136,7 @@ function valuesFromRow(r, appConfig) {
     drawing_local: lt.utcToLocalInput(r.drawing_at, appConfig), drawing_location: r.drawing_location || '',
     how_to_buy: r.how_to_buy || '', claim_requirements: r.claim_requirements || '',
     beneficiary_org_id: r.beneficiary_org_id ? String(r.beneficiary_org_id) : '', beneficiary_text: r.beneficiary_text || '',
-    is_published: !!Number(r.is_published)
+    visibility: vis.KEYS.includes(r.visibility) ? r.visibility : 'draft'
   };
 }
 
@@ -184,10 +198,7 @@ function raffleForm(action, v, orgs, isNew, zone) {
     </section>
 
     <div class="flex items-center justify-between gap-4 flex-wrap">
-      <label class="inline-flex items-center gap-2 text-sm text-slate-700 dark:text-slate-200">
-        <input type="checkbox" name="is_published" value="1" class="h-4 w-4" ${v.is_published ? 'checked' : ''}>
-        Published <span class="text-xs text-slate-500">(visible on the website once its status is open, closed or drawn)</span>
-      </label>
+      ${vis.switcher(v.visibility || 'draft', { formId: 'rf-form', noun: 'raffle', field: 'visibility' })}
       <div class="flex items-center gap-2">
         <a href="/raffles" class="btn-secondary">Cancel</a>
         <button type="submit" class="btn-primary">${isNew ? 'Create raffle' : 'Save changes'}</button>
@@ -198,10 +209,10 @@ function raffleForm(action, v, orgs, isNew, zone) {
 
 function statusCard(r) {
   const id = Number(r.raffle_id);
-  const i = STATUSES.indexOf(r.status);
-  const next = STATUSES[i + 1];
-  const prev = STATUSES[i - 1];
-  const steps = STATUSES.map((s, k) => `<li class="flex items-center gap-2 ${k <= i ? 'text-slate-900 dark:text-slate-100 font-semibold' : 'text-slate-400'}">
+  const i = STAGES.indexOf(r.status);
+  const next = STAGES[i + 1];
+  const prev = STAGES[i - 1];
+  const steps = STAGES.map((s, k) => `<li class="flex items-center gap-2 ${k <= i ? 'text-slate-900 dark:text-slate-100 font-semibold' : 'text-slate-400'}">
       <span class="inline-flex h-6 w-6 items-center justify-center rounded-full text-xs ${k < i ? 'bg-emerald-500 text-white' : k === i ? 'bg-brand-600 text-white' : 'bg-slate-200 dark:bg-slate-700'}">${k + 1}</span>${escapeHtml(STATUS_LABEL[s])}</li>`).join('');
   let forward = '';
   if (next === 'drawn') {
@@ -223,7 +234,8 @@ function statusCard(r) {
         <button type="submit" class="btn-secondary">← Back to ${escapeHtml(prev)}</button>
       </form>` : '';
   return `<section class="card surface-target card-pad">
-    <h2 class="text-sm font-semibold uppercase tracking-wider text-slate-500 dark:text-slate-400 mb-3">Status</h2>
+    <h2 class="text-sm font-semibold uppercase tracking-wider text-slate-500 dark:text-slate-400">Stage</h2>
+    <p class="mt-0.5 mb-3 text-xs text-slate-500 dark:text-slate-400">Where the raffle is in its life. Works whatever the status (Draft / Published / Archived) — step a draft through each stage and use Preview to check how the page looks.</p>
     <ol class="flex flex-wrap gap-x-6 gap-y-2 text-sm">${steps}</ol>
     ${r.status === 'drawn' ? `<p class="mt-3 text-sm">Winning ticket: <strong class="font-mono">${escapeHtml(r.winning_ticket || '—')}</strong></p>` : ''}
     <div class="mt-4 flex items-end gap-3 flex-wrap">${forward}${back}</div>
@@ -264,28 +276,28 @@ module.exports = function (db, appConfig) {
 
   router.get('/raffles', requireAdmin, async (req, res) => {
     const user = req.session.user;
-    const filter = STATUSES.includes(req.query.status) ? req.query.status : 'all';
+    const filter = vis.KEYS.includes(req.query.status) ? req.query.status : 'all';
     const { rows, err } = await kit.safeAll(db,
-      `SELECT raffle_id, slug, title, status, is_published, drawing_at, ticket_price_text, flyer_path, winning_ticket FROM raffles
-        ${filter === 'all' ? '' : 'WHERE status = ?'} ORDER BY (drawing_at IS NULL), drawing_at DESC, raffle_id DESC`,
+      `SELECT raffle_id, slug, title, status, visibility, drawing_at, ticket_price_text, flyer_path, winning_ticket FROM raffles
+        ${filter === 'all' ? '' : 'WHERE visibility = ?'} ORDER BY (drawing_at IS NULL), drawing_at DESC, raffle_id DESC`,
       filter === 'all' ? [] : [filter]);
-    const counts = await kit.safeAll(db, 'SELECT status, COUNT(*) AS c FROM raffles GROUP BY status', []);
+    const counts = await kit.safeAll(db, 'SELECT visibility, COUNT(*) AS c FROM raffles GROUP BY visibility', []);
     const cnt = {}; let total = 0;
-    for (const c of counts.rows) { cnt[c.status] = Number(c.c); total += Number(c.c); }
-    // "Show" drop-down (same as Events): All + one option per status, with counts.
+    for (const c of counts.rows) { cnt[c.visibility] = Number(c.c); total += Number(c.c); }
+    // "Show" drop-down (same as Events): All + Draft / Published / Archived, with counts.
     const opt = (key, label, n) => `<option value="${key}" ${key === filter ? 'selected' : ''}>${label} (${n || 0})</option>`;
-    const options = opt('all', 'All', total) + STATUSES.map(s => opt(s, s[0].toUpperCase() + s.slice(1), cnt[s])).join('');
+    const options = opt('all', 'All', total) + vis.VISIBILITY.map(v => opt(v.key, v.label, cnt[v.key])).join('');
     const tbody = rows.map(r => `
       <tr class="cursor-pointer" data-href="/raffles/${Number(r.raffle_id)}" x-on:click="window.location = $el.dataset.href">
         <td class="font-medium text-slate-900 dark:text-slate-100"><a class="hover:underline" href="/raffles/${Number(r.raffle_id)}">${escapeHtml(r.title)}</a>
           <div class="font-mono text-xs text-slate-400">/raffles/${escapeHtml(r.slug)}</div></td>
+        <td>${vis.pill(r.visibility)}</td>
         <td><span class="${STATUS_PILL[r.status] || 'pill'}">${escapeHtml(r.status)}</span>${r.status === 'drawn' && r.winning_ticket ? ` <span class="text-xs text-slate-500">#${escapeHtml(r.winning_ticket)}</span>` : ''}</td>
-        <td>${Number(r.is_published) ? '<span class="pill-running">Published</span>' : '<span class="pill-terminated">Hidden</span>'}</td>
         <td class="whitespace-nowrap text-xs text-slate-500">${escapeHtml(lt.formatLocal(r.drawing_at, appConfig) || '—')}</td>
         <td class="text-xs">${escapeHtml(r.ticket_price_text || '—')}</td>
       </tr>`).join('');
     const body = `
-      ${kit.pageHeader('Raffles', 'Raffles shown on the website. Tickets are sold in person only.',
+      ${kit.pageHeader('Raffles', 'Only Published raffles are on the website. Tickets are sold in person only.',
         `<a href="/raffles/new" class="btn-primary"><span aria-hidden="true">＋</span><span>New raffle</span></a>`)}
       ${flash('error', req.query.error)}
       ${flash('success', req.query.msg)}
@@ -297,7 +309,7 @@ module.exports = function (db, appConfig) {
       </form>
       <div class="table-wrap surface-target" x-data>
         <table class="table-base">
-          <thead><tr><th>Title</th><th>Status</th><th>Website</th><th>Drawing</th><th>Price</th></tr></thead>
+          <thead><tr><th>Title</th><th>Status</th><th>Stage</th><th>Drawing</th><th>Price</th></tr></thead>
           <tbody>${tbody || `<tr><td colspan="5" class="text-center py-8 text-slate-400">${err ? 'Unavailable.' : filter === 'all' ? 'No raffles yet.' : 'No ' + filter + ' raffles.'}</td></tr>`}</tbody>
         </table>
       </div>`;
@@ -306,10 +318,10 @@ module.exports = function (db, appConfig) {
 
   async function renderNew(req, res, values, error) {
     const orgs = await loadOrgs();
-    const v = values || { how_to_buy: HOW_TO_BUY_DEFAULT };
+    const v = values || { how_to_buy: HOW_TO_BUY_DEFAULT, visibility: 'draft' };
     const body = `
       <div class="mb-4"><a class="text-sm text-brand-600 hover:underline" href="/raffles">← Back to raffles</a></div>
-      ${kit.pageHeader('New raffle', 'Starts as a draft. Save it first — the flyer and prize photo uploads appear once it exists.')}
+      ${kit.pageHeader('New raffle', 'Starts as a draft in the Open stage. Save it first — the flyer and prize photo uploads appear once it exists.')}
       ${flash('error', error)}
       ${kit.dbBanner(orgs.err)}
       <div class="max-w-5xl">${raffleForm('/raffles', v, orgs.rows, true, lt.zoneOf(appConfig))}</div>`;
@@ -327,13 +339,14 @@ module.exports = function (db, appConfig) {
       const now = kit.sqlTime();
       const ins = await db.runAsync(`INSERT INTO raffles (slug, title, prize_description_md, total_tickets, ticket_price_text,
           drawing_at, drawing_location, how_to_buy, claim_requirements, claim_preset, beneficiary_org_id, beneficiary_text,
-          status, is_published, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'draft', ?, ?, ?)`,
+          status, visibility, is_published, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', ?, ?, ?, ?)`,
         [f.slug, f.title, f.prize_description_md, f.total_tickets, f.ticket_price_text, f.drawing_at, f.drawing_location,
-         f.how_to_buy, f.claim_requirements, f.claim_preset, f.beneficiary_org_id, f.beneficiary_text, f.is_published, now, now]);
+         f.how_to_buy, f.claim_requirements, f.claim_preset, f.beneficiary_org_id, f.beneficiary_text, f.visibility, f.is_published, now, now]);
       let id = ins && ins.lastID ? Number(ins.lastID) : null;
       if (!id) { const row = await db.getAsync('SELECT raffle_id FROM raffles WHERE slug = ?', [f.slug]); id = row && Number(row.raffle_id); }
       console.log(`[raffles] ${req.session.user.username} created raffle #${id} (${f.slug})`);
-      res.redirect(`/raffles/${id}?msg=` + encodeURIComponent('Raffle created as a draft. Add the flyer and prize photos below, then open ticket sales.'));
+      res.redirect(`/raffles/${id}?msg=` + encodeURIComponent((f.visibility === 'published' ? 'Raffle created and published — it is on the website now (stage: open).'
+        : f.visibility === 'archived' ? 'Raffle created as archived.' : 'Raffle created as a draft (stage: open).') + ' Add the flyer and prize photos below.'));
     } catch (err) {
       console.error('[raffles] create failed:', err);
       renderNew(req, res, r.values, 'Create failed: ' + (err.message || 'unknown error'));
@@ -352,28 +365,22 @@ module.exports = function (db, appConfig) {
     const v = values || valuesFromRow(r, appConfig);
     const base = await kit.webAppPublicUrl(appConfig);
     if (base) preview.allowFramingOf(res, base);
-    const published = !!Number(r.is_published);
-    const viewLink = base
-      ? `<a class="btn-secondary" href="${escapeHtml(base + '/raffles/' + r.slug)}" target="_blank" rel="noopener">View on site <span aria-hidden="true">↗</span></a>`
-      : `<span class="btn-secondary opacity-50 cursor-not-allowed" title="Set publicBaseUrl under Web App Settings → General">View on site ↗</span>`;
-    const actions = `${preview.previewButton({ endpoint: `/raffles/${id}/preview`, noun: 'raffle', base })}
+    const visibility = vis.KEYS.includes(r.visibility) ? r.visibility : 'draft';
+    const visInfo = vis.VISIBILITY.find(x => x.key === visibility);
+    const viewLink = base && visibility === 'published'
+      ? `<a class="btn-secondary" href="${escapeHtml(base + '/raffles/' + r.slug)}" target="_blank" rel="noopener">View on site <span aria-hidden="true">↗</span></a>` : '';
+    const actions = `${vis.buttons(visibility, { formId: 'rf-form', noun: 'raffle' })}
+      ${preview.previewButton({ endpoint: `/raffles/${id}/preview`, noun: 'raffle', base })}
       ${viewLink}
-      <form method="POST" action="/raffles/${id}/publish" class="m-0">
-        <input type="hidden" name="state" value="${published ? '0' : '1'}">
-        <button type="submit" class="${published ? 'btn-secondary' : 'btn-primary'}">${published ? 'Unpublish' : 'Publish'}</button>
-      </form>
       <form method="POST" action="/raffles/${id}/delete" class="m-0" x-data
             x-on:submit.prevent="window.uiConfirmSubmit($event.target, ${jsAttrStr('Delete the raffle "' + r.title + '"? Its flyer and prize photo files are deleted too. This cannot be undone.')}, { title: 'Delete raffle', confirmLabel: 'Delete' })">
         <button type="submit" class="btn-danger">Delete</button>
       </form>`;
-    const draftNote = published && r.status === 'draft'
-      ? `<div class="flash-warn mb-4 text-sm">Published, but still a <strong>draft</strong> — the website only lists open, closed and drawn raffles. Open ticket sales below when it's ready.</div>` : '';
     const body = `
       <div class="mb-4"><a class="text-sm text-brand-600 hover:underline" href="/raffles">← Back to raffles</a></div>
-      ${kit.pageHeader(r.title, `${STATUS_LABEL[r.status] || r.status} · ${published ? 'Published' : 'Hidden from the website'}`, actions)}
+      ${kit.pageHeader(r.title, `${visInfo.label} — ${visInfo.hint} · Stage: ${STATUS_LABEL[r.status] || r.status}`, actions)}
       ${flash('error', error || req.query.error)}
       ${flash('success', req.query.msg)}
-      ${draftNote}
       ${kit.dbBanner(images.err || orgs.err)}
       <div class="max-w-5xl space-y-6">
         ${statusCard(r)}
@@ -415,11 +422,15 @@ module.exports = function (db, appConfig) {
       f.slug = await kit.uniqueSlug(db, 'raffles', 'raffle_id', f.slug, id);
       await db.runAsync(`UPDATE raffles SET slug = ?, title = ?, prize_description_md = ?, total_tickets = ?, ticket_price_text = ?,
           drawing_at = ?, drawing_location = ?, how_to_buy = ?, claim_requirements = ?, claim_preset = ?,
-          beneficiary_org_id = ?, beneficiary_text = ?, is_published = ?, updated_at = ? WHERE raffle_id = ?`,
+          beneficiary_org_id = ?, beneficiary_text = ?, visibility = ?, is_published = ?, updated_at = ? WHERE raffle_id = ?`,
         [f.slug, f.title, f.prize_description_md, f.total_tickets, f.ticket_price_text, f.drawing_at, f.drawing_location,
-         f.how_to_buy, f.claim_requirements, f.claim_preset, f.beneficiary_org_id, f.beneficiary_text, f.is_published,
+         f.how_to_buy, f.claim_requirements, f.claim_preset, f.beneficiary_org_id, f.beneficiary_text, f.visibility, f.is_published,
          kit.sqlTime(), id]);
-      res.redirect(`/raffles/${id}?msg=Raffle+saved.`);
+      const msg = !req.body.set_status ? 'Raffle saved.'
+        : f.visibility === 'published' ? 'Saved and published — it is on the website now.'
+        : f.visibility === 'archived' ? 'Saved and archived — it is off the website, kept here for reference.'
+        : 'Saved as a draft — it is not on the website.';
+      res.redirect(`/raffles/${id}?msg=` + encodeURIComponent(msg));
     } catch (err) {
       console.error('[raffles] update failed:', err);
       renderEdit(req, res, id, r.values, 'Save failed: ' + (err.message || 'unknown error'));
@@ -433,12 +444,12 @@ module.exports = function (db, appConfig) {
     const id = kit.idParam(req.params.id);
     if (!id) return res.redirect('/raffles?error=Invalid+raffle+id');
     const to = (req.body && req.body.status) || '';
-    if (!STATUSES.includes(to)) return res.redirect(`/raffles/${id}?error=Unknown+status`);
+    if (!STAGES.includes(to)) return res.redirect(`/raffles/${id}?error=Unknown+stage`);
     try {
       const r = await db.getAsync('SELECT status FROM raffles WHERE raffle_id = ?', [id]);
       if (!r) return res.redirect('/raffles?error=Raffle+not+found');
       const from = r.status;
-      if (Math.abs(STATUSES.indexOf(to) - STATUSES.indexOf(from)) !== 1) {
+      if (Math.abs(STAGES.indexOf(to) - STAGES.indexOf(from)) !== 1) {
         return res.redirect(`/raffles/${id}?error=` + encodeURIComponent(`Can't go from ${from} to ${to} — one step at a time.`));
       }
       let winning = null;
@@ -450,7 +461,7 @@ module.exports = function (db, appConfig) {
         [to, to === 'drawn' ? winning : null, kit.sqlTime(), id, from]);
       if (!u.changes) return res.redirect(`/raffles/${id}?error=` + encodeURIComponent('The raffle changed meanwhile — reload and try again.'));
       console.log(`[raffles] ${req.session.user.username} moved raffle #${id} ${from} → ${to}`);
-      res.redirect(`/raffles/${id}?msg=` + encodeURIComponent(`Status: ${STATUS_LABEL[to]}.`));
+      res.redirect(`/raffles/${id}?msg=` + encodeURIComponent(`Stage: ${STATUS_LABEL[to]}.`));
     } catch (err) {
       res.redirect(`/raffles/${id}?error=` + encodeURIComponent('Update failed: ' + (err.message || err)));
     }
@@ -463,19 +474,6 @@ module.exports = function (db, appConfig) {
     if (!id) return res.status(400).json({ error: 'Invalid raffle id' });
     const r = await preview.makePreviewLink(db, appConfig, { table: 'raffles', idCol: 'raffle_id', id, path: '/raffles' });
     res.status(r.status).json(r.body);
-  });
-
-  router.post('/raffles/:id/publish', requireAdmin, async (req, res) => {
-    const id = kit.idParam(req.params.id);
-    if (!id) return res.redirect('/raffles?error=Invalid+raffle+id');
-    const on = (req.body && req.body.state) === '1';
-    try {
-      const r = await db.runAsync('UPDATE raffles SET is_published = ?, updated_at = ? WHERE raffle_id = ?', [on ? 1 : 0, kit.sqlTime(), id]);
-      if (!r.changes) return res.redirect('/raffles?error=Raffle+not+found');
-      res.redirect(`/raffles/${id}?msg=` + encodeURIComponent(on ? 'Published.' : 'Unpublished — hidden from the website.'));
-    } catch (err) {
-      res.redirect(`/raffles/${id}?error=` + encodeURIComponent('Update failed: ' + (err.message || err)));
-    }
   });
 
   router.post('/raffles/:id/delete', requireAdmin, async (req, res) => {
