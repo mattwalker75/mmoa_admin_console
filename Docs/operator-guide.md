@@ -79,7 +79,12 @@ directory until a board member verifies them.
 - The detail page shows the **whole profile**, including fields the
   organization marked hidden (each field is tagged public / hidden), its
   contacts, categories, cities and photos (**Remove** takes down an
-  inappropriate photo and deletes the file).
+  inappropriate photo and deletes the file), and its private **search
+  keywords** (never shown on the website; they only help the "Need Help?"
+  keyword search find the organization).
+- The keyword search matches the organization name, its search keywords,
+  its services, and its public address / hours / cities served — not the
+  description or "What to bring".
 - **IRS / ProPublica lookup** runs automatically: the IRS name, city /
   state, ruling date, NTEE code and 501(c) subsection for the EIN — or
   "not found" (new organizations can take months to appear; use the IRS
@@ -97,6 +102,9 @@ Order here is the website's order (▲ ▼). **Deactivate** hides one from the
 website and the portal without touching organizations that already chose
 it; **Delete** is only offered when no organization uses it. Category
 slugs appear in links (`/need-help?category=food`) — avoid changing them.
+**Other** is *built in*: the website relies on it (and re-adds it on every
+restart), so you can rename, reorder or deactivate it, but not delete it or
+change its slug.
 
 ## Board
 
@@ -162,7 +170,11 @@ in the file, including secrets, is left alone — and then offers to
 - **Email → AWS (SES credentials)** — only needed with the AWS SES
   transport.
 - **General → Public site info** — phone, EIN and Facebook URL shown in the
-  site's header / footer, and the portal's max upload size.
+  site's header / footer, the portal's max upload size, and the optional
+  **Donate** button: paste the donation payment link (e.g. a Stripe Payment
+  Link) and turn on **Show the "Donate" button** — it won't turn on without
+  a valid `https://` link. Turning it off keeps the link for later. Restart
+  the web app after saving.
 - The **power bar** (Start / Stop / Restart) runs the commands set under
   Settings → Web App.
 

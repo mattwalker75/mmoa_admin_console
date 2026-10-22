@@ -17,6 +17,12 @@
 // Category slugs appear in public URLs (/need-help?category=food), so they
 // are validated (lowercase letters, digits, dashes) and changing one is
 // flagged in the UI.
+//
+// Built-in categories (BUILTIN_SLUGS) are ones the web app relies on and
+// re-creates on every start (its db ROW_MIGRATIONS) — today just "other",
+// which the search summary reads as "other needs". They can be renamed,
+// reordered and deactivated, but their slug is locked and they can't be
+// deleted: either would just make the web app add a duplicate on restart.
 
 const express = require('express');
 const { page, flash } = require('../views/layout');
@@ -30,6 +36,9 @@ const LISTS = {
   cities: { table: 'cities', id: 'city_id', join: 'org_cities', label: 'Cities', one: 'city', hasSlug: false }
 };
 
+const BUILTIN_SLUGS = new Set(['other']);
+const isBuiltin = (L, r) => !!(L.hasSlug && r && BUILTIN_SLUGS.has(r.slug));
+
 function uniqueMsg(err, L) {
   return /UNIQUE|Duplicate entry/i.test(String(err && err.message))
     ? (L.hasSlug ? 'That name or slug is already used by another category.' : 'That city is already in the list.') : null;
@@ -40,6 +49,7 @@ function listCard(key, L, rows, usage) {
     const id = Number(r[L.id]);
     const used = usage.get(id) || 0;
     const active = !!Number(r.is_active);
+    const builtin = isBuiltin(L, r);
     return `<tr class="${active ? '' : 'opacity-60'}" x-data="{ edit: false }">
       <td class="w-16 whitespace-nowrap">
         <form method="POST" action="/categories-cities/${key}/${id}/move" class="inline m-0"><input type="hidden" name="dir" value="up">
@@ -51,10 +61,11 @@ function listCard(key, L, rows, usage) {
         <div x-show="!edit">
           <span class="font-medium text-slate-900 dark:text-slate-100">${escapeHtml(r.name)}</span>
           ${L.hasSlug ? `<span class="ml-2 font-mono text-xs text-slate-400">${escapeHtml(r.slug)}</span>` : ''}
+          ${builtin ? `<span class="ml-2 pill-terminated" title="The website relies on this category: it can be renamed or deactivated, but not deleted or given a new slug.">built-in</span>` : ''}
         </div>
         <form x-show="edit" x-cloak method="POST" action="/categories-cities/${key}/${id}/save" class="m-0 flex items-center gap-2 flex-wrap">
           <input class="input max-w-[14rem]" type="text" name="name" required maxlength="100" value="${escapeHtml(r.name)}" aria-label="Name">
-          ${L.hasSlug ? `<input class="input max-w-[10rem] font-mono" type="text" name="slug" required maxlength="60" pattern="[a-z0-9-]+" value="${escapeHtml(r.slug)}" aria-label="Slug" title="Changing the slug breaks saved links to this category">` : ''}
+          ${L.hasSlug ? `<input class="input max-w-[10rem] font-mono" type="text" name="slug" required maxlength="60" pattern="[a-z0-9-]+" value="${escapeHtml(r.slug)}" aria-label="Slug" ${builtin ? 'readonly title="Built-in category — its slug can\'t be changed"' : 'title="Changing the slug breaks saved links to this category"'}>` : ''}
           <button type="submit" class="btn-primary text-xs px-3 py-1">Save</button>
           <button type="button" class="btn-secondary text-xs px-3 py-1" x-on:click="edit = false">Cancel</button>
         </form>
@@ -67,7 +78,8 @@ function listCard(key, L, rows, usage) {
           <input type="hidden" name="state" value="${active ? '0' : '1'}">
           <button type="submit" class="btn-ghost text-xs px-2 py-1">${active ? 'Deactivate' : 'Activate'}</button>
         </form>
-        ${used ? `<span class="text-xs text-slate-400 px-2" title="In use — deactivate it instead">Delete</span>`
+        ${builtin ? `<span class="text-xs text-slate-400 px-2" title="Built-in category — deactivate it instead">Delete</span>`
+          : used ? `<span class="text-xs text-slate-400 px-2" title="In use — deactivate it instead">Delete</span>`
           : `<form method="POST" action="/categories-cities/${key}/${id}/delete" class="inline m-0"
                 x-on:submit.prevent="window.uiConfirmSubmit($event.target, ${jsAttrStr('Delete the ' + L.one + ' "' + r.name + '"?')}, { title: 'Delete ${L.one}', confirmLabel: 'Delete' })">
               <button type="submit" class="btn-ghost text-xs px-2 py-1 text-red-600">Delete</button></form>`}
@@ -149,6 +161,10 @@ module.exports = function (db, appConfig) {
       if (L.hasSlug) {
         const slug = kit.str(req.body.slug, 60);
         if (!slug || !kit.SLUG_RE.test(slug)) return res.redirect(back + '?error=' + encodeURIComponent('Slugs may only contain lowercase letters, digits and dashes.'));
+        const cur = await db.getAsync(`SELECT slug FROM ${L.table} WHERE ${L.id} = ?`, [id]);
+        if (isBuiltin(L, cur) && slug !== cur.slug) {
+          return res.redirect(back + '?error=' + encodeURIComponent(`"${cur.slug}" is a built-in category — its slug can't be changed (the name can).`));
+        }
         r = await db.runAsync(`UPDATE ${L.table} SET name = ?, slug = ? WHERE ${L.id} = ?`, [name, slug, id]);
       } else {
         r = await db.runAsync(`UPDATE ${L.table} SET name = ? WHERE ${L.id} = ?`, [name, id]);
@@ -191,6 +207,10 @@ module.exports = function (db, appConfig) {
     const id = kit.idParam(req.params.id);
     if (!id) return res.redirect(back + '?error=Invalid+id');
     try {
+      const row = await db.getAsync(`SELECT * FROM ${L.table} WHERE ${L.id} = ?`, [id]);
+      if (isBuiltin(L, row)) {
+        return res.redirect(back + '?error=' + encodeURIComponent('Built-in categories can\'t be deleted (the website would add it back on its next restart) — deactivate it instead.'));
+      }
       const used = await db.getAsync(`SELECT COUNT(*) AS c FROM ${L.join} WHERE ${L.id} = ?`, [id]);
       if (used && Number(used.c) > 0) {
         return res.redirect(back + '?error=' + encodeURIComponent(`In use by ${used.c} organization(s) — deactivate it instead.`));

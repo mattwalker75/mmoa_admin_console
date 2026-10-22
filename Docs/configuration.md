@@ -62,7 +62,7 @@ effect after a **web app** restart — the page prompts for one.
 
 | Tab | Keys |
 | --- | ---- |
-| General | `appTitle`, `appSubtitle`, `orgName`, `publicBaseUrl`, `port`, `sessionKeyMode`, `sessionMaxAgeHours`, `passwordResetTokenTtlHours`, `allowMemberRegistration` (nonprofit sign-ups), `maintenanceCommand`, and **Public site info**: `site.phone`, `site.ein`, `site.facebookUrl`, `uploads.maxMb` (1–8) |
+| General | `appTitle`, `appSubtitle`, `orgName`, `publicBaseUrl`, `port`, `sessionKeyMode`, `sessionMaxAgeHours`, `passwordResetTokenTtlHours`, `allowMemberRegistration` (nonprofit sign-ups), `maintenanceCommand`, and **Public site info**: `site.phone`, `site.ein`, `site.facebookUrl`, `site.donationEnabled` + `site.donationUrl` (the website's "Donate" button — the switch refuses to turn on without a valid http(s) link, in the browser and again on save), `uploads.maxMb` (1–8) |
 | Email | `email.transport` (`console` / `smtp` / `ses`), `email.from`, `email.replyTo`, **`email.showLinksInBrowser`** (TESTING / TEMPORARY — the web app also returns verification / reset links in its JSON and shows them on screen; turn off once email works), `email.smtp.*`, and the **AWS (SES credentials)** group: `aws.runningInAws`, `aws.accessKeyId`, `aws.secretAccessKey`, `aws.region` |
 | Security | `passwordMinLength`, `security.verificationLinkExpiresMinutes`, `security.rateLimiting.auth.*`, `security.loginLockout.enabled` / `maxFailures` / `lockoutSeconds`, `security.session.secure` (Auto = `null` follows `server.ssl` / On / Off), `security.session.httpOnly` / `sameSite`, `security.headers.*` |
 | Database | `database.engine`, `database.sqlite.filename`, `database.mysql.*` (the web app's own connection — the console's is under Settings → Web App) |
