@@ -252,9 +252,13 @@ function beneficiariesEditor(benJson, orgs) {
        x-data="{ rows: [],
          init() { this.rows = JSON.parse(this.$el.dataset.bens || '[]').map(r => ({ org_id: r.org_id ? String(r.org_id) : '', name: r.name || '', url: r.url || '' })); },
          add() { this.rows.push({ org_id: '', name: '', url: '' }); },
-         remove(i) { this.rows.splice(i, 1); },
+         remove(i) { this.rows.splice(i, 1); this.touched = {}; },
+         touched: {},
+         // Same rule as httpLinkInput / the server: blank, or http(s)://… with no spaces.
+         badUrl(r) { if (r.org_id) return false; const s = (r.url || '').trim().toLowerCase();
+           return s !== '' && (s.includes(' ') || !((s.startsWith('http://') && s.length > 7) || (s.startsWith('https://') && s.length > 8))); },
          move(i, d) { const j = i + d; if (j < 0 || j >= this.rows.length) return; const t = this.rows[i]; this.rows[i] = this.rows[j]; this.rows[j] = t; },
-         get json() { return JSON.stringify(this.rows); } }">
+         get json() { return JSON.stringify(this.rows.map(r => ({ org_id: r.org_id, name: r.name, url: r.url }))); } }">
     <input type="hidden" name="beneficiaries_json" :value="json">
     <div class="flex items-center justify-between">
       <span class="label mb-0">Beneficiaries</span>
@@ -269,7 +273,15 @@ function beneficiariesEditor(benJson, orgs) {
             ${orgOpts}
           </select>
           <input class="input md:col-span-3" type="text" maxlength="200" x-model="r.name" :placeholder="r.org_id ? '(uses the organization name)' : 'Name *'" :disabled="!!r.org_id" aria-label="Name">
-          <input class="input md:col-span-3" type="url" maxlength="1000" x-model="r.url" :placeholder="r.org_id ? '(links to the profile)' : 'https://… (optional)'" :disabled="!!r.org_id" aria-label="Link">
+          <div class="md:col-span-3">
+            <input class="input" type="text" inputmode="url" autocomplete="off" spellcheck="false" maxlength="1000" x-model="r.url"
+                   :placeholder="r.org_id ? '(links to the profile)' : 'https://… (optional)'" :disabled="!!r.org_id" aria-label="Link"
+                   x-effect="$el.setCustomValidity(badUrl(r) ? 'Must start with http:// or https://' : '')"
+                   x-on:blur="touched[i] = true" x-on:invalid="touched[i] = true"
+                   :aria-invalid="touched[i] && badUrl(r) ? 'true' : null"
+                   :class="touched[i] && badUrl(r) ? 'border-red-500 focus:border-red-500 focus:ring-red-500/30' : ''">
+            <p class="mt-1 text-xs text-red-600 dark:text-red-300" x-show="touched[i] && badUrl(r)" x-cloak>Must start with <code>http://</code> or <code>https://</code></p>
+          </div>
           <div class="md:col-span-2 flex items-center justify-end gap-1">
             <button type="button" class="btn-ghost text-xs px-2 py-1" x-on:click="move(i, -1)" aria-label="Move up">▲</button>
             <button type="button" class="btn-ghost text-xs px-2 py-1" x-on:click="move(i, 1)" aria-label="Move down">▼</button>
