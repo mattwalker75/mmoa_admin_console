@@ -73,19 +73,29 @@ module.exports = function (appConfig) {
             <p class="mt-0.5 text-xs text-slate-500 dark:text-slate-400">Verify your current password, then set a new one that satisfies the configured complexity rules.</p>
           </div>
 
-          <form method="POST" action="/profile/password" class="space-y-4">
+          <form method="POST" action="/profile/password" class="space-y-4"
+                x-data="{ showCur: false, showNew: false, pw: '', pw2: '' }">
             <div>
               <label class="label" for="pf-cur">Current password</label>
-              <input id="pf-cur" class="input" type="password" name="current_password" required autocomplete="current-password">
+              <div class="flex items-stretch gap-2">
+                <input id="pf-cur" class="input flex-1" :type="showCur ? 'text' : 'password'" type="password" name="current_password" required autocomplete="current-password">
+                <button type="button" class="btn-secondary text-xs px-3" x-on:click="showCur = !showCur" x-text="showCur ? 'Hide' : 'Show'"
+                        aria-controls="pf-cur" title="Show or hide the current password"></button>
+              </div>
             </div>
             <div>
               <label class="label" for="pf-new">New password</label>
-              <input id="pf-new" class="input" type="password" name="new_password" required minlength="${rules.minLength}" autocomplete="new-password">
+              <div class="flex items-stretch gap-2">
+                <input id="pf-new" class="input flex-1" :type="showNew ? 'text' : 'password'" type="password" name="new_password" required minlength="${rules.minLength}" autocomplete="new-password" x-model="pw">
+                <button type="button" class="btn-secondary text-xs px-3" x-on:click="showNew = !showNew" x-text="showNew ? 'Hide' : 'Show'"
+                        aria-controls="pf-new pf-conf" title="Show or hide both new-password fields"></button>
+              </div>
               <p class="mt-1 text-xs text-slate-500 dark:text-slate-400">${escapeHtml(rulesHint(rules))}</p>
             </div>
             <div>
               <label class="label" for="pf-conf">Confirm new password</label>
-              <input id="pf-conf" class="input" type="password" name="confirm_password" required minlength="${rules.minLength}" autocomplete="new-password">
+              <input id="pf-conf" class="input" :type="showNew ? 'text' : 'password'" type="password" name="confirm_password" required minlength="${rules.minLength}" autocomplete="new-password" x-model="pw2">
+              <p class="mt-1 text-xs text-red-600 dark:text-red-300" x-show="pw && pw2 && pw !== pw2" x-cloak>Passwords do not match</p>
             </div>
             <div class="flex justify-end">
               <button type="submit" class="btn-primary">Update password</button>
