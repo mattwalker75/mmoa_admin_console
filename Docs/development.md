@@ -237,6 +237,29 @@ Same four steps, but flash the operator with **"Restart the app for
 the change to take effect."** since the middleware that consumes it
 is configured at boot.
 
+### A Web App setting (the web app's `config.json`)
+
+Web App Settings is descriptor-driven: add one entry to the tab's list in
+`FIELDS` ([routes/webAppSettings.js](../routes/webAppSettings.js)) and the
+form, the read-modify-write save and the restart-pending prompt all follow.
+Also give the key a default in the **web app's** `config/appConfig.js` and
+document it in its `Docs/configuration.md`.
+
+- `path` — dotted key in the web app's `config.json` (also the form name).
+- `type` — `text` | `password` | `number` (`min` / `max` / `def`) | `toggle`
+  | `tristate` | `select` (`options`) | `textarea` | `heading`.
+- `controller: true` — mirrors the live value into the form's Alpine `c` map
+  (keyed by path) so other fields can `showWhen: "c['…'] === …"`.
+- `guard` (toggles only) — `{ js: () => '<Alpine expression>', server: json
+  => message }`: both return an error message, or `''` when it's fine to be
+  ON. Switching the toggle on while the browser check fails flips it back
+  off and shows the message; the form won't submit while a checked toggle
+  fails; and the server re-checks after applying the form and refuses the
+  save. Example: **Show the "Donate" button** needs a valid
+  `site.donationUrl` (`donationUrlError` / `donationUrlErrorJs`). Guard
+  expressions run through Alpine because the CSP allows no inline
+  `<script>` (see *CSP and Alpine* below).
+
 ## How to add a sidebar tab
 
 See [views/layout.js](../views/layout.js):
@@ -318,7 +341,9 @@ appear.
 
 If you ever tighten CSP, remember:
 
-- `script-src` must include `'unsafe-eval'` for Alpine to run.
+- `script-src` must include `'unsafe-eval'` for Alpine to run. It has no
+  `'unsafe-inline'`, so an inline `<script>` in a page is **blocked** — put
+  page logic in an Alpine expression or a file under `public/`.
 - `img-src` must include `blob:` for the Appearance live preview to
   show newly-picked images.
 - `style-src` must include `'unsafe-inline'` for the inline `<style>`

@@ -33,13 +33,15 @@ It is a port of `car_show_admin_console` with the car-show-only domain
   cover / prize-photo uploads, event beneficiaries, raffle claim presets
   (Firearm / Standard) and the draft → open → closed → drawn workflow.
 - **Nonprofits** — the only web-app logins are other nonprofits, each with
-  a "Need Help?" directory profile. Review the whole profile (hidden fields
-  too), check the EIN with the built-in **IRS / ProPublica lookup**, then
+  a "Need Help?" directory profile. Review the whole profile (hidden fields,
+  phone extensions, photo captions and the private search keywords too),
+  check the EIN with the built-in **IRS / ProPublica lookup**, then
   Verify / Mark rejected / Reset; plus account actions (activate,
   email-verified, reset password, edit, delete with every child row and
   photo file).
 - **Categories & Cities** and **Board** — the directory's lookup lists and
-  the About page's board roles / names / photos.
+  the About page's board roles / names / photos. The built-in **Other**
+  category can be renamed or deactivated but not deleted or re-slugged.
 - **Image uploads to the web app host** in every access mode — the
   browser shrinks photos to 1600 px first; EC2 mode sends them as ≤ 40 KB
   SSM pieces (`webAppAccess.writeFileChunked`).
@@ -49,7 +51,9 @@ It is a port of `car_show_admin_console` with the car-show-only domain
 - **Web App Website / Logs / Settings** — edit the website copy (hero,
   about, help, partner, footer), images and Maintenance Mode; tail `logs/app.log`; edit the web
   app's `config.json` with read-modify-write (unexposed keys and secrets
-  preserved) and a power bar with a restart-pending prompt.
+  preserved) and a power bar with a restart-pending prompt — including the
+  website's optional **Donate** button (switch + donation link; it won't
+  switch on without a valid link).
 - **Reports** (CSV / in-app view) and **Backup / Restore** (console
   settings, web-app config, website, an engine-neutral database dump, and
   one-file rebuild bundles that also carry `uploads/**`).
@@ -105,7 +109,7 @@ password is replaced by re-running the command above with the same username.
 | **Events**           | Upcoming / past / drafts; create, edit, publish, flyer + cover, beneficiaries, delete, View on site. |
 | **Raffles**          | Same pattern + claim presets, prize photos (≤ 8, reorder), status workflow with winning ticket. |
 | **Nonprofits**       | Accounts + directory profiles; ProPublica lookup; Verify / Reject / Reset; account actions. (`/members` redirects here.) |
-| **Categories & Cities** | The directory's service categories and cities — add, rename, reorder, activate / deactivate, delete when unused. |
+| **Categories & Cities** | The directory's service categories and cities — add, rename, reorder, activate / deactivate, delete when unused (never the built-in **Other**). |
 | **Board**            | Board roles, person names, photos, order. |
 | **Data Browser**     | Generic table browser / editor for the whole web-app database. |
 | **Locked Users**     | Current login lockouts (accounts and IPs) with Unlock. |
@@ -113,7 +117,7 @@ password is replaced by re-running the command above with the same username.
 | **Web App Website**  | Website copy sections (hero, about, help, partner, footer), images, Maintenance Mode. |
 | **Web App Logs**     | Tail of the web app's `logs/app.log`. |
 | **Backup/Restore**   | JSON exports / restores and one-file rebuild bundles (incl. `uploads/**`). |
-| **Web App Settings** | The web app's `config.json` (General incl. public site info, Email, Security, Database, Server) + Start / Stop / Restart. |
+| **Web App Settings** | The web app's `config.json` (General incl. public site info and the Donate button, Email, Security, Database, Server) + Start / Stop / Restart. |
 | **Settings**         | This console: Security, Appearance, Web App (access mode, database, lifecycle commands, Test connection). |
 
 ## Admins vs. nonprofits
