@@ -271,8 +271,9 @@ module.exports = function (db, appConfig) {
     const counts = await kit.safeAll(db, 'SELECT status, COUNT(*) AS c FROM raffles GROUP BY status', []);
     const cnt = {}; let total = 0;
     for (const c of counts.rows) { cnt[c.status] = Number(c.c); total += Number(c.c); }
-    const tab = (key, label, n) => `<a href="/raffles${key === 'all' ? '' : '?status=' + key}" class="px-3 py-1.5 rounded-lg text-sm font-semibold ${key === filter ? 'bg-brand-600 text-white' : 'text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800'}">${label} <span class="opacity-70">(${n || 0})</span></a>`;
-    const tabs = tab('all', 'All', total) + STATUSES.map(s => tab(s, s[0].toUpperCase() + s.slice(1), cnt[s])).join('');
+    // "Show" drop-down (same as Events): All + one option per status, with counts.
+    const opt = (key, label, n) => `<option value="${key}" ${key === filter ? 'selected' : ''}>${label} (${n || 0})</option>`;
+    const options = opt('all', 'All', total) + STATUSES.map(s => opt(s, s[0].toUpperCase() + s.slice(1), cnt[s])).join('');
     const tbody = rows.map(r => `
       <tr class="cursor-pointer" data-href="/raffles/${Number(r.raffle_id)}" x-on:click="window.location = $el.dataset.href">
         <td class="font-medium text-slate-900 dark:text-slate-100"><a class="hover:underline" href="/raffles/${Number(r.raffle_id)}">${escapeHtml(r.title)}</a>
@@ -288,11 +289,15 @@ module.exports = function (db, appConfig) {
       ${flash('error', req.query.error)}
       ${flash('success', req.query.msg)}
       ${kit.dbBanner(err || counts.err)}
-      <nav class="mb-4 flex items-center gap-2 flex-wrap" aria-label="Raffle status">${tabs}</nav>
+      <form method="GET" action="/raffles" class="mb-4 flex items-center gap-2" x-data>
+        <label for="rf-filter" class="text-sm font-semibold text-slate-700 dark:text-slate-200">Show</label>
+        <select id="rf-filter" name="status" class="input w-auto py-1.5" x-on:change="$el.form.submit()">${options}</select>
+        <noscript><button type="submit" class="btn-secondary">Apply</button></noscript>
+      </form>
       <div class="table-wrap surface-target" x-data>
         <table class="table-base">
           <thead><tr><th>Title</th><th>Status</th><th>Website</th><th>Drawing</th><th>Price</th></tr></thead>
-          <tbody>${tbody || `<tr><td colspan="5" class="text-center py-8 text-slate-400">${err ? 'Unavailable.' : 'No raffles here.'}</td></tr>`}</tbody>
+          <tbody>${tbody || `<tr><td colspan="5" class="text-center py-8 text-slate-400">${err ? 'Unavailable.' : filter === 'all' ? 'No raffles yet.' : 'No ' + filter + ' raffles.'}</td></tr>`}</tbody>
         </table>
       </div>`;
     res.send(page({ title: 'Raffles', body, appConfig, user, activeNav: 'raffles' }));

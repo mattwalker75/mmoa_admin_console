@@ -96,6 +96,9 @@ The website is where events live (Facebook posts just link to them).
 Same pattern as events. Tickets are sold **in person only** (Texas law),
 so "How to buy" carries that wording and there is no payment link.
 
+- **Show** drop-down — **All** (the default), **Draft**, **Open**,
+  **Closed** or **Drawn**, each with its count; picking one reloads the list.
+
 - **Claim requirements** — one per line. **Firearm preset** / **Standard
   preset** fill the box (you can still edit it).
 - **Status** — Draft → Open (selling) → Closed (sales ended) → Drawn
