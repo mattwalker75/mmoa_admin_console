@@ -2,7 +2,8 @@
 // `event_beneficiaries` tables). The website is the source of truth for
 // events; Facebook only links to it, so this is where the board publishes.
 //
-//   GET  /events?tab=upcoming|past|drafts|archived → list
+//   GET  /events?tab=draft|published|archived → list (one tab per status;
+//                                            Published shows upcoming, then past)
 //   GET  /events/new                       → blank form
 //   POST /events                           → create (then add flyer / cover)
 //   GET  /events/:id                       → edit form + images + actions
@@ -51,12 +52,13 @@ const kit = require('../helpers/pageKit');
 const lt = require('../helpers/localTime');
 const uploads = require('../helpers/webAppUploads');
 
+// One tab per status. Old ?tab= values (upcoming / past / drafts) still work.
 const TABS = [
-  { key: 'upcoming', label: 'Upcoming' },
-  { key: 'past', label: 'Past' },
-  { key: 'drafts', label: 'Drafts' },
+  { key: 'draft', label: 'Draft' },
+  { key: 'published', label: 'Published' },
   { key: 'archived', label: 'Archived' }
 ];
+const OLD_TABS = { upcoming: 'published', past: 'published', drafts: 'draft' };
 const STATUSES = [
   { key: 'draft', label: 'Draft', hint: 'Being prepared — not on the website yet.' },
   { key: 'published', label: 'Published', hint: 'On the website now.' },
@@ -99,7 +101,6 @@ const EVENT_COLS = `event_id, slug, title, summary, description_md, starts_at, e
   address, city, map_url, flyer_path, cover_path, registration_url, registration_label,
   registration_note, beneficiaries_text, is_published, status, created_at, updated_at`;
 
-function upcomingCutoff() { return kit.sqlTime(-12 * 3600 * 1000); }
 
 // Read + validate the posted form. Returns { values, fields, bens, error }.
 // `values` echoes the inputs back into the form on an error.
@@ -409,24 +410,32 @@ module.exports = function (db, appConfig) {
   // ── List ────────────────────────────────────────────────────────────
   router.get('/events', requireAdmin, async (req, res) => {
     const user = req.session.user;
-    const tab = TABS.some(t => t.key === req.query.tab) ? req.query.tab : 'upcoming';
-    const cut = upcomingCutoff();
-    const q = {
-      upcoming: ["WHERE status = 'published' AND starts_at >= ? ORDER BY starts_at ASC, event_id ASC", [cut]],
-      past: ["WHERE status = 'published' AND starts_at < ? ORDER BY starts_at DESC, event_id DESC", [cut]],
-      drafts: ["WHERE status = 'draft' ORDER BY starts_at ASC, event_id ASC", []],
-      archived: ["WHERE status = 'archived' ORDER BY starts_at DESC, event_id DESC", []]
-    };
-    const { rows, err } = await kit.safeAll(db,
-      `SELECT event_id, slug, title, starts_at, venue_name, city, status, flyer_path FROM events ${q[tab][0]}`, q[tab][1]);
+    const asked = OLD_TABS[req.query.tab] || req.query.tab;
+    const tab = TABS.some(t => t.key === asked) ? asked : 'published';
+    const { rows: all, err } = await kit.safeAll(db,
+      `SELECT event_id, slug, title, starts_at, venue_name, city, status, flyer_path FROM events
+        WHERE status = ? ORDER BY starts_at ASC, event_id ASC`, [tab]);
     const counts = {};
     for (const t of TABS) {
-      const where = q[t.key][0].replace(/ ORDER BY.*$/, '');
-      const { value } = await kit.safeGet(db, `SELECT COUNT(*) AS c FROM events ${where}`, q[t.key][1], null);
+      const { value } = await kit.safeGet(db, 'SELECT COUNT(*) AS c FROM events WHERE status = ?', [t.key], null);
       counts[t.key] = value && value.c != null ? Number(value.c) : null;
     }
-    const tabs = TABS.map(t => `<a href="/events?tab=${t.key}" class="px-3 py-1.5 rounded-lg text-sm font-semibold ${t.key === tab ? 'bg-brand-600 text-white' : 'text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800'}">${t.label}${counts[t.key] != null ? ` <span class="opacity-70">(${counts[t.key]})</span>` : ''}</a>`).join('');
-    const tbody = rows.map(e => `
+    // Published: upcoming (the website's rule — starts no more than 12 h ago)
+    // soonest first, then past newest first. Draft: soonest first. Archived:
+    // newest first.
+    const cutMs = Date.now() - 12 * 3600 * 1000;
+    const ms = (v) => v instanceof Date ? v.getTime() : Date.parse(String(v || '').replace(' ', 'T') + (/[zZ]|[+-]\d\d:?\d\d$/.test(String(v)) ? '' : 'Z'));
+    let groups;
+    if (tab === 'published') {
+      groups = [
+        { label: 'Upcoming', note: "on the website's Events page", rows: all.filter(e => ms(e.starts_at) >= cutMs) },
+        { label: 'Past', note: 'listed under Past events on the website', rows: all.filter(e => !(ms(e.starts_at) >= cutMs)).reverse() }
+      ];
+    } else {
+      groups = [{ rows: tab === 'archived' ? all.slice().reverse() : all }];
+    }
+    const tabs = TABS.map(t => `<a href="/events?tab=${t.key}" class="px-3 py-1.5 rounded-lg text-sm font-semibold ${t.key === tab ? 'bg-brand-600 text-white' : 'text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800'}" ${t.key === tab ? 'aria-current="page"' : ''}>${t.label}${counts[t.key] != null ? ` <span class="opacity-70">(${counts[t.key]})</span>` : ''}</a>`).join('');
+    const row = (e) => `
       <tr class="cursor-pointer" data-href="/events/${Number(e.event_id)}" x-on:click="window.location = $el.dataset.href">
         <td class="whitespace-nowrap text-xs text-slate-500">${escapeHtml(lt.formatLocal(e.starts_at, appConfig))}</td>
         <td class="font-medium text-slate-900 dark:text-slate-100"><a class="hover:underline" href="/events/${Number(e.event_id)}">${escapeHtml(e.title)}</a>
@@ -434,9 +443,14 @@ module.exports = function (db, appConfig) {
         <td>${escapeHtml([e.venue_name, e.city].filter(Boolean).join(' · ') || '—')}</td>
         <td>${statusPill(e.status)}
             ${e.flyer_path ? '' : ' <span class="pill-pending" title="No flyer uploaded">no flyer</span>'}</td>
-      </tr>`).join('');
+      </tr>`;
+    const tbody = groups.map(g => (g.label
+      ? `<tr><th colspan="4" scope="colgroup" class="px-4 py-2 bg-slate-50 dark:bg-slate-800/60 text-left text-xs font-semibold uppercase tracking-wider text-slate-600 dark:text-slate-300">${escapeHtml(g.label)} <span class="normal-case font-normal tracking-normal text-slate-500 dark:text-slate-400">— ${escapeHtml(g.note)} (${g.rows.length})</span></th></tr>`
+        + (g.rows.length ? '' : `<tr><td colspan="4" class="text-center py-4 text-sm text-slate-400">None.</td></tr>`)
+      : '') + g.rows.map(row).join('')).join('');
+    const empty = !all.length;
     const body = `
-      ${kit.pageHeader('Events', 'What the website lists under Events. Times are shown in ' + lt.zoneOf(appConfig) + '.',
+      ${kit.pageHeader('Events', 'Only Published events are on the website. Times are shown in ' + lt.zoneOf(appConfig) + '.',
         `<a href="/events/new" class="btn-primary"><span aria-hidden="true">＋</span><span>New event</span></a>`)}
       ${flash('error', req.query.error)}
       ${flash('success', req.query.msg)}
@@ -445,7 +459,7 @@ module.exports = function (db, appConfig) {
       <div class="table-wrap surface-target" x-data>
         <table class="table-base">
           <thead><tr><th>When</th><th>Title</th><th>Where</th><th>Status</th></tr></thead>
-          <tbody>${tbody || `<tr><td colspan="4" class="text-center py-8 text-slate-400">${err ? 'Unavailable.' : 'No events here.'}</td></tr>`}</tbody>
+          <tbody>${empty ? `<tr><td colspan="4" class="text-center py-8 text-slate-400">${err ? 'Unavailable.' : 'No events here.'}</td></tr>` : tbody}</tbody>
         </table>
       </div>`;
     res.send(page({ title: 'Events', body, appConfig, user, activeNav: 'events' }));

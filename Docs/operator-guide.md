@@ -40,9 +40,10 @@ The website is where events live (Facebook posts just link to them).
   website but kept here for reference — e.g. to copy next year). Change it
   with the Draft / Published / Archived switch at the bottom of the form, or
   the same three buttons at the top of the page (they save your edits too).
-- **Upcoming / Past / Drafts / Archived** — upcoming means published and
-  starting no more than 12 hours ago (the website's rule); past means
-  published and older. Only Published events are on the site.
+- **Draft / Published / Archived** tabs — one per status. Published lists
+  **Upcoming** events first (starting no more than 12 hours ago — the
+  website's rule; soonest first), then **Past** ones (newest first), the
+  same split the website uses. Only Published events are on the site.
 - **New event** — title, optional URL slug (made from the title; changing
   it later breaks links already shared), summary (≤ 200 characters, shown
   on cards), start / end in **Central time** (`timeZone` in this console's
