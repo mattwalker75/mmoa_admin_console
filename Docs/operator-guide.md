@@ -50,8 +50,11 @@ The website is where events live (Facebook posts just link to them).
   events are on the site.
 - **New event** — title, optional URL slug (made from the title; changing
   it later breaks links already shared), summary (≤ 200 characters, shown
-  on cards), start / end in **Central time** (`timeZone` in this console's
-  config), description, venue / address / city, optional map link (blank =
+  on cards), **Starts** in **Central time** (`timeZone` in this console's
+  config) picked from a calendar with a time picker (or typed), an
+  optional **Ends** — tick "Has an end time" to add one (it starts 3 hours
+  after the start and can't be earlier than it; untick to leave the end
+  open) — description, venue / address / city, optional map link (blank =
   the site builds a Google Maps search from the address), registration
   link (a Stripe Payment Link or any https page) with its button label and
   note, and **beneficiaries** — pick a directory organization (the site

@@ -4,15 +4,17 @@
   "description": "Operator-only admin console for the Mission Men of Anna web app (mmoa_web_app). Connects to the web app's database and host to manage events, raffles, nonprofit verification, the board, data, website content, uploads, configuration, logs, and backups.",
   "main": "app.js",
   "scripts": {
-    "prestart": "npm run build:css && npm run copy:alpine",
+    "prestart": "npm run build:css && npm run copy:alpine && npm run copy:flatpickr",
     "start": "node app.js",
     "build:css": "tailwindcss -i ./tailwind.input.css -o ./public/css/tailwind.css --minify",
     "watch:css": "tailwindcss -i ./tailwind.input.css -o ./public/css/tailwind.css --watch",
-    "copy:alpine": "node -e \"require('fs').copyFileSync('node_modules/alpinejs/dist/cdn.min.js', 'public/js/alpine.min.js')\""
+    "copy:alpine": "node -e \"require('fs').copyFileSync('node_modules/alpinejs/dist/cdn.min.js', 'public/js/alpine.min.js')\"",
+    "copy:flatpickr": "node -e \"const f=require('fs');f.copyFileSync('node_modules/flatpickr/dist/flatpickr.min.js','public/js/flatpickr.min.js');f.copyFileSync('node_modules/flatpickr/dist/flatpickr.min.css','public/css/flatpickr.min.css')\""
   },
   "type": "commonjs",
   "_dependencies_info": {
     "@aws-sdk/client-ssm": "AWS Systems Manager SDK v3. Used by helpers/awsSsm.js for the 'Remote on EC2 (AWS)' Web App access mode — every command / file read / file write on the web app instance runs as an SSM Run Command (SendCommand + GetCommandInvocation polling). Lazy-required so the app still boots without it. This console never creates or modifies AWS resources.",
+    "flatpickr": "Date / time picker for the console's date fields (public/js/date-picker.js enhances any input[data-datetime]). Self-hosted at /js/flatpickr.min.js + /css/flatpickr.min.css (copied by copy:flatpickr) to satisfy CSP.",
     "alpinejs": "Tiny client-side reactivity framework — drives form-field show/hide, live previews, and confirm dialogs via inline x-data directives. Self-hosted at /js/alpine.min.js to satisfy CSP.",
     "bcrypt": "Password hashing for console admin login and for nonprofit passwords set from the Nonprofits page (cost 10, same as the web app).",
     "compression": "gzip response compression.",
@@ -36,6 +38,7 @@
     "cookie-session": "^2.1.1",
     "express": "^5.2.1",
     "express-rate-limit": "^8.2.1",
+    "flatpickr": "4.6.13",
     "helmet": "^8.1.0",
     "morgan": "^1.10.1",
     "multer": "^2.1.1",

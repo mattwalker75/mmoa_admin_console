@@ -152,7 +152,11 @@ ${body}
   <title>${fullTitle}</title>
   <link rel="stylesheet" href="/css/tailwind.css?v=${assetVer('css/tailwind.css')}">
   ${themeCss(appConfig, false)}
+  <link rel="stylesheet" href="/css/flatpickr.min.css?v=${assetVer('css/flatpickr.min.css')}">
   <script defer src="/js/image-upload.js?v=${assetVer('js/image-upload.js')}"></script>
+  <!-- Date pickers run before Alpine (deferred scripts run in order). -->
+  <script defer src="/js/flatpickr.min.js?v=${assetVer('js/flatpickr.min.js')}"></script>
+  <script defer src="/js/date-picker.js?v=${assetVer('js/date-picker.js')}"></script>
   <script defer src="/js/alpine.min.js?v=${assetVer('js/alpine.min.js')}"></script>
 </head>
 <body>

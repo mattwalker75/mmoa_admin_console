@@ -68,6 +68,8 @@ It is a port of `car_show_admin_console` with the car-show-only domain
 - **Tailwind CSS v4** built via `@tailwindcss/cli` into
   [public/css/tailwind.css](public/css/tailwind.css).
 - **Alpine.js**, self-hosted at `/js/alpine.min.js` (CSP-friendly).
+- **flatpickr** date / time picker, self-hosted at `/js/flatpickr.min.js`
+  (wired up by `public/js/date-picker.js` for any `input[data-datetime]`).
 - **bcrypt**, **cookie-session**, **helmet**, **express-rate-limit**,
   **morgan**, **multer**, **mysql2**, **sqlite3**, **ssh2**,
   **@aws-sdk/client-ssm** (lazy-required; the only AWS SDK).

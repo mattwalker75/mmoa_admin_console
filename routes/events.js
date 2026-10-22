@@ -288,7 +288,7 @@ function latestField(v, holder) {
   const note = mine ? 'This is the Latest event.'
     : holder ? `Right now the Latest event is “${escapeHtml(holder.title)}” — ticking this moves Latest here and un-selects it there.`
     : 'No event is Latest right now.';
-  return `<div>
+  return `<div class="sm:col-span-2">
           <input type="hidden" name="_event_id" value="${escapeHtml(v.event_id || '')}">
           <span class="label">Latest event</span>
           <label class="inline-flex items-center gap-2 text-sm text-slate-700 dark:text-slate-200">
@@ -315,19 +315,40 @@ function eventForm(action, v, pickers, isNew, zone) {
           <input id="ev-slug" class="input font-mono" type="text" name="slug" maxlength="80" pattern="[a-z0-9-]*" value="${val('slug')}" placeholder="made from the title when blank">
           <p class="mt-1 text-xs text-slate-500 dark:text-slate-400">The page address: <code>/events/&lt;slug&gt;</code>. Changing it breaks links already shared on Facebook.</p>
         </div>
-        ${latestField(v, pickers.latest)}
         <div>
           <label class="label" for="ev-summary">Summary <span class="text-xs font-normal text-slate-400">(≤ 200 characters, shown on cards)</span></label>
           <input id="ev-summary" class="input" type="text" name="summary" maxlength="200" value="${val('summary')}">
         </div>
         <div>
           <label class="label" for="ev-starts">Starts * <span class="text-xs font-normal text-slate-400">(${escapeHtml(zone)})</span></label>
-          <input id="ev-starts" class="input" type="datetime-local" name="starts_at" required value="${val('starts_local')}">
+          <input id="ev-starts" class="input" type="text" data-datetime name="starts_at" required value="${val('starts_local')}" placeholder="Pick a date and time" autocomplete="off">
         </div>
-        <div>
-          <label class="label" for="ev-ends">Ends <span class="text-xs font-normal text-slate-400">(optional)</span></label>
-          <input id="ev-ends" class="input" type="datetime-local" name="ends_at" value="${val('ends_local')}">
+        <div x-data="{ hasEnd: ${v.ends_local ? 'true' : 'false'},
+              toggle(on) {
+                this.hasEnd = on;
+                const end = window.mmoaDatePicker && window.mmoaDatePicker(this.$refs.ends);
+                if (!end) return;
+                if (!on) { end.clear(); return; }
+                if (!end.selectedDates.length) {
+                  const st = window.mmoaDatePicker(document.getElementById('ev-starts'));
+                  const s = st && st.selectedDates[0];
+                  if (s) end.setDate(new Date(s.getTime() + 3 * 3600 * 1000), true);
+                }
+              } }">
+          <div class="flex items-center justify-between gap-3 flex-wrap">
+            <label class="label" for="ev-ends">Ends <span class="text-xs font-normal text-slate-400">(${escapeHtml(zone)})</span></label>
+            <label class="inline-flex items-center gap-2 text-xs text-slate-700 dark:text-slate-200 mb-1">
+              <input type="checkbox" class="h-4 w-4" ${v.ends_local ? 'checked' : ''} x-on:change="toggle($event.target.checked)">
+              Has an end time
+            </label>
+          </div>
+          <p class="text-sm text-slate-400 italic py-2.5" x-show="!hasEnd" ${v.ends_local ? 'x-cloak' : ''}>No end time — tick "Has an end time" to add one.</p>
+          <div x-show="hasEnd" ${v.ends_local ? '' : 'x-cloak'}>
+            <input id="ev-ends" x-ref="ends" class="input" type="text" data-datetime data-min-from="#ev-starts" name="ends_at" value="${val('ends_local')}" placeholder="Pick an end date and time" autocomplete="off">
+            <p class="mt-1 text-xs text-slate-500 dark:text-slate-400">Can't be before the start. Untick to leave the end open.</p>
+          </div>
         </div>
+        ${latestField(v, pickers.latest)}
       </div>
       ${markdownField('description_md', 'Description', v.description_md, 10)}
     </section>

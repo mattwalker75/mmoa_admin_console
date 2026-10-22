@@ -63,6 +63,8 @@ routes/                         All route handlers (one file per major section)
 scripts/create-local-admin.js   CLI admin seeding
 public/css/tailwind.css         Built — do not edit
 public/js/alpine.min.js         Copied — do not edit
+public/js/flatpickr.min.js      Copied (npm run copy:flatpickr) — do not edit; + public/css/flatpickr.min.css
+public/js/date-picker.js        Turns any input[data-datetime] into a calendar + time picker (data-min-from="#id" for "not before")
 public/js/ui-confirm.js         window.uiConfirm / uiConfirmSubmit (CSP-safe confirm dialog)
 public/js/wa-preview.js         Web App Website section preview popup
 public/images/                  Gitignored; runtime-uploaded backgrounds
@@ -376,7 +378,8 @@ If you ever tighten CSP, remember:
 - `.gitignore` already covers `local_admins.json`,
   `public/images/`, and the usual. Add patterns there if you create
   more local-only files (e.g. a `*.db` cache, a `tmp/` dir).
-- Commit `public/css/tailwind.css` and `public/js/alpine.min.js`?
+- Commit `public/css/tailwind.css`, `public/js/alpine.min.js` and the
+  flatpickr copies?
   Today, **yes** — they're regenerated on every `npm start` so they
   don't drift, but committing them lets the app run without a build
   step in environments where you can't reach npm. If you're
