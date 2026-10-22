@@ -191,7 +191,9 @@ module.exports = function (db, appConfig) {
           <div class="card surface-target card-pad">
             <h2 class="text-sm font-semibold text-slate-900 dark:text-slate-100">Add an admin</h2>
             <p class="mt-1 text-xs text-slate-500 dark:text-slate-400">Re-using an existing username replaces that admin's record.</p>
-            <form method="POST" action="/admins" class="mt-4 space-y-3">
+            <form method="POST" action="/admins" class="mt-4 space-y-3"
+                  x-data="{ password: '', passwordConfirm: '', showPassword: false }"
+                  x-on:submit="if (password !== passwordConfirm) { $event.preventDefault(); window.uiConfirm('The two passwords do not match.', { title: 'Check the password', confirmLabel: 'OK', danger: false }); }">
               <div>
                 <label class="label" for="adm-user">Username</label>
                 <input id="adm-user" class="input" type="text" name="username" required autocomplete="username" maxlength="100" pattern="[A-Za-z0-9._\\-]+" title="Letters, digits, dot, dash, underscore">
@@ -206,7 +208,16 @@ module.exports = function (db, appConfig) {
               </div>
               <div>
                 <label class="label" for="adm-pw">Password</label>
-                <input id="adm-pw" class="input" type="password" name="password" required minlength="${minLen}" autocomplete="new-password">
+                <div class="flex items-stretch gap-2">
+                  <input id="adm-pw" class="input flex-1" :type="showPassword ? 'text' : 'password'" type="password" name="password" required minlength="${minLen}" autocomplete="new-password" x-model="password">
+                  <button type="button" class="btn-secondary text-xs px-3" x-on:click="showPassword = !showPassword" x-text="showPassword ? 'Hide' : 'Show'"
+                          aria-controls="adm-pw adm-pw2" title="Show or hide both passwords"></button>
+                </div>
+              </div>
+              <div>
+                <label class="label" for="adm-pw2">Confirm password</label>
+                <input id="adm-pw2" class="input" :type="showPassword ? 'text' : 'password'" type="password" name="confirm_password" required minlength="${minLen}" autocomplete="new-password" x-model="passwordConfirm">
+                <p class="mt-1 text-xs text-red-600 dark:text-red-300" x-show="password && passwordConfirm && password !== passwordConfirm" x-cloak>Passwords do not match</p>
               </div>
               <button type="submit" class="btn-primary w-full">Save admin</button>
             </form>
@@ -223,11 +234,13 @@ module.exports = function (db, appConfig) {
       const email = (req.body.email || '').trim().toLowerCase();
       const name = (req.body.name || '').trim();
       const password = req.body.password || '';
+      const confirm = req.body.confirm_password || '';
       const rules = getPasswordRules(appConfig);
       if (!username || !email || !name || !password) return res.redirect('/admins?error=All+fields+are+required');
       if (!/^[A-Za-z0-9._-]+$/.test(username)) {
         return res.redirect('/admins?error=Username+may+only+contain+letters%2C+digits%2C+dot%2C+dash%2C+underscore');
       }
+      if (password !== confirm) return res.redirect('/admins?error=Passwords+do+not+match');
       const pwErr = validatePassword(password, rules);
       if (pwErr) return res.redirect('/admins?error=' + encodeURIComponent(pwErr));
 
