@@ -373,6 +373,7 @@ module.exports = function (db, appConfig) {
           ${field('Categories', chips(cats.rows), isPub('categories'))}
           ${field('Service cities', chips(cities.rows), isPub('service_cities'))}
         </div>
+        <div>${field('Search keywords — only used by the "Need Help?" keyword search', chips(String(o.search_tags || '').split(',').map(t => t.trim()).filter(Boolean).map(name => ({ name, is_active: 1 }))), false)}</div>
         <div>${field('Contacts', contactsHtml, isPub('contacts'))}</div>
         <div>${field(`Photos (${images.rows.length} of 5)`, imagesHtml, isPub('images'))}</div>
         <p class="text-xs text-slate-500 dark:text-slate-400">The organization edits this profile itself from the website's portal. Raw rows: <a class="text-brand-600 hover:underline" href="/data/organizations/row?key=${encodeURIComponent(JSON.stringify({ org_id: Number(o.org_id) }))}">Data Browser → organizations</a>.</p>
