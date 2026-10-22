@@ -296,6 +296,7 @@ function eventForm(action, v, pickers, isNew, zone) {
           <label class="label" for="ev-slug">URL slug</label>
           <input id="ev-slug" class="input font-mono" type="text" name="slug" maxlength="80" pattern="[a-z0-9-]*" value="${val('slug')}" placeholder="made from the title when blank">
           <p class="mt-1 text-xs text-slate-500 dark:text-slate-400">The page address: <code>/events/&lt;slug&gt;</code>. Changing it breaks links already shared on Facebook.</p>
+          ${latest.field(v, pickers.latest, latest.EVENT)}
         </div>
         <div>
           <label class="label" for="ev-summary">Summary <span class="text-xs font-normal text-slate-400">(≤ 200 characters, shown on cards)</span></label>
@@ -330,7 +331,6 @@ function eventForm(action, v, pickers, isNew, zone) {
             <p class="mt-1 text-xs text-slate-500 dark:text-slate-400">Can't be before the start. Untick to leave the end open.</p>
           </div>
         </div>
-        ${latest.field(v, pickers.latest, latest.EVENT)}
       </div>
       ${markdownField('description_md', 'Description', v.description_md, 10)}
     </section>

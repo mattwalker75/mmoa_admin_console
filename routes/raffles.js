@@ -162,7 +162,8 @@ function raffleForm(action, v, orgs, isNew, zone, latestHolder) {
           <input id="rf-title" class="input" type="text" name="title" required maxlength="200" value="${val('title')}" placeholder="e.g. Browning BPS 12-gauge shotgun raffle"></div>
         <div><label class="label" for="rf-slug">URL slug</label>
           <input id="rf-slug" class="input font-mono" type="text" name="slug" maxlength="80" pattern="[a-z0-9-]*" value="${val('slug')}" placeholder="made from the title when blank">
-          <p class="mt-1 text-xs text-slate-500 dark:text-slate-400">The page address: <code>/raffles/&lt;slug&gt;</code>.</p></div>
+          <p class="mt-1 text-xs text-slate-500 dark:text-slate-400">The page address: <code>/raffles/&lt;slug&gt;</code>.</p>
+          ${latest.field(v, latestHolder, latest.RAFFLE)}</div>
         <div><label class="label" for="rf-price">Ticket price</label>
           <input id="rf-price" class="input" type="text" name="ticket_price_text" maxlength="200" value="${val('ticket_price_text')}" placeholder="$20 each or 6 for $100"></div>
         <div><label class="label" for="rf-total">Total tickets <span class="text-xs font-normal text-slate-400">(optional)</span></label>
@@ -171,7 +172,6 @@ function raffleForm(action, v, orgs, isNew, zone, latestHolder) {
           <input id="rf-draw" class="input" type="datetime-local" name="drawing_at" value="${val('drawing_local')}"></div>
         <div class="sm:col-span-2"><label class="label" for="rf-drawloc">Drawing location</label>
           <input id="rf-drawloc" class="input" type="text" name="drawing_location" maxlength="300" value="${val('drawing_location')}" placeholder="e.g. Live at the Coyote Cruisers Car &amp; Bike Show"></div>
-        ${latest.field(v, latestHolder, latest.RAFFLE)}
       </div>
       ${markdownField('prize_description_md', 'Prize description', v.prize_description_md, 8)}
     </section>

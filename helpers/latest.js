@@ -7,7 +7,8 @@
 // kind = { table, idCol, noun ('event' | 'raffle'), path ('/events' | '/raffles') }
 //
 //   field(v, holder, kind)          the checkbox + "who holds it now" note
-//                                   (v.is_latest, v.item_id)
+//                                   (v.is_latest, v.item_id) — placed inside
+//                                   the form's URL slug field, right under it
 //   holder(db, kind, exceptId)      the row that holds it (other than exceptId)
 //   take(db, kind, id)              clear it on every OTHER row (call before
 //                                   saving the row with is_latest = 1)
@@ -23,10 +24,9 @@ function field(v, holder, { noun, path }) {
   const note = mine ? `This is the Latest ${noun}.`
     : holder ? `Right now the Latest ${noun} is “${escapeHtml(holder.title)}” — ticking this moves Latest here and un-selects it there.`
     : `No ${noun} is Latest right now.`;
-  return `<div class="sm:col-span-2">
+  return `<div class="mt-3 rounded-lg border border-slate-200 dark:border-slate-700 px-3 py-2">
           <input type="hidden" name="_item_id" value="${escapeHtml(v.item_id || '')}">
-          <span class="label">Latest ${noun}</span>
-          <label class="inline-flex items-center gap-2 text-sm text-slate-700 dark:text-slate-200">
+          <label class="inline-flex items-center gap-2 text-sm font-medium text-slate-700 dark:text-slate-200">
             <input type="checkbox" name="is_latest" value="1" class="h-4 w-4" ${v.is_latest ? 'checked' : ''}>
             Also show this ${noun} at <code class="font-mono">${path}/latest</code>
           </label>

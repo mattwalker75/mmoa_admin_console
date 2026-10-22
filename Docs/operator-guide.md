@@ -113,7 +113,7 @@ A raffle has two separate settings:
   **Archived**, each with its count; the list shows each raffle's status
   and stage.
 - **Latest raffle** — like events: tick "Also show this raffle at
-  /raffles/latest" (below the drawing location). One raffle at a time —
+  /raffles/latest" (right under the URL slug). One raffle at a time —
   ticking it on another moves it there; it only works while that raffle is
   Published, and `latest` can't be a raffle's own slug.
 - **Preview** — the same pop-up as events: the raffle's real website page,
