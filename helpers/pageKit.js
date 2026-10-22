@@ -23,6 +23,15 @@ const uploads = require('./webAppUploads');
 
 function dbBanner(err) {
   if (!err) return '';
+  // A column / table the console expects but the Web App hasn't created yet:
+  // the Web App adds them (boot migrations) when it next starts.
+  if (/no such column|no such table|unknown column|doesn't exist/i.test(err.message || '')) {
+    return `<div class="flash-error mb-6">
+    <strong class="font-semibold">Start (or restart) the Web App to finish an update.</strong>
+    This console expects database changes the Web App makes when it starts, and they aren't there yet
+    (${escapeHtml(err.message || 'unknown error')}). Use Web App Settings → Start / Restart Web App, then reload this page.
+  </div>`;
+  }
   return `<div class="flash-error mb-6">
     <strong class="font-semibold">Database unavailable.</strong>
     ${escapeHtml(err.message || 'unknown error')}. Some data on this page could not be loaded.
