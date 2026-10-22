@@ -75,8 +75,8 @@ module.exports = function (db, appConfig) {
       ['verified',     "SELECT COUNT(*) AS c FROM organizations WHERE verification_status = 'verified'", []],
       ['pending',      "SELECT COUNT(*) AS c FROM organizations WHERE verification_status = 'unverified'", []],
       ['rejected',     "SELECT COUNT(*) AS c FROM organizations WHERE verification_status = 'rejected'", []],
-      ['upcoming',     'SELECT COUNT(*) AS c FROM events WHERE is_published = 1 AND starts_at >= ?', [upcomingCut]],
-      ['drafts',       'SELECT COUNT(*) AS c FROM events WHERE is_published = 0', []],
+      ['upcoming',     "SELECT COUNT(*) AS c FROM events WHERE status = 'published' AND starts_at >= ?", [upcomingCut]],
+      ['drafts',       "SELECT COUNT(*) AS c FROM events WHERE status = 'draft'", []],
       ['openRaffles',  "SELECT COUNT(*) AS c FROM raffles WHERE status = 'open'", []],
       ['lockedIps',    "SELECT COUNT(*) AS c FROM login_lockouts WHERE scope = 'ip' AND locked_until_ms > ?", [now]],
       ['lockedAccts',  "SELECT COUNT(*) AS c FROM login_lockouts WHERE scope <> 'ip' AND locked_until_ms > ?", [now]]

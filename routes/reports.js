@@ -140,7 +140,7 @@ const REPORTS = {
       { key: 'ends_at',          label: 'Ends (UTC)' },
       { key: 'venue_name',       label: 'Venue' },
       { key: 'city',             label: 'City' },
-      { key: 'is_published',     label: 'Published' },
+      { key: 'status',           label: 'Status' },
       { key: 'registration_url', label: 'Registration link' },
       { key: 'beneficiaries',    label: 'Beneficiaries' },
       { key: 'has_flyer',        label: 'Flyer' },
@@ -149,7 +149,7 @@ const REPORTS = {
     ],
     async fetch({ db }) {
       const rows = await db.allAsync(`
-        SELECT event_id, title, slug, starts_at, ends_at, venue_name, city, is_published,
+        SELECT event_id, title, slug, starts_at, ends_at, venue_name, city, status,
                registration_url, flyer_path, summary, updated_at
           FROM events
          ORDER BY starts_at ASC, event_id ASC`);
@@ -162,7 +162,6 @@ const REPORTS = {
       }
       return rows.map(r => ({
         ...r,
-        is_published: yesNo(r.is_published),
         has_flyer: r.flyer_path ? 'yes' : 'no',
         beneficiaries: (byEvent.get(Number(r.event_id)) || []).join('; ')
       }));

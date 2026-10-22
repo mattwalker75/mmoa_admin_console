@@ -35,8 +35,14 @@ admin.
 
 The website is where events live (Facebook posts just link to them).
 
-- **Upcoming / Past / Drafts** — upcoming means published and starting no
-  more than 12 hours ago (the website's rule). Drafts are not on the site.
+- **Status** — every event is **Draft** (being prepared, not on the
+  website), **Published** (on the website) or **Archived** (taken off the
+  website but kept here for reference — e.g. to copy next year). Change it
+  with the Draft / Published / Archived switch at the bottom of the form, or
+  the same three buttons at the top of the page (they save your edits too).
+- **Upcoming / Past / Drafts / Archived** — upcoming means published and
+  starting no more than 12 hours ago (the website's rule); past means
+  published and older. Only Published events are on the site.
 - **New event** — title, optional URL slug (made from the title; changing
   it later breaks links already shared), summary (≤ 200 characters, shown
   on cards), start / end in **Central time** (`timeZone` in this console's
@@ -52,8 +58,13 @@ The website is where events live (Facebook posts just link to them).
 - **Flyer / cover** — appear after the event is saved. Pick a photo; your
   browser shrinks it to 1600 px and uploads it to the website's
   `uploads/events/`. Replacing or removing one deletes the old file.
-- **Publish / Unpublish**, **View on site** (needs Public base URL under
-  Web App Settings → General) and **Delete** (also deletes the image files).
+- **Preview** — opens the event's **real website page** in a pop-up (with
+  Desktop / Phone width and "Open in new tab"), even while it's a draft or
+  archived; a "Preview" banner says it isn't public. It shows the last
+  *saved* version. The preview link lasts 30 minutes and only works for
+  whoever has it. Needs the Public base URL (Web App Settings → General).
+- **View on site** (published events), and **Delete** (also deletes the
+  image files).
 
 ## Raffles
 

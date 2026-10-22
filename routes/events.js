@@ -2,15 +2,29 @@
 // `event_beneficiaries` tables). The website is the source of truth for
 // events; Facebook only links to it, so this is where the board publishes.
 //
-//   GET  /events?tab=upcoming|past|drafts  → list
+//   GET  /events?tab=upcoming|past|drafts|archived → list
 //   GET  /events/new                       → blank form
 //   POST /events                           → create (then add flyer / cover)
 //   GET  /events/:id                       → edit form + images + actions
-//   POST /events/:id                       → save
-//   POST /events/:id/publish               → state=1 publish / state=0 unpublish
+//   POST /events/:id                       → save (incl. status; the header's
+//                                            status buttons submit this form
+//                                            too, with set_status)
+//   POST /events/:id/preview               → JSON { url }: a 30-minute link to
+//                                            the real page, even for a draft
 //   POST /events/:id/delete                → delete row, beneficiaries, image files
 //   POST /events/:id/image/:slot           → upload flyer | cover (multipart "image")
 //   POST /events/:id/image/:slot/remove    → clear flyer | cover (deletes the file)
+//
+// Status (events.status): draft (being prepared) → published (on the
+// website) → archived (taken down, kept for reference). Any state can move to
+// any other. is_published is kept in step (1 only while published) for the
+// web app's older readers. Needs the web app's 2026-10 migration, which adds
+// the column on its next start.
+//
+// Preview: a random token stored on the event (preview_token /
+// preview_expires_at, newest only) — the web app shows /events/<slug>
+// ?preview=<token> whatever the status, with a "Preview" banner, and lets
+// that one page be framed so it opens in a pop-up here.
 //
 // Times: starts_at / ends_at are stored as UTC 'YYYY-MM-DD HH:MM:SS'; the form
 // works in the organization's zone (appConfig.timeZone, default
@@ -29,6 +43,7 @@
 // organization is later deleted (org_id → NULL).
 
 const express = require('express');
+const crypto = require('crypto');
 const { page, flash } = require('../views/layout');
 const { escapeHtml, jsAttrStr } = require('../views/escapeHtml');
 const { requireAdmin } = require('../middleware/auth');
@@ -39,14 +54,50 @@ const uploads = require('../helpers/webAppUploads');
 const TABS = [
   { key: 'upcoming', label: 'Upcoming' },
   { key: 'past', label: 'Past' },
-  { key: 'drafts', label: 'Drafts' }
+  { key: 'drafts', label: 'Drafts' },
+  { key: 'archived', label: 'Archived' }
 ];
+const STATUSES = [
+  { key: 'draft', label: 'Draft', hint: 'Being prepared — not on the website yet.' },
+  { key: 'published', label: 'Published', hint: 'On the website now.' },
+  { key: 'archived', label: 'Archived', hint: 'Taken off the website; kept here for reference.' }
+];
+const STATUS_KEYS = STATUSES.map(s => s.key);
+const PREVIEW_MINUTES = 30;
+
+function statusPill(s) {
+  if (s === 'published') return '<span class="pill-running">Published</span>';
+  if (s === 'archived') return '<span class="pill-terminated">Archived</span>';
+  return '<span class="pill-pending">Draft</span>';
+}
+
+// "no such column: status" → the web app hasn't been restarted since the
+// update that adds it.
+function statusColumnHint(err) {
+  return err && /status|preview_/i.test(err.message || '') && /no such column|unknown column/i.test(err.message || '')
+    ? `<div class="flash-error mb-6"><strong class="font-semibold">Restart the Web App to finish this update.</strong> Events now have a Draft / Published / Archived status; the Web App adds that to the database when it next starts (Web App Settings → Restart Web App).</div>`
+    : '';
+}
+
+// Draft / Published / Archived as a 3-position switch (radio buttons).
+function statusSwitch(current) {
+  const segs = STATUSES.map(s => `
+      <label class="relative cursor-pointer">
+        <input type="radio" name="status" value="${s.key}" class="peer sr-only" ${s.key === current ? 'checked' : ''}>
+        <span class="block px-4 py-2 text-sm font-semibold text-slate-600 dark:text-slate-300 peer-checked:bg-brand-600 peer-checked:text-white peer-focus-visible:ring-2 peer-focus-visible:ring-brand-500 peer-focus-visible:ring-offset-2 dark:peer-focus-visible:ring-offset-slate-900">${s.label}</span>
+      </label>`).join('');
+  return `<fieldset x-data="{ s: ${escapeHtml(JSON.stringify(current))} }" x-on:change="s = $event.target.value">
+      <legend class="label">Status</legend>
+      <div class="inline-flex rounded-lg border border-slate-300 dark:border-slate-600 overflow-hidden divide-x divide-slate-300 dark:divide-slate-600">${segs}</div>
+      ${STATUSES.map(s => `<p class="mt-1 text-xs text-slate-500 dark:text-slate-400" x-show="s === '${s.key}'" ${s.key === current ? '' : 'x-cloak'}>${escapeHtml(s.hint)}</p>`).join('')}
+    </fieldset>`;
+}
 const SLOTS = { flyer: 'flyer_path', cover: 'cover_path' };
 const TEXTAREA_CLS = 'block w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900 shadow-sm focus:border-brand-500 focus:outline-none focus:ring-2 focus:ring-brand-500/30 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100';
 
 const EVENT_COLS = `event_id, slug, title, summary, description_md, starts_at, ends_at, venue_name,
   address, city, map_url, flyer_path, cover_path, registration_url, registration_label,
-  registration_note, beneficiaries_text, is_published, created_at, updated_at`;
+  registration_note, beneficiaries_text, is_published, status, created_at, updated_at`;
 
 function upcomingCutoff() { return kit.sqlTime(-12 * 3600 * 1000); }
 
@@ -59,7 +110,8 @@ function readForm(b, appConfig) {
     address: b.address || '', city: b.city || '', map_url: b.map_url || '',
     registration_url: b.registration_url || '', registration_label: b.registration_label || '',
     registration_note: b.registration_note || '', beneficiaries_text: b.beneficiaries_text || '',
-    is_published: kit.yes(b.is_published), bens_json: b.beneficiaries_json || '[]'
+    status: STATUS_KEYS.includes(b.set_status) ? b.set_status : STATUS_KEYS.includes(b.status) ? b.status : 'draft',
+    bens_json: b.beneficiaries_json || '[]'
   };
   const fail = (error) => ({ values, error });
 
@@ -104,7 +156,8 @@ function readForm(b, appConfig) {
       registration_label: kit.str(b.registration_label, 100) || 'Register & pay',
       registration_note: kit.str(b.registration_note, 255),
       beneficiaries_text: kit.str(b.beneficiaries_text, 2000),
-      is_published: kit.yes(b.is_published) ? 1 : 0
+      status: values.status,
+      is_published: values.status === 'published' ? 1 : 0
     }
   };
 }
@@ -116,7 +169,7 @@ function valuesFromRow(e, bens, appConfig) {
     venue_name: e.venue_name || '', address: e.address || '', city: e.city || '', map_url: e.map_url || '',
     registration_url: e.registration_url || '', registration_label: e.registration_label || 'Register & pay',
     registration_note: e.registration_note || '', beneficiaries_text: e.beneficiaries_text || '',
-    is_published: !!Number(e.is_published),
+    status: STATUS_KEYS.includes(e.status) ? e.status : (Number(e.is_published) ? 'published' : 'draft'),
     bens_json: JSON.stringify((bens || []).map(x => ({ org_id: x.org_id ? Number(x.org_id) : '', name: x.name || '', url: x.url || '' })))
   };
 }
@@ -201,7 +254,7 @@ function beneficiariesEditor(benJson, orgs) {
 function eventForm(action, v, pickers, isNew, zone) {
   const val = (k) => escapeHtml(v[k] || '');
   const cityList = pickers.cities.map(c => `<option value="${escapeHtml(c)}">`).join('');
-  return `<form method="POST" action="${action}" class="space-y-6">
+  return `<form id="ev-form" method="POST" action="${action}" class="space-y-6" x-data x-on:input="window.evFormDirty = true">
     <section class="card surface-target card-pad space-y-4">
       <h2 class="text-sm font-semibold uppercase tracking-wider text-slate-500 dark:text-slate-400">Event</h2>
       <div class="grid sm:grid-cols-2 gap-4">
@@ -265,16 +318,73 @@ function eventForm(action, v, pickers, isNew, zone) {
     </section>
 
     <div class="flex items-center justify-between gap-4 flex-wrap">
-      <label class="inline-flex items-center gap-2 text-sm text-slate-700 dark:text-slate-200">
-        <input type="checkbox" name="is_published" value="1" class="h-4 w-4" ${v.is_published ? 'checked' : ''}>
-        Published <span class="text-xs text-slate-500">(visible on the website)</span>
-      </label>
+      ${statusSwitch(v.status || 'draft')}
       <div class="flex items-center gap-2">
         <a href="/events" class="btn-secondary">Cancel</a>
         <button type="submit" class="btn-primary">${isNew ? 'Create event' : 'Save changes'}</button>
       </div>
     </div>
   </form>`;
+}
+
+// The console's CSP only lets it frame itself; the Preview pop-up frames the
+// Web App's page, so the edit page (only) also allows the Web App's origin.
+// URL.origin is just scheme://host:port, so nothing can be smuggled into the
+// header.
+function allowFramingOf(res, base) {
+  let origin;
+  try { origin = new URL(base).origin; } catch (e) { return; }
+  if (!origin || origin === 'null') return;
+  const csp = res.getHeader('Content-Security-Policy');
+  if (csp) res.setHeader('Content-Security-Policy', `${csp};frame-src 'self' ${origin}`);
+}
+
+// "Preview" → a pop-up (native <dialog>) showing the REAL website page via a
+// fresh preview link, at desktop or phone width. Shows the last SAVED version.
+function previewButton(id, base) {
+  if (!base) return `<span class="btn-secondary opacity-50 cursor-not-allowed" title="Set the Public base URL under Web App Settings → General">Preview</span>`;
+  return `<div x-data="{ url: '', err: '', loading: false, phone: false, dirty: false,
+        async open() {
+          this.err = ''; this.url = ''; this.loading = true; this.dirty = !!window.evFormDirty;
+          this.$refs.dlg.showModal();
+          try {
+            const r = await fetch('/events/${id}/preview', { method: 'POST', headers: { 'Accept': 'application/json' } });
+            const j = await r.json().catch(() => ({}));
+            if (!r.ok || !j.url) throw new Error(j.error || 'Could not make a preview link.');
+            this.url = j.url;
+          } catch (e) { this.err = e.message || String(e); }
+          finally { this.loading = false; }
+        } }">
+      <button type="button" class="btn-secondary" x-on:click="open()" aria-haspopup="dialog">Preview</button>
+      <dialog x-ref="dlg" aria-labelledby="pv-title" x-on:close="url = ''"
+              x-on:click="if ($event.target === $refs.dlg) $refs.dlg.close()"
+              class="m-auto p-0 rounded-xl bg-white dark:bg-slate-900 text-slate-900 dark:text-slate-100 shadow-2xl backdrop:bg-black/70 w-[96vw] max-w-[1400px] h-[92vh] max-h-[92vh]">
+        <div class="flex h-full flex-col">
+          <div class="flex items-center justify-between gap-3 flex-wrap border-b border-slate-200 dark:border-slate-700 px-4 py-2">
+            <div class="min-w-0">
+              <strong id="pv-title" class="text-sm">Preview — how this event looks on the website</strong>
+              <p class="text-xs text-slate-500 dark:text-slate-400">Shows the last <b>saved</b> version. The link works for ${PREVIEW_MINUTES} minutes and isn't public.</p>
+              <p class="text-xs text-amber-700 dark:text-amber-300" x-show="dirty" x-cloak>You have unsaved changes — save first to see them here.</p>
+            </div>
+            <div class="flex items-center gap-2">
+              <div class="inline-flex rounded-lg border border-slate-300 dark:border-slate-600 overflow-hidden divide-x divide-slate-300 dark:divide-slate-600" role="group" aria-label="Preview width">
+                <button type="button" class="px-3 py-1.5 text-xs font-semibold" :class="!phone ? 'bg-brand-600 text-white' : 'text-slate-600 dark:text-slate-300'" :aria-pressed="!phone" x-on:click="phone = false">Desktop</button>
+                <button type="button" class="px-3 py-1.5 text-xs font-semibold" :class="phone ? 'bg-brand-600 text-white' : 'text-slate-600 dark:text-slate-300'" :aria-pressed="phone" x-on:click="phone = true">Phone</button>
+              </div>
+              <a class="btn-secondary text-xs px-3 py-1.5" :href="url || null" target="_blank" rel="noopener" x-show="url" x-cloak>Open in new tab <span aria-hidden="true">↗</span></a>
+              <button type="button" class="btn-primary text-xs px-3 py-1.5" x-on:click="$refs.dlg.close()" autofocus>Close</button>
+            </div>
+          </div>
+          <div class="flex-1 min-h-0 bg-slate-200 dark:bg-black overflow-auto">
+            <div x-show="loading" class="p-10 text-center text-sm text-slate-500">Making a preview link…</div>
+            <div x-show="err" x-cloak class="m-6 flash-error text-sm" role="alert" x-text="err"></div>
+            <template x-if="url">
+              <iframe :src="url" title="Event preview" class="block mx-auto h-full bg-white border-0" :class="phone ? 'w-[390px] border-x border-slate-400' : 'w-full'"></iframe>
+            </template>
+          </div>
+        </div>
+      </dialog>
+    </div>`;
 }
 
 function imageSlotCard(eventId, slot, label, hint, rel) {
@@ -302,12 +412,13 @@ module.exports = function (db, appConfig) {
     const tab = TABS.some(t => t.key === req.query.tab) ? req.query.tab : 'upcoming';
     const cut = upcomingCutoff();
     const q = {
-      upcoming: ['WHERE is_published = 1 AND starts_at >= ? ORDER BY starts_at ASC, event_id ASC', [cut]],
-      past: ['WHERE is_published = 1 AND starts_at < ? ORDER BY starts_at DESC, event_id DESC', [cut]],
-      drafts: ['WHERE is_published = 0 ORDER BY starts_at ASC, event_id ASC', []]
+      upcoming: ["WHERE status = 'published' AND starts_at >= ? ORDER BY starts_at ASC, event_id ASC", [cut]],
+      past: ["WHERE status = 'published' AND starts_at < ? ORDER BY starts_at DESC, event_id DESC", [cut]],
+      drafts: ["WHERE status = 'draft' ORDER BY starts_at ASC, event_id ASC", []],
+      archived: ["WHERE status = 'archived' ORDER BY starts_at DESC, event_id DESC", []]
     };
     const { rows, err } = await kit.safeAll(db,
-      `SELECT event_id, slug, title, starts_at, venue_name, city, is_published, flyer_path FROM events ${q[tab][0]}`, q[tab][1]);
+      `SELECT event_id, slug, title, starts_at, venue_name, city, status, flyer_path FROM events ${q[tab][0]}`, q[tab][1]);
     const counts = {};
     for (const t of TABS) {
       const where = q[t.key][0].replace(/ ORDER BY.*$/, '');
@@ -321,7 +432,7 @@ module.exports = function (db, appConfig) {
         <td class="font-medium text-slate-900 dark:text-slate-100"><a class="hover:underline" href="/events/${Number(e.event_id)}">${escapeHtml(e.title)}</a>
           <div class="font-mono text-xs text-slate-400">/events/${escapeHtml(e.slug)}</div></td>
         <td>${escapeHtml([e.venue_name, e.city].filter(Boolean).join(' · ') || '—')}</td>
-        <td>${Number(e.is_published) ? '<span class="pill-running">Published</span>' : '<span class="pill-terminated">Draft</span>'}
+        <td>${statusPill(e.status)}
             ${e.flyer_path ? '' : ' <span class="pill-pending" title="No flyer uploaded">no flyer</span>'}</td>
       </tr>`).join('');
     const body = `
@@ -329,8 +440,8 @@ module.exports = function (db, appConfig) {
         `<a href="/events/new" class="btn-primary"><span aria-hidden="true">＋</span><span>New event</span></a>`)}
       ${flash('error', req.query.error)}
       ${flash('success', req.query.msg)}
-      ${kit.dbBanner(err)}
-      <nav class="mb-4 flex items-center gap-2" aria-label="Event lists">${tabs}</nav>
+      ${statusColumnHint(err) || kit.dbBanner(err)}
+      <nav class="mb-4 flex items-center gap-2 flex-wrap" aria-label="Event lists">${tabs}</nav>
       <div class="table-wrap surface-target" x-data>
         <table class="table-base">
           <thead><tr><th>When</th><th>Title</th><th>Where</th><th>Status</th></tr></thead>
@@ -343,7 +454,7 @@ module.exports = function (db, appConfig) {
   // ── New ─────────────────────────────────────────────────────────────
   async function renderNew(req, res, values, error) {
     const pickers = await loadPickers(db);
-    const v = values || { registration_label: 'Register & pay', bens_json: '[]', is_published: false };
+    const v = values || { registration_label: 'Register & pay', bens_json: '[]', status: 'draft' };
     const body = `
       <div class="mb-4"><a class="text-sm text-brand-600 hover:underline" href="/events">← Back to events</a></div>
       ${kit.pageHeader('New event', 'Save it first — the flyer and cover image uploads appear once the event exists.')}
@@ -384,10 +495,10 @@ module.exports = function (db, appConfig) {
       const now = kit.sqlTime();
       const ins = await db.runAsync(`INSERT INTO events (slug, title, summary, description_md, starts_at, ends_at, venue_name,
           address, city, map_url, registration_url, registration_label, registration_note, beneficiaries_text,
-          is_published, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          is_published, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [f.slug, f.title, f.summary, f.description_md, f.starts_at, f.ends_at, f.venue_name, f.address, f.city,
          f.map_url, f.registration_url, f.registration_label, f.registration_note, f.beneficiaries_text,
-         f.is_published, now, now]);
+         f.is_published, f.status, now, now]);
       let id = ins && ins.lastID ? Number(ins.lastID) : null;
       if (!id) { const row = await db.getAsync('SELECT event_id FROM events WHERE slug = ?', [f.slug]); id = row && Number(row.event_id); }
       if (r.bens.length) await writeBeneficiaries(id, r.bens);
@@ -411,22 +522,29 @@ module.exports = function (db, appConfig) {
     const pickers = await loadPickers(db);
     const v = values || valuesFromRow(e, bens.rows, appConfig);
     const base = await kit.webAppPublicUrl(appConfig);
-    const published = !!Number(e.is_published);
-    const viewLink = base
+    if (base) allowFramingOf(res, base);
+    const status = STATUS_KEYS.includes(e.status) ? e.status : (Number(e.is_published) ? 'published' : 'draft');
+    const published = status === 'published';
+    const viewLink = base && published
       ? `<a class="btn-secondary" href="${escapeHtml(base + '/events/' + e.slug)}" target="_blank" rel="noopener">View on site <span aria-hidden="true">↗</span></a>`
-      : `<span class="btn-secondary opacity-50 cursor-not-allowed" title="Set publicBaseUrl under Web App Settings → General">View on site ↗</span>`;
-    const actions = `${viewLink}
-      <form method="POST" action="/events/${id}/publish" class="m-0">
-        <input type="hidden" name="state" value="${published ? '0' : '1'}">
-        <button type="submit" class="${published ? 'btn-secondary' : 'btn-primary'}">${published ? 'Unpublish' : 'Publish'}</button>
-      </form>
+      : '';
+    // The header's status buttons save the whole form (form="ev-form") with
+    // set_status, so switching never throws away unsaved edits.
+    const statusButtons = `<div class="inline-flex rounded-lg border border-slate-300 dark:border-slate-600 overflow-hidden divide-x divide-slate-300 dark:divide-slate-600" role="group" aria-label="Status — saves your changes">
+        ${STATUSES.map(s => s.key === status
+          ? `<span class="px-3 py-2 text-sm font-semibold bg-brand-600 text-white" aria-current="true">${s.label}</span>`
+          : `<button type="submit" form="ev-form" name="set_status" value="${s.key}" class="px-3 py-2 text-sm font-semibold text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800" title="${escapeHtml(s.hint)} Saves your changes too.">${s.label}</button>`).join('')}
+      </div>`;
+    const actions = `${statusButtons}
+      ${previewButton(id, base)}
+      ${viewLink}
       <form method="POST" action="/events/${id}/delete" class="m-0" x-data
             x-on:submit.prevent="window.uiConfirmSubmit($event.target, ${jsAttrStr('Delete the event "' + e.title + '"? Its flyer and cover image files are deleted too. This cannot be undone.')}, { title: 'Delete event', confirmLabel: 'Delete' })">
         <button type="submit" class="btn-danger">Delete</button>
       </form>`;
     const body = `
       <div class="mb-4"><a class="text-sm text-brand-600 hover:underline" href="/events">← Back to events</a></div>
-      ${kit.pageHeader(e.title, `${lt.formatLocal(e.starts_at, appConfig)} · ${published ? 'Published' : 'Draft (not on the website)'}`, actions)}
+      ${kit.pageHeader(e.title, `${lt.formatLocal(e.starts_at, appConfig)} · ${STATUSES.find(s => s.key === status).label} — ${STATUSES.find(s => s.key === status).hint}`, actions)}
       ${flash('error', error || req.query.error)}
       ${flash('success', req.query.msg)}
       ${kit.dbBanner(bens.err || pickers.err)}
@@ -462,28 +580,40 @@ module.exports = function (db, appConfig) {
       f.slug = await kit.uniqueSlug(db, 'events', 'event_id', f.slug, id);
       await db.runAsync(`UPDATE events SET slug = ?, title = ?, summary = ?, description_md = ?, starts_at = ?, ends_at = ?,
           venue_name = ?, address = ?, city = ?, map_url = ?, registration_url = ?, registration_label = ?,
-          registration_note = ?, beneficiaries_text = ?, is_published = ?, updated_at = ? WHERE event_id = ?`,
+          registration_note = ?, beneficiaries_text = ?, is_published = ?, status = ?, updated_at = ? WHERE event_id = ?`,
         [f.slug, f.title, f.summary, f.description_md, f.starts_at, f.ends_at, f.venue_name, f.address, f.city,
          f.map_url, f.registration_url, f.registration_label, f.registration_note, f.beneficiaries_text,
-         f.is_published, kit.sqlTime(), id]);
+         f.is_published, f.status, kit.sqlTime(), id]);
       await writeBeneficiaries(id, r.bens);
-      res.redirect(`/events/${id}?msg=Event+saved.`);
+      const msg = !req.body.set_status ? 'Event saved.'
+        : f.status === 'published' ? 'Saved and published — it is on the website now.'
+        : f.status === 'archived' ? 'Saved and archived — it is off the website, kept here for reference.'
+        : 'Saved as a draft — it is not on the website.';
+      res.redirect(`/events/${id}?msg=` + encodeURIComponent(msg));
     } catch (err) {
       console.error('[events] update failed:', err);
       renderEdit(req, res, id, r.values, 'Save failed: ' + (err.message || 'unknown error'));
     }
   });
 
-  router.post('/events/:id/publish', requireAdmin, async (req, res) => {
+  // A fresh preview link (replaces any earlier one for this event).
+  router.post('/events/:id/preview', requireAdmin, async (req, res) => {
     const id = kit.idParam(req.params.id);
-    if (!id) return res.redirect('/events?error=Invalid+event+id');
-    const on = (req.body && req.body.state) === '1';
+    if (!id) return res.status(400).json({ error: 'Invalid event id' });
     try {
-      const r = await db.runAsync('UPDATE events SET is_published = ?, updated_at = ? WHERE event_id = ?', [on ? 1 : 0, kit.sqlTime(), id]);
-      if (!r.changes) return res.redirect('/events?error=Event+not+found');
-      res.redirect(`/events/${id}?msg=` + encodeURIComponent(on ? 'Published — it is on the website now.' : 'Unpublished — hidden from the website.'));
+      const base = await kit.webAppPublicUrl(appConfig);
+      if (!base) return res.status(400).json({ error: "The Web App's public URL isn't set (Web App Settings → General → Public base URL)." });
+      const e = await db.getAsync('SELECT slug FROM events WHERE event_id = ?', [id]);
+      if (!e) return res.status(404).json({ error: 'Event not found' });
+      const token = crypto.randomBytes(24).toString('hex');
+      await db.runAsync('UPDATE events SET preview_token = ?, preview_expires_at = ? WHERE event_id = ?',
+        [token, kit.sqlTime(PREVIEW_MINUTES * 60 * 1000), id]);
+      res.json({ url: `${base}/events/${encodeURIComponent(e.slug)}?preview=${token}` });
     } catch (err) {
-      res.redirect(`/events/${id}?error=` + encodeURIComponent('Update failed: ' + (err.message || err)));
+      console.error('[events] preview failed:', err);
+      res.status(500).json({ error: /no such column|unknown column/i.test(err.message || '')
+        ? 'Restart the Web App first — it adds what previews need to the database when it starts.'
+        : 'Could not make a preview link: ' + (err.message || err) });
     }
   });
 

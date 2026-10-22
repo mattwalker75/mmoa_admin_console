@@ -28,7 +28,8 @@ It is a port of `car_show_admin_console` with the car-show-only domain
   key), `ec2` (SSM Run Command). Every file write is atomic; SSM reads
   refuse anything near the ~24 KB output cap rather than truncate it.
 - **Events & Raffles** — the website is the source of truth for both
-  (Facebook only links to it). Create / edit / publish, Markdown-lite
+  (Facebook only links to it). Create / edit, Draft → Published →
+  Archived, a **Preview** pop-up of the real page, Markdown-lite
   descriptions with a live preview (same renderer as the website), flyer /
   cover / prize-photo uploads, event beneficiaries, raffle claim presets
   (Firearm / Standard) and the draft → open → closed → drawn workflow.
@@ -106,7 +107,7 @@ password is replaced by re-running the command above with the same username.
 | **Profile**          | Edit your own name / email / password. |
 | **Dashboard**        | Nonprofits verified / pending / rejected, upcoming events, event drafts, open raffles, locked logins, console admins + the "Pending verification" list. |
 | **Admins**           | Add / replace / remove local-file console admins. |
-| **Events**           | Upcoming / past / drafts; create, edit, publish, flyer + cover, beneficiaries, delete, View on site. |
+| **Events**           | Upcoming / past / drafts / archived; create, edit, Draft / Published / Archived switch, Preview pop-up, flyer + cover, beneficiaries, delete, View on site. |
 | **Raffles**          | Same pattern + claim presets, prize photos (≤ 8, reorder), status workflow with winning ticket. |
 | **Nonprofits**       | Accounts + directory profiles; ProPublica lookup; Verify / Reject / Reset; account actions. (`/members` redirects here.) |
 | **Categories & Cities** | The directory's service categories and cities — add, rename, reorder, activate / deactivate, delete when unused (never the built-in **Other**). |
