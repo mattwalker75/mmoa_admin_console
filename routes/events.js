@@ -282,6 +282,24 @@ function beneficiariesEditor(benJson, orgs) {
   </div>`;
 }
 
+// A web-address field that must start with http:// or https:// (the server
+// checks too — kit.urlField). Plain text + an inline check rather than
+// type="url", whose generic browser message accepts any scheme. The error
+// shows once the field is left (or a save is tried) and blocks the save.
+function httpLinkInput(id, name, value, placeholder) {
+  return `<div x-data="{ v: ${escapeHtml(JSON.stringify(value || ''))}, t: false,
+        bad() { const s = this.v.trim().toLowerCase();
+          return s !== '' && (s.includes(' ') || !((s.startsWith('http://') && s.length > 7) || (s.startsWith('https://') && s.length > 8))); } }">
+      <input id="${id}" class="input" type="text" inputmode="url" autocomplete="off" spellcheck="false" name="${name}" maxlength="1000"
+             placeholder="${escapeHtml(placeholder)}" x-model="v"
+             x-effect="$el.setCustomValidity(bad() ? 'Must start with http:// or https://' : '')"
+             x-on:blur="t = true" x-on:invalid="t = true"
+             :aria-invalid="t && bad() ? 'true' : null" aria-describedby="${id}-err"
+             :class="t && bad() ? 'border-red-500 focus:border-red-500 focus:ring-red-500/30' : ''">
+      <p id="${id}-err" class="mt-1 text-xs text-red-600 dark:text-red-300" x-show="t && bad()" x-cloak>Must start with <code>http://</code> or <code>https://</code></p>
+    </div>`;
+}
+
 // "Latest" checkbox + who holds it now (so it's clear what ticking it moves).
 function latestField(v, holder) {
   const mine = holder && v.event_id && String(holder.event_id) === String(v.event_id);
@@ -364,7 +382,7 @@ function eventForm(action, v, pickers, isNew, zone) {
         <div class="sm:col-span-2"><label class="label" for="ev-address">Address</label>
           <input id="ev-address" class="input" type="text" name="address" maxlength="300" value="${val('address')}"></div>
         <div class="sm:col-span-2"><label class="label" for="ev-map">Map link <span class="text-xs font-normal text-slate-400">(optional — blank builds a Google Maps search from the address)</span></label>
-          <input id="ev-map" class="input" type="url" name="map_url" maxlength="1000" value="${val('map_url')}" placeholder="https://maps.app.goo.gl/…"></div>
+          ${httpLinkInput('ev-map', 'map_url', v.map_url, 'https://maps.app.goo.gl/…')}</div>
       </div>
     </section>
 
@@ -372,7 +390,7 @@ function eventForm(action, v, pickers, isNew, zone) {
       <h2 class="text-sm font-semibold uppercase tracking-wider text-slate-500 dark:text-slate-400">Registration</h2>
       <div class="grid sm:grid-cols-2 gap-4">
         <div class="sm:col-span-2"><label class="label" for="ev-reg">Registration / payment link <span class="text-xs font-normal text-slate-400">(a Stripe Payment Link or any https:// page; blank = no button)</span></label>
-          <input id="ev-reg" class="input" type="url" name="registration_url" maxlength="1000" value="${val('registration_url')}" placeholder="https://buy.stripe.com/…"></div>
+          ${httpLinkInput('ev-reg', 'registration_url', v.registration_url, 'https://buy.stripe.com/…')}</div>
         <div><label class="label" for="ev-reglabel">Button label</label>
           <input id="ev-reglabel" class="input" type="text" name="registration_label" maxlength="100" value="${val('registration_label') || 'Register &amp; pay'}"></div>
         <div><label class="label" for="ev-regnote">Note next to the button</label>
