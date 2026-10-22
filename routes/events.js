@@ -28,6 +28,11 @@
 // ?preview=<token> whatever the status, with a "Preview" banner, and lets
 // that one page be framed so it opens in a pop-up here.
 //
+// Latest (events.is_latest): at most ONE event is "Latest" and the website
+// also serves it at /events/latest (while it's published). Saving an event
+// with Latest ticked clears it on every other event first; 'latest' is
+// therefore reserved as a slug.
+//
 // Times: starts_at / ends_at are stored as UTC 'YYYY-MM-DD HH:MM:SS'; the form
 // works in the organization's zone (appConfig.timeZone, default
 // America/Chicago) — see helpers/localTime.js. "Upcoming" uses the web app's
@@ -115,7 +120,7 @@ const TEXTAREA_CLS = 'block w-full rounded-lg border border-slate-200 bg-white p
 
 const EVENT_COLS = `event_id, slug, title, summary, description_md, starts_at, ends_at, venue_name,
   address, city, map_url, flyer_path, cover_path, registration_url, registration_label,
-  registration_note, beneficiaries_text, is_published, status, created_at, updated_at`;
+  registration_note, beneficiaries_text, is_published, status, is_latest, created_at, updated_at`;
 
 
 // Read + validate the posted form. Returns { values, fields, bens, error }.
@@ -128,15 +133,21 @@ function readForm(b, appConfig) {
     registration_url: b.registration_url || '', registration_label: b.registration_label || '',
     registration_note: b.registration_note || '', beneficiaries_text: b.beneficiaries_text || '',
     status: STATUS_KEYS.includes(b.set_status) ? b.set_status : STATUS_KEYS.includes(b.status) ? b.status : 'draft',
-    bens_json: b.beneficiaries_json || '[]'
+    bens_json: b.beneficiaries_json || '[]',
+    is_latest: kit.yes(b.is_latest), event_id: b._event_id || ''
   };
   const fail = (error) => ({ values, error });
 
   const title = kit.str(b.title, 200);
   if (!title) return fail('Title is required.');
   const slugIn = kit.str(b.slug, 80);
-  const slug = slugIn ? kit.slugify(slugIn) : kit.slugify(title);
+  let slug = slugIn ? kit.slugify(slugIn) : kit.slugify(title);
   if (!slug || !kit.SLUG_RE.test(slug)) return fail('The URL slug may only contain lowercase letters, digits and dashes.');
+  // /events/latest is the Latest event's address, so no event may own it.
+  if (slug === 'latest') {
+    if (slugIn) return fail('"latest" is reserved for the Latest event\'s address (/events/latest) — pick another slug, or tick "Latest" instead.');
+    slug = 'latest-event';
+  }
   const summary = kit.str(b.summary);
   if (summary && summary.length > 200) return fail('The summary must be 200 characters or fewer.');
   const starts = lt.localInputToUtc(b.starts_at, appConfig);
@@ -174,7 +185,8 @@ function readForm(b, appConfig) {
       registration_note: kit.str(b.registration_note, 255),
       beneficiaries_text: kit.str(b.beneficiaries_text, 2000),
       status: values.status,
-      is_published: values.status === 'published' ? 1 : 0
+      is_published: values.status === 'published' ? 1 : 0,
+      is_latest: values.is_latest ? 1 : 0
     }
   };
 }
@@ -187,6 +199,7 @@ function valuesFromRow(e, bens, appConfig) {
     registration_url: e.registration_url || '', registration_label: e.registration_label || 'Register & pay',
     registration_note: e.registration_note || '', beneficiaries_text: e.beneficiaries_text || '',
     status: STATUS_KEYS.includes(e.status) ? e.status : (Number(e.is_published) ? 'published' : 'draft'),
+    is_latest: !!Number(e.is_latest), event_id: String(e.event_id),
     bens_json: JSON.stringify((bens || []).map(x => ({ org_id: x.org_id ? Number(x.org_id) : '', name: x.name || '', url: x.url || '' })))
   };
 }
@@ -196,7 +209,8 @@ function valuesFromRow(e, bens, appConfig) {
 async function loadPickers(db) {
   const orgs = await kit.safeAll(db, 'SELECT org_id, name, verification_status, is_listed FROM organizations ORDER BY LOWER(name)', []);
   const cities = await kit.safeAll(db, 'SELECT name FROM cities WHERE is_active = 1 ORDER BY sort, name', []);
-  return { orgs: orgs.rows, cities: cities.rows.map(r => r.name), err: orgs.err || cities.err };
+  const latest = await kit.safeGet(db, 'SELECT event_id, title FROM events WHERE is_latest = 1 ORDER BY event_id DESC LIMIT 1', [], null);
+  return { orgs: orgs.rows, cities: cities.rows.map(r => r.name), latest: latest.value, err: orgs.err || cities.err || latest.err };
 }
 
 function markdownHint() {
@@ -268,6 +282,23 @@ function beneficiariesEditor(benJson, orgs) {
   </div>`;
 }
 
+// "Latest" checkbox + who holds it now (so it's clear what ticking it moves).
+function latestField(v, holder) {
+  const mine = holder && v.event_id && String(holder.event_id) === String(v.event_id);
+  const note = mine ? 'This is the Latest event.'
+    : holder ? `Right now the Latest event is “${escapeHtml(holder.title)}” — ticking this moves Latest here and un-selects it there.`
+    : 'No event is Latest right now.';
+  return `<div>
+          <input type="hidden" name="_event_id" value="${escapeHtml(v.event_id || '')}">
+          <span class="label">Latest event</span>
+          <label class="inline-flex items-center gap-2 text-sm text-slate-700 dark:text-slate-200">
+            <input type="checkbox" name="is_latest" value="1" class="h-4 w-4" ${v.is_latest ? 'checked' : ''}>
+            Also show this event at <code class="font-mono">/events/latest</code>
+          </label>
+          <p class="mt-1 text-xs text-slate-500 dark:text-slate-400">Only one event can be Latest. ${note} The link only works while the event is Published.</p>
+        </div>`;
+}
+
 function eventForm(action, v, pickers, isNew, zone) {
   const val = (k) => escapeHtml(v[k] || '');
   const cityList = pickers.cities.map(c => `<option value="${escapeHtml(c)}">`).join('');
@@ -284,6 +315,7 @@ function eventForm(action, v, pickers, isNew, zone) {
           <input id="ev-slug" class="input font-mono" type="text" name="slug" maxlength="80" pattern="[a-z0-9-]*" value="${val('slug')}" placeholder="made from the title when blank">
           <p class="mt-1 text-xs text-slate-500 dark:text-slate-400">The page address: <code>/events/&lt;slug&gt;</code>. Changing it breaks links already shared on Facebook.</p>
         </div>
+        ${latestField(v, pickers.latest)}
         <div>
           <label class="label" for="ev-summary">Summary <span class="text-xs font-normal text-slate-400">(≤ 200 characters, shown on cards)</span></label>
           <input id="ev-summary" class="input" type="text" name="summary" maxlength="200" value="${val('summary')}">
@@ -429,7 +461,7 @@ module.exports = function (db, appConfig) {
     const asked = req.query.status || OLD_TABS[req.query.tab] || 'all';
     const filter = FILTERS.some(f => f.key === asked) ? asked : 'all';
     const { rows: all, err } = await kit.safeAll(db,
-      `SELECT event_id, slug, title, starts_at, venue_name, city, status, flyer_path FROM events
+      `SELECT event_id, slug, title, starts_at, venue_name, city, status, is_latest, flyer_path FROM events
         ${filter === 'all' ? '' : 'WHERE status = ?'} ORDER BY starts_at ASC, event_id ASC`, filter === 'all' ? [] : [filter]);
     const counts = { all: 0 };
     const { rows: countRows } = await kit.safeAll(db, 'SELECT status, COUNT(*) AS c FROM events GROUP BY status', []);
@@ -459,6 +491,7 @@ module.exports = function (db, appConfig) {
           <div class="font-mono text-xs text-slate-400">/events/${escapeHtml(e.slug)}</div></td>
         <td>${escapeHtml([e.venue_name, e.city].filter(Boolean).join(' · ') || '—')}</td>
         <td>${statusPill(e.status)}
+            ${Number(e.is_latest) ? ' <span class="pill-running" title="Also at /events/latest">Latest</span>' : ''}
             ${e.flyer_path ? '' : ' <span class="pill-pending" title="No flyer uploaded">no flyer</span>'}</td>
       </tr>`;
     const tbody = groups.map(g => (g.label
@@ -521,25 +554,33 @@ module.exports = function (db, appConfig) {
     });
   }
 
+  // The event currently marked Latest, other than `exceptId` (or null).
+  async function latestHolder(exceptId) {
+    return await db.getAsync('SELECT event_id, title FROM events WHERE is_latest = 1 AND event_id <> ? ORDER BY event_id DESC LIMIT 1', [exceptId || 0]) || null;
+  }
+  const latestMsg = (prev) => prev ? ` It is now the Latest event (/events/latest) — “${prev.title}” no longer is.` : '';
+
   router.post('/events', requireAdmin, async (req, res) => {
     const r = readForm(req.body || {}, appConfig);
     if (r.error) return renderNew(req, res, r.values, r.error);
     const f = r.fields;
     try {
       f.slug = await kit.uniqueSlug(db, 'events', 'event_id', f.slug, 0);
+      const prevLatest = f.is_latest ? await latestHolder(0) : null;
+      if (f.is_latest) await db.runAsync('UPDATE events SET is_latest = 0 WHERE is_latest = 1', []);
       const now = kit.sqlTime();
       const ins = await db.runAsync(`INSERT INTO events (slug, title, summary, description_md, starts_at, ends_at, venue_name,
           address, city, map_url, registration_url, registration_label, registration_note, beneficiaries_text,
-          is_published, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          is_published, status, is_latest, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [f.slug, f.title, f.summary, f.description_md, f.starts_at, f.ends_at, f.venue_name, f.address, f.city,
          f.map_url, f.registration_url, f.registration_label, f.registration_note, f.beneficiaries_text,
-         f.is_published, f.status, now, now]);
+         f.is_published, f.status, f.is_latest, now, now]);
       let id = ins && ins.lastID ? Number(ins.lastID) : null;
       if (!id) { const row = await db.getAsync('SELECT event_id FROM events WHERE slug = ?', [f.slug]); id = row && Number(row.event_id); }
       if (r.bens.length) await writeBeneficiaries(id, r.bens);
       console.log(`[events] ${req.session.user.username} created event #${id} (${f.slug})`);
       res.redirect(`/events/${id}?msg=` + encodeURIComponent((f.status === 'published' ? 'Event created and published — it is on the website now.'
-        : f.status === 'archived' ? 'Event created as archived.' : 'Event created as a draft.') + ' Add the flyer and cover image below.'));
+        : f.status === 'archived' ? 'Event created as archived.' : 'Event created as a draft.') + latestMsg(prevLatest) + ' Add the flyer and cover image below.'));
     } catch (err) {
       console.error('[events] create failed:', err);
       renderNew(req, res, r.values, 'Create failed: ' + (err.message || 'unknown error'));
@@ -573,7 +614,7 @@ module.exports = function (db, appConfig) {
       </form>`;
     const body = `
       <div class="mb-4"><a class="text-sm text-brand-600 hover:underline" href="/events">← Back to events</a></div>
-      ${kit.pageHeader(e.title, `${lt.formatLocal(e.starts_at, appConfig)} · ${STATUSES.find(s => s.key === status).label} — ${STATUSES.find(s => s.key === status).hint}`, actions)}
+      ${kit.pageHeader(e.title, `${lt.formatLocal(e.starts_at, appConfig)} · ${STATUSES.find(s => s.key === status).label} — ${STATUSES.find(s => s.key === status).hint}${Number(e.is_latest) ? ' · Latest event (/events/latest)' : ''}`, actions)}
       ${flash('error', error || req.query.error)}
       ${flash('success', req.query.msg)}
       ${kit.dbBanner(bens.err || pickers.err)}
@@ -607,18 +648,21 @@ module.exports = function (db, appConfig) {
       const exists = await db.getAsync('SELECT event_id FROM events WHERE event_id = ?', [id]);
       if (!exists) return res.redirect('/events?error=Event+not+found');
       f.slug = await kit.uniqueSlug(db, 'events', 'event_id', f.slug, id);
+      // Latest is one event only: clear it elsewhere before setting it here.
+      const prevLatest = f.is_latest ? await latestHolder(id) : null;
+      if (f.is_latest) await db.runAsync('UPDATE events SET is_latest = 0 WHERE is_latest = 1 AND event_id <> ?', [id]);
       await db.runAsync(`UPDATE events SET slug = ?, title = ?, summary = ?, description_md = ?, starts_at = ?, ends_at = ?,
           venue_name = ?, address = ?, city = ?, map_url = ?, registration_url = ?, registration_label = ?,
-          registration_note = ?, beneficiaries_text = ?, is_published = ?, status = ?, updated_at = ? WHERE event_id = ?`,
+          registration_note = ?, beneficiaries_text = ?, is_published = ?, status = ?, is_latest = ?, updated_at = ? WHERE event_id = ?`,
         [f.slug, f.title, f.summary, f.description_md, f.starts_at, f.ends_at, f.venue_name, f.address, f.city,
          f.map_url, f.registration_url, f.registration_label, f.registration_note, f.beneficiaries_text,
-         f.is_published, f.status, kit.sqlTime(), id]);
+         f.is_published, f.status, f.is_latest, kit.sqlTime(), id]);
       await writeBeneficiaries(id, r.bens);
       const msg = !req.body.set_status ? 'Event saved.'
         : f.status === 'published' ? 'Saved and published — it is on the website now.'
         : f.status === 'archived' ? 'Saved and archived — it is off the website, kept here for reference.'
         : 'Saved as a draft — it is not on the website.';
-      res.redirect(`/events/${id}?msg=` + encodeURIComponent(msg));
+      res.redirect(`/events/${id}?msg=` + encodeURIComponent(msg + latestMsg(prevLatest)));
     } catch (err) {
       console.error('[events] update failed:', err);
       renderEdit(req, res, id, r.values, 'Save failed: ' + (err.message || 'unknown error'));

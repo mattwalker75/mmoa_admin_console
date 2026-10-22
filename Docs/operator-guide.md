@@ -63,6 +63,12 @@ The website is where events live (Facebook posts just link to them).
 - **Flyer / cover** — appear after the event is saved. Pick a photo; your
   browser shrinks it to 1600 px and uploads it to the website's
   `uploads/events/`. Replacing or removing one deletes the old file.
+- **Latest event** — tick "Also show this event at /events/latest" to give
+  one event a fixed address you can share (e.g. a pinned Facebook post).
+  Only one event can be Latest: ticking it on another event moves it there
+  (the form says which event has it now, and the save message says which
+  one lost it). `/events/latest` only works while that event is
+  Published. `latest` can't be used as an event's own slug.
 - **Preview** — opens the event's **real website page** in a pop-up (with
   Desktop / Phone width and "Open in new tab"), even while it's a draft or
   archived; a "Preview" banner says it isn't public. It shows the last
