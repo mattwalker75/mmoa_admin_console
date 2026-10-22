@@ -116,6 +116,12 @@ A raffle has two separate settings:
   /raffles/latest" (right under the URL slug). One raffle at a time —
   ticking it on another moves it there; it only works while that raffle is
   Published, and `latest` can't be a raffle's own slug.
+- **Generate flyer** — like events, next to the raffle flyer's Upload:
+  a 1200 × 1600 flyer over the **first prize photo** with the title, the
+  prize description's first paragraph, **Drawing** (date, time, location)
+  and **Tickets** (price, total) cards, the first sentence of "How to buy"
+  (the in-person-only wording), who it benefits and the raffle's address.
+  **Use as flyer** / **Download** work the same way.
 - **Preview** — the same pop-up as events: the raffle's real website page,
   even while it's a draft or archived (a banner says so), at Desktop / Phone
   width. It shows the last *saved* version and needs the Web App running.

@@ -1,5 +1,6 @@
-// public/js/flyer-maker.js — draws an event flyer (1200 × 1600 JPEG) in the
-// browser from the event form's CURRENT values plus the saved cover photo.
+// public/js/flyer-maker.js — draws an event or raffle flyer (1200 × 1600
+// JPEG) in the browser from the form's CURRENT values plus a saved photo (the
+// event's cover photo / the raffle's first prize photo).
 // Used by the "Generate flyer" pop-up on the event edit page
 // (routes/events.js → flyerMaker). Uploading it goes through the normal
 // flyer upload (window.macUploadImage), so the server sees an ordinary image.
@@ -10,8 +11,13 @@
 // registration note, "Benefiting …" and the event's web address. Fonts are
 // the site's own (Saira Condensed / Barlow), self-hosted under /fonts/.
 //
-//   window.mmoaFlyer.collect(form, extra) → data object from the form
-//   window.mmoaFlyer.render(canvas, data) → Promise (draws onto canvas)
+//   window.mmoaFlyer.collect(form, extra)       → data from an EVENT form
+//   window.mmoaFlyer.collectRaffle(form, extra) → data from a RAFFLE form
+//   window.mmoaFlyer.render(canvas, data)       → Promise (draws onto canvas)
+//
+// data: { coverUrl, kicker?, title, summary, cards? [{label, big, small}],
+// note, footer?, url } — an event's cards (WHEN / WHERE) and footer
+// ("Benefiting …") are built from its fields when not given.
 (function () {
   'use strict';
 
@@ -150,7 +156,11 @@
       if (cover) {
         var r = Math.max(W / cover.width, 900 / cover.height);
         var iw = cover.width * r, ih = cover.height * r;
+        // Clip to the photo band: a tall (portrait) photo must not run
+        // down behind the text and cards.
+        ctx.save(); ctx.beginPath(); ctx.rect(0, 0, W, 900); ctx.clip();
         ctx.drawImage(cover, (W - iw) / 2, (900 - ih) / 2, iw, ih);
+        ctx.restore();
       } else {
         var glow = ctx.createRadialGradient(W * 0.8, 120, 40, W * 0.8, 120, 900);
         glow.addColorStop(0, 'rgba(124,209,54,.35)'); glow.addColorStop(1, 'rgba(124,209,54,0)');
@@ -166,7 +176,7 @@
       font(ctx, 800, 34, HEAD);
       if ('letterSpacing' in ctx) ctx.letterSpacing = '6px';
       ctx.fillStyle = C.link;
-      ctx.fillText((d.orgName || 'Mission Men of Anna').toUpperCase() + ' PRESENTS', X, 100);
+      ctx.fillText(d.kicker || (d.orgName || 'Mission Men of Anna').toUpperCase() + ' PRESENTS', X, 100);
       if ('letterSpacing' in ctx) ctx.letterSpacing = '0px';
 
       // Title (up to 3 lines, auto-sized) + summary, bottom-aligned above the cards.
@@ -189,12 +199,15 @@
         sum.forEach(function (l, i) { ctx.fillText(l, X, sy + i * 52); });
       }
 
-      // WHEN / WHERE cards
-      var when = whenText(d.starts, d.ends);
-      var whereBig = d.venue || d.city || '';
-      var whereSmall = d.venue ? [d.address, d.city ? d.city + ', TX' : ''].filter(Boolean).join(', ') : (d.address || (d.city ? 'Texas' : ''));
-      var cards = [{ label: 'WHEN', big: when.big, small: when.small }];
-      if (whereBig) cards.push({ label: 'WHERE', big: whereBig, small: whereSmall });
+      // Info cards: given (raffle: DRAWING / TICKETS) or an event's WHEN / WHERE.
+      var cards = d.cards;
+      if (!cards) {
+        var when = whenText(d.starts, d.ends);
+        var whereBig = d.venue || d.city || '';
+        var whereSmall = d.venue ? [d.address, d.city ? d.city + ', TX' : ''].filter(Boolean).join(', ') : (d.address || (d.city ? 'Texas' : ''));
+        cards = [{ label: 'WHEN', big: when.big, small: when.small }];
+        if (whereBig) cards.push({ label: 'WHERE', big: whereBig, small: whereSmall });
+      }
       var gap = 24, cardW = (CW - gap * (cards.length - 1)) / cards.length, cardY = 1060, cardH = 220;
       cards.forEach(function (c, i) {
         var cx = X + i * (cardW + gap);
@@ -214,8 +227,9 @@
 
       // Footer: beneficiaries + web address
       ctx.fillStyle = C.muted;
-      if (d.beneficiaries && d.beneficiaries.length) {
-        var b = fitWrap(ctx, 'Benefiting ' + listNames(d.beneficiaries), 700, BODY, 30, 22, CW, 2);
+      var footer = d.footer != null ? d.footer : (d.beneficiaries && d.beneficiaries.length ? 'Benefiting ' + listNames(d.beneficiaries) : '');
+      if (footer) {
+        var b = fitWrap(ctx, footer, 700, BODY, 30, 22, CW, 2);
         var by = d.url ? 1488 : 1530;
         b.lines.forEach(function (l, i) { ctx.fillText(l, X, by - (b.lines.length - 1 - i) * Math.round(b.size * 1.3)); });
       }
@@ -225,5 +239,40 @@
     });
   }
 
-  window.mmoaFlyer = { collect: collect, render: render, W: W, H: H };
+  // ── Read a raffle form ───────────────────────────────────────────────
+  // Markdown-lite → plain text (first paragraph, for the summary line).
+  function plainFirstParagraph(md) {
+    var para = String(md || '').replace(/\r\n?/g, '\n').split(/\n\s*\n/).map(function (p) { return p.trim(); })
+      .filter(function (p) { return p && !/^- /.test(p); })[0] || '';
+    return para.replace(/\[([^\]]+)\]\([^)]*\)/g, '$1').replace(/[*_`]+/g, '').replace(/\s+/g, ' ').trim();
+  }
+  function firstSentence(t) {
+    var s = String(t || '').replace(/\s+/g, ' ').trim();
+    var m = /^(.+?[.!?])(\s|$)/.exec(s);
+    return m ? m[1] : s;
+  }
+  function collectRaffle(form, extra) {
+    var v = function (sel) { var el = form.querySelector(sel); return el ? String(el.value || '').trim() : ''; };
+    var draw = parseLocal(v('[name=drawing_at]'));
+    var drawBig = draw ? draw.toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric' }) : 'Drawing date to be announced';
+    var drawSmall = [draw ? clock(draw) : '', v('[name=drawing_location]')].filter(Boolean).join(' · ');
+    var price = v('[name=ticket_price_text]');
+    var total = v('[name=total_tickets]');
+    var orgSel = form.querySelector('[name=beneficiary_org_id]');
+    var orgName = orgSel && orgSel.value && orgSel.selectedOptions[0] ? orgSel.selectedOptions[0].text.replace(/\s*\((unverified|rejected)\)\s*$/, '') : '';
+    var benText = v('[name=beneficiary_text]');
+    return Object.assign({
+      kicker: 'MISSION MEN OF ANNA RAFFLE',
+      title: v('[name=title]'),
+      summary: plainFirstParagraph(v('[name=prize_description_md]')),
+      cards: [
+        { label: 'DRAWING', big: drawBig, small: drawSmall },
+        { label: 'TICKETS', big: price || 'See any MMoA member', small: total ? Number(total).toLocaleString('en-US') + ' tickets total' : 'Sold in person' }
+      ],
+      note: firstSentence(v('[name=how_to_buy]')),
+      footer: benText || (orgName ? 'Benefiting ' + orgName : '')
+    }, extra || {});
+  }
+
+  window.mmoaFlyer = { collect: collect, collectRaffle: collectRaffle, render: render, W: W, H: H };
 })();

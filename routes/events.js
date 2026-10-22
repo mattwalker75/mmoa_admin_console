@@ -57,6 +57,7 @@ const kit = require('../helpers/pageKit');
 const preview = require('../helpers/sitePreview');
 const vis = require('../helpers/visibility');
 const latest = require('../helpers/latest');
+const { flyerButton } = require('../helpers/flyerButton');
 const lt = require('../helpers/localTime');
 const uploads = require('../helpers/webAppUploads');
 
@@ -379,68 +380,6 @@ function eventForm(action, v, pickers, isNew, zone) {
   </form>`;
 }
 
-// "Generate flyer": draws a flyer in the browser (public/js/flyer-maker.js)
-// from the form's current values + the saved cover photo, shows it in a
-// pop-up, and "Use as flyer" uploads it through the normal flyer upload. If
-// the form has unsaved edits, the form is then saved too (the page reloads
-// either way, so edits aren't lost).
-function flyerMaker(eventId, coverRel, siteUrl) {
-  return `<div class="pt-1 flex items-center gap-2 flex-wrap" data-action="/events/${eventId}/image/flyer"
-       data-cover="${coverRel ? '/wa-uploads/' + escapeHtml(coverRel) : ''}" data-url="${escapeHtml(siteUrl || '')}"
-       x-data="{ cfg: {}, busy: false, err: '', ready: false, dirty: false,
-         init() { this.cfg = Object.assign({}, this.$el.dataset); },
-         async open() {
-           this.err = ''; this.ready = false; this.dirty = !!window.mmoaFormDirty;
-           this.$refs.dlg.showModal();
-           try {
-             const d = window.mmoaFlyer.collect(document.getElementById('ev-form'), { coverUrl: this.cfg.cover, url: this.cfg.url, orgName: 'Mission Men of Anna' });
-             await window.mmoaFlyer.render(this.$refs.cv, d);
-             this.ready = true;
-           } catch (e) { this.err = 'Could not draw the flyer: ' + (e.message || e); }
-         },
-         use() {
-           this.busy = true; this.err = '';
-           this.$refs.cv.toBlob(b => {
-             const file = new File([b], 'generated-flyer.jpg', { type: 'image/jpeg' });
-             window.macUploadImage(this.cfg.action, file).then(r => {
-               if (!r.ok) { this.err = r.error || 'Upload failed'; this.busy = false; return; }
-               if (this.dirty) document.getElementById('ev-form').requestSubmit(); else window.location.reload();
-             });
-           }, 'image/jpeg', 0.9);
-         },
-         download() {
-           const a = document.createElement('a');
-           a.href = this.$refs.cv.toDataURL('image/jpeg', 0.92); a.download = 'event-flyer.jpg';
-           document.body.appendChild(a); a.click(); a.remove();
-         } }">
-    <span class="text-xs text-slate-500 dark:text-slate-400">or</span>
-    <button type="button" class="btn-secondary text-sm" x-on:click="open()" aria-haspopup="dialog">✨ Generate flyer</button>
-    <span class="text-xs text-slate-500 dark:text-slate-400">from this event's details${coverRel ? ' and cover photo' : ' (add a cover photo for a picture)'}</span>
-    <dialog x-ref="dlg" aria-labelledby="fm-title" x-on:click="if ($event.target === $refs.dlg) $refs.dlg.close()"
-            class="m-auto p-0 rounded-xl bg-white dark:bg-slate-900 text-slate-900 dark:text-slate-100 shadow-2xl backdrop:bg-black/70 w-[96vw] max-w-[760px] max-h-[94vh]">
-      <div class="flex max-h-[94vh] flex-col">
-        <div class="flex items-center justify-between gap-3 flex-wrap border-b border-slate-200 dark:border-slate-700 px-4 py-2">
-          <div class="min-w-0">
-            <strong id="fm-title" class="text-sm">Generated flyer</strong>
-            <p class="text-xs text-slate-500 dark:text-slate-400">Made from what's in the form now${coverRel ? ' and the cover photo' : ''}. Edit the event and generate again to change it.</p>
-          </div>
-          <div class="flex items-center gap-2">
-            <button type="button" class="btn-secondary text-xs px-3 py-1.5" x-on:click="download()" :disabled="!ready">Download</button>
-            <button type="button" class="btn-primary text-xs px-3 py-1.5" x-on:click="use()" :disabled="!ready || busy">
-              <span x-show="!busy">Use as flyer</span><span x-show="busy" x-cloak>Uploading…</span></button>
-            <button type="button" class="btn-secondary text-xs px-3 py-1.5" x-on:click="$refs.dlg.close()" autofocus>Close</button>
-          </div>
-        </div>
-        <p class="mx-4 mt-3 text-xs text-amber-700 dark:text-amber-300" x-show="dirty" x-cloak>You have unsaved changes — "Use as flyer" saves them too.</p>
-        <div x-show="err" x-cloak class="mx-4 mt-3 flash-error text-sm" role="alert" x-text="err"></div>
-        <div class="flex-1 min-h-0 overflow-auto p-4 bg-slate-100 dark:bg-black/40 flex justify-center">
-          <canvas x-ref="cv" class="block h-auto max-h-[72vh] w-auto max-w-full rounded-lg shadow" role="img" aria-label="Generated event flyer"></canvas>
-        </div>
-      </div>
-    </dialog>
-  </div>`;
-}
-
 function imageSlotCard(eventId, slot, label, hint, rel, extra) {
   return `<div class="rounded-lg border border-slate-200 dark:border-slate-700 p-3 space-y-2">
     <div class="flex items-center justify-between gap-2">
@@ -623,7 +562,8 @@ module.exports = function (db, appConfig) {
           <h2 class="text-sm font-semibold uppercase tracking-wider text-slate-500 dark:text-slate-400 mb-3">Images</h2>
           <div class="grid md:grid-cols-2 gap-4">
             ${imageSlotCard(id, 'flyer', 'Flyer', 'The full flyer — visitors can open it full size and download it. Upload your own, or generate one.', e.flyer_path,
-                flyerMaker(id, e.cover_path, base ? base.replace(/^https?:\/\//, '') + '/events/' + e.slug : ''))}
+                flyerButton({ action: `/events/${id}/image/flyer`, formId: 'ev-form', kind: 'event', photoRel: e.cover_path, photoWord: 'cover photo',
+                  siteUrl: base ? base.replace(/^https?:\/\//, '') + '/events/' + e.slug : '' }))}
             ${imageSlotCard(id, 'cover', 'Cover photo', 'Wide photo for the event card and page header (optional).', e.cover_path)}
           </div>
           <p class="mt-3 text-xs text-slate-500 dark:text-slate-400">JPEG, PNG or WebP. Your browser shrinks photos to 1600 px before uploading.</p>

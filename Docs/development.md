@@ -68,7 +68,8 @@ public/js/date-picker.js        Turns any input[data-datetime] into a calendar +
 helpers/latest.js               "Latest" (one event / one raffle at /events|raffles/latest): checkbox, single-holder save, reserved slug
 helpers/visibility.js           Draft / Published / Archived buttons + switch shared by Events and Raffles
 helpers/sitePreview.js          The Preview button + pop-up and preview-link maker shared by Events and Raffles
-public/js/flyer-maker.js        "Generate flyer": draws an event flyer on a canvas from the form + cover photo
+public/js/flyer-maker.js        "Generate flyer": draws an event / raffle flyer on a canvas from the form + a photo
+helpers/flyerButton.js          The "Generate flyer" button + pop-up (Use as flyer / Download) for events and raffles
 public/fonts/*.woff2            Saira Condensed / Barlow (the website's fonts), copied by npm run copy:fonts — do not edit
 public/js/ui-confirm.js         window.uiConfirm / uiConfirmSubmit (CSP-safe confirm dialog)
 public/js/wa-preview.js         Web App Website section preview popup
