@@ -215,10 +215,31 @@ function uploadForm(action, label, opts) {
   </form>`;
 }
 
+// Is the Web App answering at its public URL? Used before showing a preview
+// (the pop-up frames that URL, so it has to be up). From the console server:
+// GET <base>/health (liveness — answered even in maintenance mode), then
+// GET <base>/api/public/config, which is 503 while maintenance mode is on.
+// Resolves { ok: true } or { ok: false, reason: 'offline' | 'maintenance' |
+// 'error', message }. Never throws.
+async function webAppReachable(base, timeoutMs = 4000) {
+  const get = (path) => fetch(base + path, { signal: AbortSignal.timeout(timeoutMs), redirect: 'manual', headers: { Accept: 'application/json' } });
+  try {
+    const h = await get('/health');
+    if (!h.ok) return { ok: false, reason: 'error', message: `The Web App answered ${h.status} at ${base}/health.` };
+  } catch (e) {
+    return { ok: false, reason: 'offline', message: `The Web App isn't responding at ${base}.` };
+  }
+  try {
+    const c = await get('/api/public/config');
+    if (c.status === 503) return { ok: false, reason: 'maintenance', message: 'The Web App is in maintenance mode, so the preview would only show the maintenance screen.' };
+  } catch (e) { /* /health answered; let the preview try */ }
+  return { ok: true };
+}
+
 function yes(v) { return v === 1 || v === true || v === '1' || v === 'on' || v === 'true'; }
 
 module.exports = {
   dbBanner, safeGet, safeAll, sqlTime, pageHeader, idParam, str, urlField,
   slugify, SLUG_RE, uniqueSlug, moveRow, nextSort,
-  withImage, reply, wantsJson, webAppPublicUrl, uploadImg, uploadForm, yes
+  withImage, reply, wantsJson, webAppPublicUrl, webAppReachable, uploadImg, uploadForm, yes
 };

@@ -413,14 +413,18 @@ function allowFramingOf(res, base) {
 // fresh preview link, at desktop or phone width. Shows the last SAVED version.
 function previewButton(id, base) {
   if (!base) return `<span class="btn-secondary opacity-50 cursor-not-allowed" title="Set the Public base URL under Web App Settings → General">Preview</span>`;
-  return `<div x-data="{ url: '', err: '', loading: false, phone: false, dirty: false,
+  return `<div x-data="{ url: '', err: '', reason: '', loading: false, phone: false, dirty: false,
         async open() {
-          this.err = ''; this.url = ''; this.loading = true; this.dirty = !!window.evFormDirty;
-          this.$refs.dlg.showModal();
+          this.dirty = !!window.evFormDirty;
+          if (!this.$refs.dlg.open) this.$refs.dlg.showModal();
+          await this.load();
+        },
+        async load() {
+          this.err = ''; this.reason = ''; this.url = ''; this.loading = true;
           try {
             const r = await fetch('/events/${id}/preview', { method: 'POST', headers: { 'Accept': 'application/json' } });
             const j = await r.json().catch(() => ({}));
-            if (!r.ok || !j.url) throw new Error(j.error || 'Could not make a preview link.');
+            if (!r.ok || !j.url) { this.reason = j.reason || ''; throw new Error(j.error || 'Could not make a preview link.'); }
             this.url = j.url;
           } catch (e) { this.err = e.message || String(e); }
           finally { this.loading = false; }
@@ -446,8 +450,17 @@ function previewButton(id, base) {
             </div>
           </div>
           <div class="flex-1 min-h-0 bg-slate-200 dark:bg-black overflow-auto">
-            <div x-show="loading" class="p-10 text-center text-sm text-slate-500">Making a preview link…</div>
-            <div x-show="err" x-cloak class="m-6 flash-error text-sm" role="alert" x-text="err"></div>
+            <div x-show="loading" class="p-10 text-center text-sm text-slate-500">Checking the Web App and making a preview link…</div>
+            <div x-show="err && (reason === 'offline' || reason === 'maintenance' || reason === 'error')" x-cloak role="alert"
+                 class="m-6 rounded-lg border border-amber-300 bg-amber-50 p-4 text-sm text-amber-900 dark:border-amber-700 dark:bg-amber-950/50 dark:text-amber-100">
+              <div class="font-semibold" x-text="reason === 'maintenance' ? '⚠ The Web App is in maintenance mode' : '⚠ The Web App is offline'"></div>
+              <p class="mt-1" x-text="err"></p>
+              <p class="mt-1" x-show="reason !== 'maintenance'">The preview shows the real website page, so the Web App has to be running. Start it from
+                <a class="underline" href="/web-app-settings/general">Web App Settings</a> (Start Web App), then try again.</p>
+              <p class="mt-1" x-show="reason === 'maintenance'">Turn maintenance mode off under <a class="underline" href="/web-app-website">Web App Website → Maintenance Mode</a>, then try again.</p>
+              <button type="button" class="btn-secondary text-xs px-3 py-1.5 mt-3" x-on:click="load()">Try again</button>
+            </div>
+            <div x-show="err && !(reason === 'offline' || reason === 'maintenance' || reason === 'error')" x-cloak class="m-6 flash-error text-sm" role="alert" x-text="err"></div>
             <template x-if="url">
               <iframe :src="url" title="Event preview" class="block mx-auto h-full bg-white border-0" :class="phone ? 'w-[390px] border-x border-slate-400' : 'w-full'"></iframe>
             </template>
@@ -697,6 +710,9 @@ module.exports = function (db, appConfig) {
     try {
       const base = await kit.webAppPublicUrl(appConfig);
       if (!base) return res.status(400).json({ error: "The Web App's public URL isn't set (Web App Settings → General → Public base URL)." });
+      // The pop-up loads the real page, so the Web App must be up.
+      const up = await kit.webAppReachable(base);
+      if (!up.ok) return res.status(503).json({ error: up.message, reason: up.reason });
       const e = await db.getAsync('SELECT slug FROM events WHERE event_id = ?', [id]);
       if (!e) return res.status(404).json({ error: 'Event not found' });
       const token = crypto.randomBytes(24).toString('hex');

@@ -76,7 +76,10 @@ The website is where events live (Facebook posts just link to them).
   Desktop / Phone width and "Open in new tab"), even while it's a draft or
   archived; a "Preview" banner says it isn't public. It shows the last
   *saved* version. The preview link lasts 30 minutes and only works for
-  whoever has it. Needs the Public base URL (Web App Settings → General).
+  whoever has it. Needs the Public base URL (Web App Settings → General),
+  and the Web App has to be **running** (it serves the page): the console
+  checks first, and if it's offline — or in maintenance mode — the pop-up
+  says so, with a **Try again** button.
 - **View on site** (published events), and **Delete** (also deletes the
   image files).
 
