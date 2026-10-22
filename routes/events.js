@@ -50,11 +50,11 @@
 // organization is later deleted (org_id → NULL).
 
 const express = require('express');
-const crypto = require('crypto');
 const { page, flash } = require('../views/layout');
 const { escapeHtml, jsAttrStr } = require('../views/escapeHtml');
 const { requireAdmin } = require('../middleware/auth');
 const kit = require('../helpers/pageKit');
+const preview = require('../helpers/sitePreview');
 const lt = require('../helpers/localTime');
 const uploads = require('../helpers/webAppUploads');
 
@@ -73,7 +73,6 @@ const STATUSES = [
   { key: 'archived', label: 'Archived', hint: 'Taken off the website; kept here for reference.' }
 ];
 const STATUS_KEYS = STATUSES.map(s => s.key);
-const PREVIEW_MINUTES = 30;
 
 function statusPill(s) {
   if (s === 'published') return '<span class="pill-running">Published</span>';
@@ -332,7 +331,7 @@ function latestField(v, holder) {
 function eventForm(action, v, pickers, isNew, zone) {
   const val = (k) => escapeHtml(v[k] || '');
   const cityList = pickers.cities.map(c => `<option value="${escapeHtml(c)}">`).join('');
-  return `<form id="ev-form" method="POST" action="${action}" class="space-y-6" x-data x-on:input="window.evFormDirty = true">
+  return `<form id="ev-form" method="POST" action="${action}" class="space-y-6" x-data x-on:input="window.mmoaFormDirty = true">
     <section class="card surface-target card-pad space-y-4">
       <h2 class="text-sm font-semibold uppercase tracking-wider text-slate-500 dark:text-slate-400">Event</h2>
       <div class="grid sm:grid-cols-2 gap-4">
@@ -427,79 +426,6 @@ function eventForm(action, v, pickers, isNew, zone) {
   </form>`;
 }
 
-// The console's CSP only lets it frame itself; the Preview pop-up frames the
-// Web App's page, so the edit page (only) also allows the Web App's origin.
-// URL.origin is just scheme://host:port, so nothing can be smuggled into the
-// header.
-function allowFramingOf(res, base) {
-  let origin;
-  try { origin = new URL(base).origin; } catch (e) { return; }
-  if (!origin || origin === 'null') return;
-  const csp = res.getHeader('Content-Security-Policy');
-  if (csp) res.setHeader('Content-Security-Policy', `${csp};frame-src 'self' ${origin}`);
-}
-
-// "Preview" → a pop-up (native <dialog>) showing the REAL website page via a
-// fresh preview link, at desktop or phone width. Shows the last SAVED version.
-function previewButton(id, base) {
-  if (!base) return `<span class="btn-secondary opacity-50 cursor-not-allowed" title="Set the Public base URL under Web App Settings → General">Preview</span>`;
-  return `<div x-data="{ url: '', err: '', reason: '', loading: false, phone: false, dirty: false,
-        async open() {
-          this.dirty = !!window.evFormDirty;
-          if (!this.$refs.dlg.open) this.$refs.dlg.showModal();
-          await this.load();
-        },
-        async load() {
-          this.err = ''; this.reason = ''; this.url = ''; this.loading = true;
-          try {
-            const r = await fetch('/events/${id}/preview', { method: 'POST', headers: { 'Accept': 'application/json' } });
-            const j = await r.json().catch(() => ({}));
-            if (!r.ok || !j.url) { this.reason = j.reason || ''; throw new Error(j.error || 'Could not make a preview link.'); }
-            this.url = j.url;
-          } catch (e) { this.err = e.message || String(e); }
-          finally { this.loading = false; }
-        } }">
-      <button type="button" class="btn-secondary" x-on:click="open()" aria-haspopup="dialog">Preview</button>
-      <dialog x-ref="dlg" aria-labelledby="pv-title" x-on:close="url = ''"
-              x-on:click="if ($event.target === $refs.dlg) $refs.dlg.close()"
-              class="m-auto p-0 rounded-xl bg-white dark:bg-slate-900 text-slate-900 dark:text-slate-100 shadow-2xl backdrop:bg-black/70 w-[96vw] max-w-[1400px] h-[92vh] max-h-[92vh]">
-        <div class="flex h-full flex-col">
-          <div class="flex items-center justify-between gap-3 flex-wrap border-b border-slate-200 dark:border-slate-700 px-4 py-2">
-            <div class="min-w-0">
-              <strong id="pv-title" class="text-sm">Preview — how this event looks on the website</strong>
-              <p class="text-xs text-slate-500 dark:text-slate-400">Shows the last <b>saved</b> version. The link works for ${PREVIEW_MINUTES} minutes and isn't public.</p>
-              <p class="text-xs text-amber-700 dark:text-amber-300" x-show="dirty" x-cloak>You have unsaved changes — save first to see them here.</p>
-            </div>
-            <div class="flex items-center gap-2">
-              <div class="inline-flex rounded-lg border border-slate-300 dark:border-slate-600 overflow-hidden divide-x divide-slate-300 dark:divide-slate-600" role="group" aria-label="Preview width">
-                <button type="button" class="px-3 py-1.5 text-xs font-semibold" :class="!phone ? 'bg-brand-600 text-white' : 'text-slate-600 dark:text-slate-300'" :aria-pressed="!phone" x-on:click="phone = false">Desktop</button>
-                <button type="button" class="px-3 py-1.5 text-xs font-semibold" :class="phone ? 'bg-brand-600 text-white' : 'text-slate-600 dark:text-slate-300'" :aria-pressed="phone" x-on:click="phone = true">Phone</button>
-              </div>
-              <a class="btn-secondary text-xs px-3 py-1.5" :href="url || null" target="_blank" rel="noopener" x-show="url" x-cloak>Open in new tab <span aria-hidden="true">↗</span></a>
-              <button type="button" class="btn-primary text-xs px-3 py-1.5" x-on:click="$refs.dlg.close()" autofocus>Close</button>
-            </div>
-          </div>
-          <div class="flex-1 min-h-0 bg-slate-200 dark:bg-black overflow-auto">
-            <div x-show="loading" class="p-10 text-center text-sm text-slate-500">Checking the Web App and making a preview link…</div>
-            <div x-show="err && (reason === 'offline' || reason === 'maintenance' || reason === 'error')" x-cloak role="alert"
-                 class="m-6 rounded-lg border border-amber-300 bg-amber-50 p-4 text-sm text-amber-900 dark:border-amber-700 dark:bg-amber-950/50 dark:text-amber-100">
-              <div class="font-semibold" x-text="reason === 'maintenance' ? '⚠ The Web App is in maintenance mode' : '⚠ The Web App is offline'"></div>
-              <p class="mt-1" x-text="err"></p>
-              <p class="mt-1" x-show="reason !== 'maintenance'">The preview shows the real website page, so the Web App has to be running. Start it from
-                <a class="underline" href="/web-app-settings/general">Web App Settings</a> (Start Web App), then try again.</p>
-              <p class="mt-1" x-show="reason === 'maintenance'">Turn maintenance mode off under <a class="underline" href="/web-app-website">Web App Website → Maintenance Mode</a>, then try again.</p>
-              <button type="button" class="btn-secondary text-xs px-3 py-1.5 mt-3" x-on:click="load()">Try again</button>
-            </div>
-            <div x-show="err && !(reason === 'offline' || reason === 'maintenance' || reason === 'error')" x-cloak class="m-6 flash-error text-sm" role="alert" x-text="err"></div>
-            <template x-if="url">
-              <iframe :src="url" title="Event preview" class="block mx-auto h-full bg-white border-0" :class="phone ? 'w-[390px] border-x border-slate-400' : 'w-full'"></iframe>
-            </template>
-          </div>
-        </div>
-      </dialog>
-    </div>`;
-}
-
 // "Generate flyer": draws a flyer in the browser (public/js/flyer-maker.js)
 // from the form's current values + the saved cover photo, shows it in a
 // pop-up, and "Use as flyer" uploads it through the normal flyer upload. If
@@ -511,7 +437,7 @@ function flyerMaker(eventId, coverRel, siteUrl) {
        x-data="{ cfg: {}, busy: false, err: '', ready: false, dirty: false,
          init() { this.cfg = Object.assign({}, this.$el.dataset); },
          async open() {
-           this.err = ''; this.ready = false; this.dirty = !!window.evFormDirty;
+           this.err = ''; this.ready = false; this.dirty = !!window.mmoaFormDirty;
            this.$refs.dlg.showModal();
            try {
              const d = window.mmoaFlyer.collect(document.getElementById('ev-form'), { coverUrl: this.cfg.cover, url: this.cfg.url, orgName: 'Mission Men of Anna' });
@@ -726,14 +652,14 @@ module.exports = function (db, appConfig) {
     const pickers = await loadPickers(db);
     const v = values || valuesFromRow(e, bens.rows, appConfig);
     const base = await kit.webAppPublicUrl(appConfig);
-    if (base) allowFramingOf(res, base);
+    if (base) preview.allowFramingOf(res, base);
     const status = STATUS_KEYS.includes(e.status) ? e.status : (Number(e.is_published) ? 'published' : 'draft');
     const published = status === 'published';
     const viewLink = base && published
       ? `<a class="btn-secondary" href="${escapeHtml(base + '/events/' + e.slug)}" target="_blank" rel="noopener">View on site <span aria-hidden="true">↗</span></a>`
       : '';
     const actions = `${statusButtons(status)}
-      ${previewButton(id, base)}
+      ${preview.previewButton({ endpoint: `/events/${id}/preview`, noun: 'event', base })}
       ${viewLink}
       <form method="POST" action="/events/${id}/delete" class="m-0" x-data
             x-on:submit.prevent="window.uiConfirmSubmit($event.target, ${jsAttrStr('Delete the event "' + e.title + '"? Its flyer and cover image files are deleted too. This cannot be undone.')}, { title: 'Delete event', confirmLabel: 'Delete' })">
@@ -801,24 +727,8 @@ module.exports = function (db, appConfig) {
   router.post('/events/:id/preview', requireAdmin, async (req, res) => {
     const id = kit.idParam(req.params.id);
     if (!id) return res.status(400).json({ error: 'Invalid event id' });
-    try {
-      const base = await kit.webAppPublicUrl(appConfig);
-      if (!base) return res.status(400).json({ error: "The Web App's public URL isn't set (Web App Settings → General → Public base URL)." });
-      // The pop-up loads the real page, so the Web App must be up.
-      const up = await kit.webAppReachable(base);
-      if (!up.ok) return res.status(503).json({ error: up.message, reason: up.reason });
-      const e = await db.getAsync('SELECT slug FROM events WHERE event_id = ?', [id]);
-      if (!e) return res.status(404).json({ error: 'Event not found' });
-      const token = crypto.randomBytes(24).toString('hex');
-      await db.runAsync('UPDATE events SET preview_token = ?, preview_expires_at = ? WHERE event_id = ?',
-        [token, kit.sqlTime(PREVIEW_MINUTES * 60 * 1000), id]);
-      res.json({ url: `${base}/events/${encodeURIComponent(e.slug)}?preview=${token}` });
-    } catch (err) {
-      console.error('[events] preview failed:', err);
-      res.status(500).json({ error: /no such column|unknown column/i.test(err.message || '')
-        ? 'Restart the Web App first — it adds what previews need to the database when it starts.'
-        : 'Could not make a preview link: ' + (err.message || err) });
-    }
+    const r = await preview.makePreviewLink(db, appConfig, { table: 'events', idCol: 'event_id', id, path: '/events' });
+    res.status(r.status).json(r.body);
   });
 
   router.post('/events/:id/delete', requireAdmin, async (req, res) => {

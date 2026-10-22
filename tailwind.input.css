@@ -6,6 +6,7 @@
 
 @source "./routes/**/*.js";
 @source "./views/**/*.js";
+@source "./helpers/**/*.js";
 @source "./scripts/**/*.js";
 @source "./public/js/**/*.js";
 @source "./app.js";

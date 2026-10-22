@@ -98,6 +98,9 @@ so "How to buy" carries that wording and there is no payment link.
 
 - **Show** drop-down — **All** (the default), **Draft**, **Open**,
   **Closed** or **Drawn**, each with its count; picking one reloads the list.
+- **Preview** — the same pop-up as events: the raffle's real website page,
+  even while it's a draft or hidden (a banner says so), at Desktop / Phone
+  width. It shows the last *saved* version and needs the Web App running.
 
 - **Claim requirements** — one per line. **Firearm preset** / **Standard
   preset** fill the box (you can still edit it).

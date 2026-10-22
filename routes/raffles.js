@@ -30,6 +30,7 @@ const { page, flash } = require('../views/layout');
 const { escapeHtml, jsAttrStr } = require('../views/escapeHtml');
 const { requireAdmin } = require('../middleware/auth');
 const kit = require('../helpers/pageKit');
+const preview = require('../helpers/sitePreview');
 const lt = require('../helpers/localTime');
 const uploads = require('../helpers/webAppUploads');
 const { markdownField, TEXTAREA_CLS } = require('./events');
@@ -128,7 +129,7 @@ function valuesFromRow(r, appConfig) {
 function raffleForm(action, v, orgs, isNew, zone) {
   const val = (k) => escapeHtml(v[k] || '');
   const orgOpts = orgs.map(o => `<option value="${Number(o.org_id)}" ${String(o.org_id) === String(v.beneficiary_org_id) ? 'selected' : ''}>${escapeHtml(o.name)}${o.verification_status === 'verified' ? '' : ' (' + escapeHtml(o.verification_status) + ')'}</option>`).join('');
-  return `<form method="POST" action="${action}" class="space-y-6">
+  return `<form id="rf-form" method="POST" action="${action}" class="space-y-6" x-data x-on:input="window.mmoaFormDirty = true">
     <section class="card surface-target card-pad space-y-4">
       <h2 class="text-sm font-semibold uppercase tracking-wider text-slate-500 dark:text-slate-400">Raffle</h2>
       <div class="grid sm:grid-cols-2 gap-4">
@@ -350,11 +351,13 @@ module.exports = function (db, appConfig) {
     const orgs = await loadOrgs();
     const v = values || valuesFromRow(r, appConfig);
     const base = await kit.webAppPublicUrl(appConfig);
+    if (base) preview.allowFramingOf(res, base);
     const published = !!Number(r.is_published);
     const viewLink = base
       ? `<a class="btn-secondary" href="${escapeHtml(base + '/raffles/' + r.slug)}" target="_blank" rel="noopener">View on site <span aria-hidden="true">↗</span></a>`
       : `<span class="btn-secondary opacity-50 cursor-not-allowed" title="Set publicBaseUrl under Web App Settings → General">View on site ↗</span>`;
-    const actions = `${viewLink}
+    const actions = `${preview.previewButton({ endpoint: `/raffles/${id}/preview`, noun: 'raffle', base })}
+      ${viewLink}
       <form method="POST" action="/raffles/${id}/publish" class="m-0">
         <input type="hidden" name="state" value="${published ? '0' : '1'}">
         <button type="submit" class="${published ? 'btn-secondary' : 'btn-primary'}">${published ? 'Unpublish' : 'Publish'}</button>
@@ -451,6 +454,15 @@ module.exports = function (db, appConfig) {
     } catch (err) {
       res.redirect(`/raffles/${id}?error=` + encodeURIComponent('Update failed: ' + (err.message || err)));
     }
+  });
+
+  // A fresh preview link (replaces any earlier one for this raffle) — shows
+  // the real page even while it's a draft or hidden.
+  router.post('/raffles/:id/preview', requireAdmin, async (req, res) => {
+    const id = kit.idParam(req.params.id);
+    if (!id) return res.status(400).json({ error: 'Invalid raffle id' });
+    const r = await preview.makePreviewLink(db, appConfig, { table: 'raffles', idCol: 'raffle_id', id, path: '/raffles' });
+    res.status(r.status).json(r.body);
   });
 
   router.post('/raffles/:id/publish', requireAdmin, async (req, res) => {
