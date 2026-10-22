@@ -124,8 +124,8 @@
   }
 
   // ── Read the event form ──────────────────────────────────────────────
-  function collect(form, extra) {
-    var v = function (sel) { var el = form.querySelector(sel); return el ? String(el.value || '').trim() : ''; };
+  // Names from the "Who it benefits" list editor (helpers/beneficiaries.js).
+  function benNames(form) {
     var bens = [];
     form.querySelectorAll('[aria-label="Directory organization"]').forEach(function (sel) {
       var row = sel.closest('div');
@@ -134,6 +134,12 @@
                            : (nameEl ? nameEl.value.trim() : '');
       if (name) bens.push(name);
     });
+    return bens;
+  }
+
+  function collect(form, extra) {
+    var v = function (sel) { var el = form.querySelector(sel); return el ? String(el.value || '').trim() : ''; };
+    var bens = benNames(form);
     return Object.assign({
       title: v('[name=title]'), summary: v('[name=summary]'),
       starts: v('[name=starts_at]'), ends: v('[name=ends_at]'),
@@ -258,8 +264,7 @@
     var drawSmall = [draw ? clock(draw) : '', v('[name=drawing_location]')].filter(Boolean).join(' · ');
     var price = v('[name=ticket_price_text]');
     var total = v('[name=total_tickets]');
-    var orgSel = form.querySelector('[name=beneficiary_org_id]');
-    var orgName = orgSel && orgSel.value && orgSel.selectedOptions[0] ? orgSel.selectedOptions[0].text.replace(/\s*\((unverified|rejected)\)\s*$/, '') : '';
+    var bens = benNames(form);
     var benText = v('[name=beneficiary_text]');
     return Object.assign({
       kicker: 'MISSION MEN OF ANNA RAFFLE',
@@ -270,7 +275,7 @@
         { label: 'TICKETS', big: price || 'See any MMoA member', small: total ? Number(total).toLocaleString('en-US') + ' tickets total' : 'Sold in person' }
       ],
       note: firstSentence(v('[name=how_to_buy]')),
-      footer: benText || (orgName ? 'Benefiting ' + orgName : '')
+      footer: bens.length ? 'Benefiting ' + listNames(bens) : benText
     }, extra || {});
   }
 

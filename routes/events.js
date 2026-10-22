@@ -58,6 +58,7 @@ const preview = require('../helpers/sitePreview');
 const vis = require('../helpers/visibility');
 const latest = require('../helpers/latest');
 const { flyerButton } = require('../helpers/flyerButton');
+const beneficiaries = require('../helpers/beneficiaries');
 const lt = require('../helpers/localTime');
 const uploads = require('../helpers/webAppUploads');
 
@@ -130,18 +131,9 @@ function readForm(b, appConfig) {
   const reg = kit.urlField(b.registration_url, 'Registration link');
   if (reg.error) return fail(reg.error);
 
-  let bensIn;
-  try { bensIn = JSON.parse(b.beneficiaries_json || '[]'); } catch (e) { return fail('Beneficiaries could not be read — reload the page and try again.'); }
-  if (!Array.isArray(bensIn)) bensIn = [];
-  const bens = [];
-  for (const x of bensIn.slice(0, 30)) {
-    const orgId = kit.idParam(x && x.org_id);
-    const name = kit.str(x && x.name, 200);
-    const u = kit.urlField(x && x.url, 'Beneficiary link');
-    if (u.error) return fail(u.error);
-    if (!orgId && !name) continue; // blank row
-    bens.push({ org_id: orgId, name, url: orgId ? null : u.value });
-  }
+  const parsed = beneficiaries.parse(b);
+  if (parsed.error) return fail(parsed.error);
+  const bens = parsed.bens;
 
   return {
     values,
@@ -170,7 +162,7 @@ function valuesFromRow(e, bens, appConfig) {
     registration_note: e.registration_note || '', beneficiaries_text: e.beneficiaries_text || '',
     status: STATUS_KEYS.includes(e.status) ? e.status : (Number(e.is_published) ? 'published' : 'draft'),
     is_latest: !!Number(e.is_latest), item_id: String(e.event_id),
-    bens_json: JSON.stringify((bens || []).map(x => ({ org_id: x.org_id ? Number(x.org_id) : '', name: x.name || '', url: x.url || '' })))
+    bens_json: beneficiaries.toJson(bens)
   };
 }
 
@@ -210,57 +202,6 @@ function markdownField(name, label, value, rows) {
       </div>
     </div>
     ${markdownHint()}
-  </div>`;
-}
-
-function beneficiariesEditor(benJson, orgs) {
-  const orgOpts = orgs.map(o => {
-    const st = o.verification_status === 'verified' ? (Number(o.is_listed) ? '' : ' (hidden)') : ` (${o.verification_status})`;
-    return `<option value="${Number(o.org_id)}">${escapeHtml(o.name + st)}</option>`;
-  }).join('');
-  return `<div data-bens="${escapeHtml(benJson || '[]')}"
-       x-data="{ rows: [],
-         init() { this.rows = JSON.parse(this.$el.dataset.bens || '[]').map(r => ({ org_id: r.org_id ? String(r.org_id) : '', name: r.name || '', url: r.url || '' })); },
-         add() { this.rows.push({ org_id: '', name: '', url: '' }); },
-         remove(i) { this.rows.splice(i, 1); this.touched = {}; },
-         touched: {},
-         // Same rule as httpLinkInput / the server: blank, or http(s)://… with no spaces.
-         badUrl(r) { if (r.org_id) return false; const s = (r.url || '').trim().toLowerCase();
-           return s !== '' && (s.includes(' ') || !((s.startsWith('http://') && s.length > 7) || (s.startsWith('https://') && s.length > 8))); },
-         move(i, d) { const j = i + d; if (j < 0 || j >= this.rows.length) return; const t = this.rows[i]; this.rows[i] = this.rows[j]; this.rows[j] = t; },
-         get json() { return JSON.stringify(this.rows.map(r => ({ org_id: r.org_id, name: r.name, url: r.url }))); } }">
-    <input type="hidden" name="beneficiaries_json" :value="json">
-    <div class="flex items-center justify-between">
-      <span class="label mb-0">Beneficiaries</span>
-      <button type="button" class="btn-secondary text-xs px-3 py-1" x-on:click="add()">＋ Add beneficiary</button>
-    </div>
-    <p class="mt-1 text-xs text-slate-500 dark:text-slate-400">Pick an organization from the Need Help directory (the site links to its profile while it is verified and listed) or type a name and optional link.</p>
-    <div class="mt-3 space-y-2">
-      <template x-for="(r, i) in rows" :key="i">
-        <div class="grid grid-cols-1 md:grid-cols-12 gap-2 items-center rounded-lg border border-slate-200 dark:border-slate-700 p-2">
-          <select class="input md:col-span-4" x-model="r.org_id" aria-label="Directory organization">
-            <option value="">— Not in the directory —</option>
-            ${orgOpts}
-          </select>
-          <input class="input md:col-span-3" type="text" maxlength="200" x-model="r.name" :placeholder="r.org_id ? '(uses the organization name)' : 'Name *'" :disabled="!!r.org_id" aria-label="Name">
-          <div class="md:col-span-3">
-            <input class="input" type="text" inputmode="url" autocomplete="off" spellcheck="false" maxlength="1000" x-model="r.url"
-                   :placeholder="r.org_id ? '(links to the profile)' : 'https://… (optional)'" :disabled="!!r.org_id" aria-label="Link"
-                   x-effect="$el.setCustomValidity(badUrl(r) ? 'Must start with http:// or https://' : '')"
-                   x-on:blur="touched[i] = true" x-on:invalid="touched[i] = true"
-                   :aria-invalid="touched[i] && badUrl(r) ? 'true' : null"
-                   :class="touched[i] && badUrl(r) ? 'border-red-500 focus:border-red-500 focus:ring-red-500/30' : ''">
-            <p class="mt-1 text-xs text-red-600 dark:text-red-300" x-show="touched[i] && badUrl(r)" x-cloak>Must start with <code>http://</code> or <code>https://</code></p>
-          </div>
-          <div class="md:col-span-2 flex items-center justify-end gap-1">
-            <button type="button" class="btn-ghost text-xs px-2 py-1" x-on:click="move(i, -1)" aria-label="Move up">▲</button>
-            <button type="button" class="btn-ghost text-xs px-2 py-1" x-on:click="move(i, 1)" aria-label="Move down">▼</button>
-            <button type="button" class="btn-ghost text-xs px-2 py-1 text-red-600" x-on:click="remove(i)" aria-label="Remove">✕</button>
-          </div>
-        </div>
-      </template>
-      <p x-show="!rows.length" class="text-sm text-slate-400 italic">No beneficiaries listed.</p>
-    </div>
   </div>`;
 }
 
@@ -365,7 +306,7 @@ function eventForm(action, v, pickers, isNew, zone) {
 
     <section class="card surface-target card-pad space-y-4">
       <h2 class="text-sm font-semibold uppercase tracking-wider text-slate-500 dark:text-slate-400">Who it benefits</h2>
-      ${beneficiariesEditor(v.bens_json, pickers.orgs)}
+      ${beneficiaries.editor(v.bens_json, pickers.orgs)}
       <div><label class="label" for="ev-bentext">Beneficiaries note <span class="text-xs font-normal text-slate-400">(optional free text shown with the list)</span></label>
         <textarea id="ev-bentext" name="beneficiaries_text" rows="2" maxlength="2000" class="${TEXTAREA_CLS}">${escapeHtml(v.beneficiaries_text || '')}</textarea></div>
     </section>
@@ -479,25 +420,7 @@ module.exports = function (db, appConfig) {
 
   router.get('/events/new', requireAdmin, (req, res) => renderNew(req, res, null, null));
 
-  async function writeBeneficiaries(eventId, bens) {
-    // Org names are looked up BEFORE the transaction (remote SQLite: no
-    // reads inside one).
-    const ids = [...new Set(bens.filter(x => x.org_id).map(x => x.org_id))];
-    const names = new Map();
-    if (ids.length) {
-      const rows = await db.allAsync(`SELECT org_id, name FROM organizations WHERE org_id IN (${ids.map(() => '?').join(',')})`, ids);
-      for (const r of rows) names.set(Number(r.org_id), r.name);
-    }
-    await db.transaction(async (tx) => {
-      await tx.runAsync('DELETE FROM event_beneficiaries WHERE event_id = ?', [eventId]);
-      let sort = 1;
-      for (const x of bens) {
-        if (x.org_id && !names.has(x.org_id)) continue; // org vanished meanwhile
-        await tx.runAsync('INSERT INTO event_beneficiaries (event_id, org_id, name, url, sort) VALUES (?, ?, ?, ?, ?)',
-          [eventId, x.org_id || null, x.org_id ? names.get(x.org_id) : x.name, x.org_id ? null : x.url, sort++]);
-      }
-    });
-  }
+  const writeBeneficiaries = (eventId, bens) => beneficiaries.write(db, beneficiaries.KIND.event, eventId, bens);
 
   router.post('/events', requireAdmin, async (req, res) => {
     const r = readForm(req.body || {}, appConfig);

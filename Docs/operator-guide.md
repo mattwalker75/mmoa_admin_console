@@ -116,6 +116,11 @@ A raffle has two separate settings:
   /raffles/latest" (right under the URL slug). One raffle at a time —
   ticking it on another moves it there; it only works while that raffle is
   Published, and `latest` can't be a raffle's own slug.
+- **Who it benefits** — the same list as events: add as many beneficiaries
+  as you like (a directory organization, or a name + optional link), reorder
+  them, plus an optional **Beneficiaries note**. The website shows them under
+  "Where the money goes".
+- **Drawing date & time** — the same calendar + time picker as events.
 - **Generate flyer** — like events, next to the raffle flyer's Upload:
   a 1200 × 1600 flyer over the **first prize photo** with the title, the
   prize description's first paragraph, **Drawing** (date, time, location)

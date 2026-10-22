@@ -643,6 +643,7 @@ module.exports = function (db, appConfig) {
         if (o) {
           await tx.runAsync('UPDATE event_beneficiaries SET org_id = NULL WHERE org_id = ?', [o.org_id]);
           await tx.runAsync('UPDATE raffles SET beneficiary_org_id = NULL WHERE beneficiary_org_id = ?', [o.org_id]);
+          await tx.runAsync('UPDATE raffle_beneficiaries SET org_id = NULL WHERE org_id = ?', [o.org_id]);
           await tx.runAsync('DELETE FROM org_images WHERE org_id = ?', [o.org_id]);
           await tx.runAsync('DELETE FROM org_contacts WHERE org_id = ?', [o.org_id]);
           await tx.runAsync('DELETE FROM org_categories WHERE org_id = ?', [o.org_id]);

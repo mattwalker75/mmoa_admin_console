@@ -191,15 +191,21 @@ const REPORTS = {
     async fetch({ db }) {
       const rows = await db.allAsync(`
         SELECT r.raffle_id, r.title, r.slug, r.status, r.visibility, r.ticket_price_text, r.total_tickets,
-               r.drawing_at, r.drawing_location, r.winning_ticket, r.beneficiary_text, r.claim_preset, r.updated_at,
-               o.name AS org_name
-          FROM raffles r LEFT JOIN organizations o ON o.org_id = r.beneficiary_org_id
+               r.drawing_at, r.drawing_location, r.winning_ticket, r.beneficiary_text, r.claim_preset, r.updated_at
+          FROM raffles r
          ORDER BY r.raffle_id DESC`);
+      const benRows = await db.allAsync('SELECT raffle_id, name FROM raffle_beneficiaries ORDER BY raffle_id, sort');
+      const byRaffle = new Map();
+      for (const b of benRows) {
+        const k = Number(b.raffle_id);
+        if (!byRaffle.has(k)) byRaffle.set(k, []);
+        if (b.name) byRaffle.get(k).push(b.name);
+      }
       const counts = await db.allAsync('SELECT raffle_id, COUNT(*) AS c FROM raffle_images GROUP BY raffle_id');
       const n = new Map(counts.map(c => [Number(c.raffle_id), Number(c.c)]));
       return rows.map(r => ({
         ...r,
-        beneficiary: [r.org_name, r.beneficiary_text].filter(Boolean).join(' — '),
+        beneficiary: [(byRaffle.get(Number(r.raffle_id)) || []).join('; '), r.beneficiary_text].filter(Boolean).join(' — '),
         photos: n.get(Number(r.raffle_id)) || 0
       }));
     }
