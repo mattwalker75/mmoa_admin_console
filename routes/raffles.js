@@ -170,7 +170,7 @@ function raffleForm(action, v, orgs, isNew, zone, latestHolder) {
         <div><label class="label" for="rf-total">Total tickets <span class="text-xs font-normal text-slate-400">(optional)</span></label>
           <input id="rf-total" class="input" type="number" min="1" step="1" name="total_tickets" value="${val('total_tickets')}"></div>
         <div><label class="label" for="rf-draw">Drawing date &amp; time <span class="text-xs font-normal text-slate-400">(${escapeHtml(zone)})</span></label>
-          <input id="rf-draw" class="input" type="datetime-local" name="drawing_at" value="${val('drawing_local')}"></div>
+          <input id="rf-draw" class="input" type="text" data-datetime name="drawing_at" value="${val('drawing_local')}" placeholder="Pick a date and time" autocomplete="off"></div>
         <div class="sm:col-span-2"><label class="label" for="rf-drawloc">Drawing location</label>
           <input id="rf-drawloc" class="input" type="text" name="drawing_location" maxlength="300" value="${val('drawing_location')}" placeholder="e.g. Live at the Coyote Cruisers Car &amp; Bike Show"></div>
       </div>
