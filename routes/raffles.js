@@ -21,8 +21,9 @@
 //
 // Raffle tickets are sold IN PERSON only (Texas law), so there is no payment
 // link — `how_to_buy` carries the standard wording. Claim requirements are a
-// newline-separated list; the Firearm / Standard buttons fill the textarea
-// from the presets below (still editable). `claim_preset` is derived on save:
+// newline-separated list. Both it and "How to buy" can be loaded from / saved
+// as templates (the Templates drop-down — helpers/templatePicker.js; managed
+// under Settings → Templates). `claim_preset` is derived on save:
 // 'firearm' / 'standard' when the list matches that preset exactly,
 // otherwise 'custom'. The web app shows winning_ticket only once status is
 // 'drawn'.
@@ -51,6 +52,7 @@ const vis = require('../helpers/visibility');
 const latest = require('../helpers/latest');
 const { flyerButton } = require('../helpers/flyerButton');
 const beneficiaries = require('../helpers/beneficiaries');
+const { templatePicker } = require('../helpers/templatePicker');
 const lt = require('../helpers/localTime');
 const uploads = require('../helpers/webAppUploads');
 const { markdownField, TEXTAREA_CLS } = require('./events');
@@ -184,24 +186,20 @@ function raffleForm(action, v, orgs, isNew, zone, latestHolder) {
 
     <section class="card surface-target card-pad space-y-4">
       <h2 class="text-sm font-semibold uppercase tracking-wider text-slate-500 dark:text-slate-400">Tickets &amp; claiming the prize</h2>
-      <div><label class="label" for="rf-how">How to buy</label>
+      <div>
+        <div class="flex items-center justify-between gap-2 flex-wrap mb-1">
+          <label class="label mb-0" for="rf-how">How to buy</label>
+          ${templatePicker('how-to-buy', 'rf-how', 'How to buy')}
+        </div>
         <textarea id="rf-how" name="how_to_buy" rows="3" maxlength="4000" class="${TEXTAREA_CLS}">${escapeHtml(v.how_to_buy || HOW_TO_BUY_DEFAULT)}</textarea>
         <p class="mt-1 text-xs text-slate-500 dark:text-slate-400">Texas law doesn't allow raffle tickets to be sold online — keep this to in-person sales.</p></div>
-      <div data-presets="${escapeHtml(JSON.stringify({ firearm: PRESETS.firearm.join('\n'), standard: PRESETS.standard.join('\n') }))}"
-           x-data="{ presets: {}, init() { this.presets = JSON.parse(this.$el.dataset.presets); },
-             async fill(k) {
-               const ta = this.$refs.claims;
-               if (ta.value.trim() && ta.value.trim() !== this.presets[k] && !(await window.uiConfirm('Replace the current requirements with the ' + k + ' preset?', { title: 'Use preset', confirmLabel: 'Replace', danger: false }))) return;
-               ta.value = this.presets[k];
-             } }">
-        <div class="flex items-center justify-between gap-2 flex-wrap">
+      <div>
+        <div class="flex items-center justify-between gap-2 flex-wrap mb-1">
           <label class="label mb-0" for="rf-claims">Claim requirements <span class="text-xs font-normal text-slate-400">(one per line)</span></label>
-          <div class="flex items-center gap-2">
-            <button type="button" class="btn-secondary text-xs px-3 py-1" x-on:click="fill('firearm')">Firearm preset</button>
-            <button type="button" class="btn-secondary text-xs px-3 py-1" x-on:click="fill('standard')">Standard preset</button>
-          </div>
+          ${templatePicker('claim-requirements', 'rf-claims', 'Claim requirements')}
         </div>
-        <textarea id="rf-claims" x-ref="claims" name="claim_requirements" rows="7" maxlength="4000" class="mt-2 ${TEXTAREA_CLS}">${escapeHtml(v.claim_requirements || '')}</textarea>
+        <textarea id="rf-claims" name="claim_requirements" rows="7" maxlength="4000" class="${TEXTAREA_CLS}">${escapeHtml(v.claim_requirements || '')}</textarea>
+        <p class="mt-1 text-xs text-slate-500 dark:text-slate-400">Templates are managed under <a class="text-brand-600 hover:underline" href="/settings/templates" target="_blank" rel="noopener">Settings → Templates</a>.</p>
       </div>
     </section>
 

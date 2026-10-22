@@ -25,6 +25,11 @@ const defaults = {
   // time. Any IANA zone name works; an invalid one falls back to Chicago.
   timeZone: 'America/Chicago',
 
+  // Reusable raffle text ("How to buy", "Claim requirements") — Settings →
+  // Templates. A folder on this console's server; relative = inside the
+  // console's folder. See helpers/templates.js.
+  templates: { dir: 'templates' },
+
   // The console reads and writes the WEB APP's database (nonprofits, events,
   // raffles, board, directory lists, tokens, lockouts). How it is reached follows webApp.mode below: in local
   // mode the SQLite file is opened directly; in ssh / ec2 mode SQLite queries

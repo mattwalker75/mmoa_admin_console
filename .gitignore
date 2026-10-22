@@ -11,3 +11,5 @@ config.json.tmp
 backups/
 # Background images uploaded from Settings → Appearance.
 public/images/
+# Raffle text templates (Settings → Templates) — local operator data, created on first use.
+/templates/

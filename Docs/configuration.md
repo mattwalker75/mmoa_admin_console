@@ -27,6 +27,7 @@ a partial file is fine.
 | `sessionKeys` | `["", ""]` | yes | Only with `fixed`. |
 | `sessionMaxAgeHours` | `8` | yes | |
 | `passwordMinLength` | `8` | no | Legacy mirror of `security.password.minLength`. |
+| `templates.dir` | `"templates"` | no | Folder for raffle text templates (Settings → Templates); relative = inside the console folder. Created (with starter templates) on first use; gitignored. |
 | `timeZone` | `"America/Chicago"` | no | IANA zone the Events / Raffles date-time fields are entered and shown in; the database stores UTC. Invalid → Chicago. Not in the committed `config.json` (default only). |
 | `database.engine` | `"sqlite"` | yes | `sqlite`, `mysql`, or `""` (offline). |
 | `database.sqlite.filename` | `"../mmoa_web_app/mmoa_web_app.db"` | yes | **Local mode:** path on this machine, relative to this repo or absolute. The file is never created by the console. **SSH / EC2 mode:** path on the web-app host, relative paths resolve against `webApp.<mode>.appPath` (the default still works there). |

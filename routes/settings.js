@@ -81,6 +81,7 @@ function tabsNav(active) {
     ${tab('/settings/security', 'Security', 'security')}
     ${tab('/settings/appearance', 'Appearance', 'appearance')}
     ${tab('/settings/web-app', 'Web App', 'web-app')}
+    ${tab('/settings/templates', 'Templates', 'templates')}
   </nav>`;
 }
 
@@ -996,3 +997,6 @@ function appearanceBlock(title, key, cfg, opacityPct, opacityLabel) {
     </div>
   `;
 }
+
+// Shared with routes/templates.js (Settings → Templates).
+module.exports.tabsNav = tabsNav;

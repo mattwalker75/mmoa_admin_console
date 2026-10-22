@@ -69,6 +69,9 @@ helpers/latest.js               "Latest" (one event / one raffle at /events|raff
 helpers/visibility.js           Draft / Published / Archived buttons + switch shared by Events and Raffles
 helpers/sitePreview.js          The Preview button + pop-up and preview-link maker shared by Events and Raffles
 public/js/flyer-maker.js        "Generate flyer": draws an event / raffle flyer on a canvas from the form + a photo
+helpers/templates.js            Raffle text templates on disk (<templates.dir>/<kind>/<id>.json): list / save / remove, path-safe
+helpers/templatePicker.js       The "Templates…" drop-down above a raffle text field (load / save as new / update)
+routes/templates.js             Settings → Templates page + /templates/<kind> JSON API
 helpers/beneficiaries.js        "Who it benefits" list editor + parse / save, shared by events and raffles
 helpers/flyerButton.js          The "Generate flyer" button + pop-up (Use as flyer / Download) for events and raffles
 public/fonts/*.woff2            Saira Condensed / Barlow (the website's fonts), copied by npm run copy:fonts — do not edit

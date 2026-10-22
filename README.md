@@ -121,7 +121,7 @@ password is replaced by re-running the command above with the same username.
 | **Web App Logs**     | Tail of the web app's `logs/app.log`. |
 | **Backup/Restore**   | JSON exports / restores and one-file rebuild bundles (incl. `uploads/**`). |
 | **Web App Settings** | The web app's `config.json` (General incl. public site info and the Donate button, Email, Security, Database, Server) + Start / Stop / Restart. |
-| **Settings**         | This console: Security, Appearance, Web App (access mode, database, lifecycle commands, Test connection). |
+| **Settings**         | This console: Security, Appearance, Web App (access mode, database, lifecycle commands, Test connection), Templates (raffle text templates and where they're saved). |
 
 ## Admins vs. nonprofits
 

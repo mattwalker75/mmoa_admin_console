@@ -179,6 +179,7 @@ app.use((req, res, next) => {
 app.use('/', require('./routes/setup')(appConfig));
 app.use('/', require('./routes/public')(db, appConfig));
 app.use('/', require('./routes/settings')(db, appConfig, appConfigModule));
+app.use('/', require('./routes/templates')(appConfig, appConfigModule));
 app.use('/', require('./routes/webAppSettings')(appConfig, appConfigModule));
 app.use('/', require('./routes/webAppLogs')(appConfig));
 app.use('/', require('./routes/webAppWebsite')(appConfig));

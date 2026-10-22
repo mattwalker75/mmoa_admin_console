@@ -131,8 +131,12 @@ A raffle has two separate settings:
   even while it's a draft or archived (a banner says so), at Desktop / Phone
   width. It shows the last *saved* version and needs the Web App running.
 
-- **Claim requirements** — one per line. **Firearm preset** / **Standard
-  preset** fill the box (you can still edit it).
+- **How to buy** and **Claim requirements** (one per line) each have a
+  **Templates…** drop-down: **load** a saved template into the box (it asks
+  before replacing different text), **Save as new template…** (type a name),
+  **Update “…”** (overwrite the template you last loaded or saved there), or
+  **Manage templates…** (Settings → Templates, in a new tab). Starter
+  templates: "In person (default)", "Firearm" and "Standard".
 - **Flyer** and up to **8 prize photos** (with alt text; ◀ ▶ to reorder).
 
 ## Nonprofits
@@ -278,3 +282,9 @@ store them like the database.
   the Start / Stop / Restart commands. **Test connection** checks the
   values in the form before you save. Database changes need a console
   restart (a dialog says so).
+- **Templates** — the raffle text templates ("How to buy", "Claim
+  requirements"): where they're saved (a folder on this console's server,
+  default `templates/` in the console folder — one sub-folder per field,
+  one `.json` file per template), and create / edit / rename / delete for
+  each. Templates are not part of Backup/Restore — copy the folder to keep
+  them.
