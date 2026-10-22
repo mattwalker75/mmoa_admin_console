@@ -44,8 +44,8 @@ function kindCard(kind, items) {
     </details>`).join('');
   return `<section class="card surface-target card-pad space-y-3">
     <div>
-      <h2 class="text-base font-semibold text-slate-900 dark:text-slate-100">${escapeHtml(k.label)}</h2>
-      <p class="mt-0.5 text-xs text-slate-500 dark:text-slate-400">${escapeHtml(k.hint)} Load these from the Templates drop-down above the field on a raffle.</p>
+      <h3 class="text-base font-semibold text-slate-900 dark:text-slate-100">${escapeHtml(k.label)}</h3>
+      <p class="mt-0.5 text-xs text-slate-500 dark:text-slate-400">${escapeHtml(k.hint)}</p>
     </div>
     <div class="space-y-2">${rows || '<p class="text-sm text-slate-400 italic">No templates yet.</p>'}</div>
     <details class="rounded-lg border border-dashed border-slate-300 dark:border-slate-600">
@@ -66,13 +66,25 @@ module.exports = function (appConfig, appConfigModule) {
 
   router.get('/settings/templates', requireAdmin, (req, res) => {
     let cards = '', err = null;
-    try { cards = Object.keys(tpl.KINDS).map(k => kindCard(k, tpl.list(appConfig, k))).join(''); }
-    catch (e) { err = e.message || String(e); }
+    // One section per group (e.g. "Raffles"), its template types inside.
+    try {
+      const groups = [...new Set(Object.values(tpl.KINDS).map(k => k.group))];
+      cards = groups.map(g => `
+        <section class="space-y-4" aria-labelledby="tg-${escapeHtml(g)}">
+          <div>
+            <h2 id="tg-${escapeHtml(g)}" class="text-lg font-bold text-slate-900 dark:text-slate-100">${escapeHtml(g)}</h2>
+            ${tpl.GROUP_HINTS[g] ? `<p class="mt-0.5 text-xs text-slate-500 dark:text-slate-400">${escapeHtml(tpl.GROUP_HINTS[g])}</p>` : ''}
+          </div>
+          <div class="space-y-6 border-l-2 border-brand-500/40 pl-4">
+            ${Object.keys(tpl.KINDS).filter(k => tpl.KINDS[k].group === g).map(k => kindCard(k, tpl.list(appConfig, k))).join('')}
+          </div>
+        </section>`).join('');
+    } catch (e) { err = e.message || String(e); }
     const configured = (appConfig.templates && appConfig.templates.dir) || tpl.DEFAULT_DIR;
     const body = `
       <header class="mb-6">
         <h1 class="text-2xl font-bold text-slate-900 dark:text-slate-100">Settings</h1>
-        <p class="mt-1 text-sm text-slate-500 dark:text-slate-400">Reusable text for raffles — "How to buy" and "Claim requirements".</p>
+        <p class="mt-1 text-sm text-slate-500 dark:text-slate-400">Reusable text you can load into forms — grouped by where it's used.</p>
       </header>
       ${tabsNav('templates')}
       ${flash('error', req.query.error || (err ? 'Templates could not be read: ' + err : ''))}

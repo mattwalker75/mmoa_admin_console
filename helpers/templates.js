@@ -21,8 +21,13 @@ const DEFAULT_DIR = 'templates';
 const ID_RE = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 const MAX_NAME = 80, MAX_CONTENT = 4000;
 
+// Each kind belongs to a group (the section it's listed under in Settings →
+// Templates, e.g. "Raffles").
+const GROUP_HINTS = { Raffles: 'Text used on raffle pages — load it from the Templates drop-down above the field when editing a raffle.' };
+
 const KINDS = {
   'how-to-buy': {
+    group: 'Raffles',
     label: 'How to buy',
     hint: 'The "How to buy" text on a raffle — tickets are sold in person only (Texas law).',
     seeds: [
@@ -30,6 +35,7 @@ const KINDS = {
     ]
   },
   'claim-requirements': {
+    group: 'Raffles',
     label: 'Claim requirements',
     hint: 'What the winner must do to claim the prize — one requirement per line.',
     seeds: [
@@ -132,4 +138,4 @@ function remove(appConfig, kind, id) {
   fs.unlinkSync(f);
 }
 
-module.exports = { KINDS, DEFAULT_DIR, TemplateError, baseDir, list, save, remove, slugify };
+module.exports = { KINDS, GROUP_HINTS, DEFAULT_DIR, TemplateError, baseDir, list, save, remove, slugify };
