@@ -34,6 +34,9 @@
 //   status      the STAGE: open (selling tickets) → closed (sales ended) →
 //               drawn (winner announced). Stepped in ANY visibility, so a
 //               draft can be previewed in each stage before publishing.
+// Latest (is_latest): one raffle at a time is also served at /raffles/latest
+// while published (helpers/latest.js, same as events); 'latest' is reserved
+// as a slug.
 
 const express = require('express');
 const { page, flash } = require('../views/layout');
@@ -42,6 +45,7 @@ const { requireAdmin } = require('../middleware/auth');
 const kit = require('../helpers/pageKit');
 const preview = require('../helpers/sitePreview');
 const vis = require('../helpers/visibility');
+const latest = require('../helpers/latest');
 const lt = require('../helpers/localTime');
 const uploads = require('../helpers/webAppUploads');
 const { markdownField, TEXTAREA_CLS } = require('./events');
@@ -84,7 +88,7 @@ function presetOf(text) {
 
 const RAFFLE_COLS = `raffle_id, slug, title, prize_description_md, flyer_path, total_tickets, ticket_price_text,
   drawing_at, drawing_location, how_to_buy, claim_requirements, claim_preset, beneficiary_org_id,
-  beneficiary_text, status, visibility, winning_ticket, is_published, created_at, updated_at`;
+  beneficiary_text, status, visibility, is_latest, winning_ticket, is_published, created_at, updated_at`;
 
 function readForm(b, appConfig) {
   const values = {
@@ -93,14 +97,19 @@ function readForm(b, appConfig) {
     drawing_local: b.drawing_at || '', drawing_location: b.drawing_location || '',
     how_to_buy: b.how_to_buy || '', claim_requirements: b.claim_requirements || '',
     beneficiary_org_id: b.beneficiary_org_id || '', beneficiary_text: b.beneficiary_text || '',
-    visibility: vis.fromForm(b, 'visibility')
+    visibility: vis.fromForm(b, 'visibility'),
+    is_latest: kit.yes(b.is_latest), item_id: b._item_id || ''
   };
   const fail = (error) => ({ values, error });
   const title = kit.str(b.title, 200);
   if (!title) return fail('Title is required.');
   const slugIn = kit.str(b.slug, 80);
-  const slug = slugIn ? kit.slugify(slugIn) : kit.slugify(title);
+  let slug = slugIn ? kit.slugify(slugIn) : kit.slugify(title);
   if (!slug || !kit.SLUG_RE.test(slug)) return fail('The URL slug may only contain lowercase letters, digits and dashes.');
+  // /raffles/latest is the Latest raffle's address, so no raffle may own it.
+  const lc = latest.slugCheck(slug, slugIn, latest.RAFFLE);
+  if (lc.error) return fail(lc.error);
+  slug = lc.slug;
   let total = null;
   if (kit.str(b.total_tickets)) {
     total = parseInt(b.total_tickets, 10);
@@ -124,7 +133,8 @@ function readForm(b, appConfig) {
       beneficiary_org_id: kit.idParam(b.beneficiary_org_id),
       beneficiary_text: kit.str(b.beneficiary_text, 500),
       visibility: values.visibility,
-      is_published: values.visibility === 'published' ? 1 : 0
+      is_published: values.visibility === 'published' ? 1 : 0,
+      is_latest: values.is_latest ? 1 : 0
     }
   };
 }
@@ -136,11 +146,12 @@ function valuesFromRow(r, appConfig) {
     drawing_local: lt.utcToLocalInput(r.drawing_at, appConfig), drawing_location: r.drawing_location || '',
     how_to_buy: r.how_to_buy || '', claim_requirements: r.claim_requirements || '',
     beneficiary_org_id: r.beneficiary_org_id ? String(r.beneficiary_org_id) : '', beneficiary_text: r.beneficiary_text || '',
-    visibility: vis.KEYS.includes(r.visibility) ? r.visibility : 'draft'
+    visibility: vis.KEYS.includes(r.visibility) ? r.visibility : 'draft',
+    is_latest: !!Number(r.is_latest), item_id: String(r.raffle_id)
   };
 }
 
-function raffleForm(action, v, orgs, isNew, zone) {
+function raffleForm(action, v, orgs, isNew, zone, latestHolder) {
   const val = (k) => escapeHtml(v[k] || '');
   const orgOpts = orgs.map(o => `<option value="${Number(o.org_id)}" ${String(o.org_id) === String(v.beneficiary_org_id) ? 'selected' : ''}>${escapeHtml(o.name)}${o.verification_status === 'verified' ? '' : ' (' + escapeHtml(o.verification_status) + ')'}</option>`).join('');
   return `<form id="rf-form" method="POST" action="${action}" class="space-y-6" x-data x-on:input="window.mmoaFormDirty = true">
@@ -160,6 +171,7 @@ function raffleForm(action, v, orgs, isNew, zone) {
           <input id="rf-draw" class="input" type="datetime-local" name="drawing_at" value="${val('drawing_local')}"></div>
         <div class="sm:col-span-2"><label class="label" for="rf-drawloc">Drawing location</label>
           <input id="rf-drawloc" class="input" type="text" name="drawing_location" maxlength="300" value="${val('drawing_location')}" placeholder="e.g. Live at the Coyote Cruisers Car &amp; Bike Show"></div>
+        ${latest.field(v, latestHolder, latest.RAFFLE)}
       </div>
       ${markdownField('prize_description_md', 'Prize description', v.prize_description_md, 8)}
     </section>
@@ -270,6 +282,12 @@ function imagesCard(r, images) {
 module.exports = function (db, appConfig) {
   const router = express.Router();
 
+  // The raffle currently marked Latest (for the form's note), or null.
+  async function currentLatest() {
+    const { value } = await kit.safeGet(db, 'SELECT raffle_id AS id, title FROM raffles WHERE is_latest = 1 ORDER BY raffle_id DESC LIMIT 1', [], null);
+    return value;
+  }
+
   async function loadOrgs() {
     return kit.safeAll(db, 'SELECT org_id, name, verification_status FROM organizations ORDER BY LOWER(name)', []);
   }
@@ -278,7 +296,7 @@ module.exports = function (db, appConfig) {
     const user = req.session.user;
     const filter = vis.KEYS.includes(req.query.status) ? req.query.status : 'all';
     const { rows, err } = await kit.safeAll(db,
-      `SELECT raffle_id, slug, title, status, visibility, drawing_at, ticket_price_text, flyer_path, winning_ticket FROM raffles
+      `SELECT raffle_id, slug, title, status, visibility, is_latest, drawing_at, ticket_price_text, flyer_path, winning_ticket FROM raffles
         ${filter === 'all' ? '' : 'WHERE visibility = ?'} ORDER BY (drawing_at IS NULL), drawing_at DESC, raffle_id DESC`,
       filter === 'all' ? [] : [filter]);
     const counts = await kit.safeAll(db, 'SELECT visibility, COUNT(*) AS c FROM raffles GROUP BY visibility', []);
@@ -291,7 +309,7 @@ module.exports = function (db, appConfig) {
       <tr class="cursor-pointer" data-href="/raffles/${Number(r.raffle_id)}" x-on:click="window.location = $el.dataset.href">
         <td class="font-medium text-slate-900 dark:text-slate-100"><a class="hover:underline" href="/raffles/${Number(r.raffle_id)}">${escapeHtml(r.title)}</a>
           <div class="font-mono text-xs text-slate-400">/raffles/${escapeHtml(r.slug)}</div></td>
-        <td>${vis.pill(r.visibility)}</td>
+        <td>${vis.pill(r.visibility)}${Number(r.is_latest) ? ' <span class="pill-running" title="Also at /raffles/latest">Latest</span>' : ''}</td>
         <td><span class="${STATUS_PILL[r.status] || 'pill'}">${escapeHtml(r.status)}</span>${r.status === 'drawn' && r.winning_ticket ? ` <span class="text-xs text-slate-500">#${escapeHtml(r.winning_ticket)}</span>` : ''}</td>
         <td class="whitespace-nowrap text-xs text-slate-500">${escapeHtml(lt.formatLocal(r.drawing_at, appConfig) || '—')}</td>
         <td class="text-xs">${escapeHtml(r.ticket_price_text || '—')}</td>
@@ -324,7 +342,7 @@ module.exports = function (db, appConfig) {
       ${kit.pageHeader('New raffle', 'Starts as a draft in the Open stage. Save it first — the flyer and prize photo uploads appear once it exists.')}
       ${flash('error', error)}
       ${kit.dbBanner(orgs.err)}
-      <div class="max-w-5xl">${raffleForm('/raffles', v, orgs.rows, true, lt.zoneOf(appConfig))}</div>`;
+      <div class="max-w-5xl">${raffleForm('/raffles', v, orgs.rows, true, lt.zoneOf(appConfig), await currentLatest())}</div>`;
     res.status(error ? 400 : 200).send(page({ title: 'New raffle', body, appConfig, user: req.session.user, activeNav: 'raffles' }));
   }
 
@@ -336,17 +354,19 @@ module.exports = function (db, appConfig) {
     const f = r.fields;
     try {
       f.slug = await kit.uniqueSlug(db, 'raffles', 'raffle_id', f.slug, 0);
+      const prevLatest = f.is_latest ? await latest.holder(db, latest.RAFFLE, 0) : null;
+      if (f.is_latest) await latest.take(db, latest.RAFFLE, 0);
       const now = kit.sqlTime();
       const ins = await db.runAsync(`INSERT INTO raffles (slug, title, prize_description_md, total_tickets, ticket_price_text,
           drawing_at, drawing_location, how_to_buy, claim_requirements, claim_preset, beneficiary_org_id, beneficiary_text,
-          status, visibility, is_published, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', ?, ?, ?, ?)`,
+          status, visibility, is_published, is_latest, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', ?, ?, ?, ?, ?)`,
         [f.slug, f.title, f.prize_description_md, f.total_tickets, f.ticket_price_text, f.drawing_at, f.drawing_location,
-         f.how_to_buy, f.claim_requirements, f.claim_preset, f.beneficiary_org_id, f.beneficiary_text, f.visibility, f.is_published, now, now]);
+         f.how_to_buy, f.claim_requirements, f.claim_preset, f.beneficiary_org_id, f.beneficiary_text, f.visibility, f.is_published, f.is_latest, now, now]);
       let id = ins && ins.lastID ? Number(ins.lastID) : null;
       if (!id) { const row = await db.getAsync('SELECT raffle_id FROM raffles WHERE slug = ?', [f.slug]); id = row && Number(row.raffle_id); }
       console.log(`[raffles] ${req.session.user.username} created raffle #${id} (${f.slug})`);
       res.redirect(`/raffles/${id}?msg=` + encodeURIComponent((f.visibility === 'published' ? 'Raffle created and published — it is on the website now (stage: open).'
-        : f.visibility === 'archived' ? 'Raffle created as archived.' : 'Raffle created as a draft (stage: open).') + ' Add the flyer and prize photos below.'));
+        : f.visibility === 'archived' ? 'Raffle created as archived.' : 'Raffle created as a draft (stage: open).') + latest.message(prevLatest, latest.RAFFLE) + ' Add the flyer and prize photos below.'));
     } catch (err) {
       console.error('[raffles] create failed:', err);
       renderNew(req, res, r.values, 'Create failed: ' + (err.message || 'unknown error'));
@@ -378,7 +398,7 @@ module.exports = function (db, appConfig) {
       </form>`;
     const body = `
       <div class="mb-4"><a class="text-sm text-brand-600 hover:underline" href="/raffles">← Back to raffles</a></div>
-      ${kit.pageHeader(r.title, `${visInfo.label} — ${visInfo.hint} · Stage: ${STATUS_LABEL[r.status] || r.status}`, actions)}
+      ${kit.pageHeader(r.title, `${visInfo.label} — ${visInfo.hint} · Stage: ${STATUS_LABEL[r.status] || r.status}${Number(r.is_latest) ? ' · Latest raffle (/raffles/latest)' : ''}`, actions)}
       ${flash('error', error || req.query.error)}
       ${flash('success', req.query.msg)}
       ${kit.dbBanner(images.err || orgs.err)}
@@ -399,7 +419,7 @@ module.exports = function (db, appConfig) {
           ${imagesCard(r, images.rows)}
           <p class="text-xs text-slate-500 dark:text-slate-400">JPEG, PNG or WebP. Your browser shrinks photos to 1600 px before uploading.</p>
         </section>
-        ${raffleForm(`/raffles/${id}`, v, orgs.rows, false, lt.zoneOf(appConfig))}
+        ${raffleForm(`/raffles/${id}`, v, orgs.rows, false, lt.zoneOf(appConfig), await currentLatest())}
       </div>`;
     res.status(error ? 400 : 200).send(page({ title: r.title, body, appConfig, user, activeNav: 'raffles' }));
   }
@@ -420,17 +440,20 @@ module.exports = function (db, appConfig) {
       const exists = await db.getAsync('SELECT raffle_id FROM raffles WHERE raffle_id = ?', [id]);
       if (!exists) return res.redirect('/raffles?error=Raffle+not+found');
       f.slug = await kit.uniqueSlug(db, 'raffles', 'raffle_id', f.slug, id);
+      // Latest is one raffle only: clear it elsewhere before setting it here.
+      const prevLatest = f.is_latest ? await latest.holder(db, latest.RAFFLE, id) : null;
+      if (f.is_latest) await latest.take(db, latest.RAFFLE, id);
       await db.runAsync(`UPDATE raffles SET slug = ?, title = ?, prize_description_md = ?, total_tickets = ?, ticket_price_text = ?,
           drawing_at = ?, drawing_location = ?, how_to_buy = ?, claim_requirements = ?, claim_preset = ?,
-          beneficiary_org_id = ?, beneficiary_text = ?, visibility = ?, is_published = ?, updated_at = ? WHERE raffle_id = ?`,
+          beneficiary_org_id = ?, beneficiary_text = ?, visibility = ?, is_published = ?, is_latest = ?, updated_at = ? WHERE raffle_id = ?`,
         [f.slug, f.title, f.prize_description_md, f.total_tickets, f.ticket_price_text, f.drawing_at, f.drawing_location,
          f.how_to_buy, f.claim_requirements, f.claim_preset, f.beneficiary_org_id, f.beneficiary_text, f.visibility, f.is_published,
-         kit.sqlTime(), id]);
+         f.is_latest, kit.sqlTime(), id]);
       const msg = !req.body.set_status ? 'Raffle saved.'
         : f.visibility === 'published' ? 'Saved and published — it is on the website now.'
         : f.visibility === 'archived' ? 'Saved and archived — it is off the website, kept here for reference.'
         : 'Saved as a draft — it is not on the website.';
-      res.redirect(`/raffles/${id}?msg=` + encodeURIComponent(msg));
+      res.redirect(`/raffles/${id}?msg=` + encodeURIComponent(msg + latest.message(prevLatest, latest.RAFFLE)));
     } catch (err) {
       console.error('[raffles] update failed:', err);
       renderEdit(req, res, id, r.values, 'Save failed: ' + (err.message || 'unknown error'));

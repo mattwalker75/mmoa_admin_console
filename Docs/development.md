@@ -65,6 +65,7 @@ public/css/tailwind.css         Built — do not edit
 public/js/alpine.min.js         Copied — do not edit
 public/js/flatpickr.min.js      Copied (npm run copy:flatpickr) — do not edit; + public/css/flatpickr.min.css
 public/js/date-picker.js        Turns any input[data-datetime] into a calendar + time picker (data-min-from="#id" for "not before")
+helpers/latest.js               "Latest" (one event / one raffle at /events|raffles/latest): checkbox, single-holder save, reserved slug
 helpers/visibility.js           Draft / Published / Archived buttons + switch shared by Events and Raffles
 helpers/sitePreview.js          The Preview button + pop-up and preview-link maker shared by Events and Raffles
 public/js/flyer-maker.js        "Generate flyer": draws an event flyer on a canvas from the form + cover photo
