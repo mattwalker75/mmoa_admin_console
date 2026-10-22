@@ -38,8 +38,10 @@ The website is where events live (Facebook posts just link to them).
 - **Status** — every event is **Draft** (being prepared, not on the
   website), **Published** (on the website) or **Archived** (taken off the
   website but kept here for reference — e.g. to copy next year). Change it
-  with the Draft / Published / Archived switch at the bottom of the form, or
-  the same three buttons at the top of the page (they save your edits too).
+  with the Draft / Published / Archived buttons at the top of the page or
+  the identical set at the bottom of the form: clicking one **saves the
+  event** (your edits included) with that status. On **New event** they
+  create it with that status; "Create event" alone makes a draft.
 - **Show** drop-down — **All** (the default), **Draft**, **Published** or
   **Archived**, each with its count. Published events are split the way
   the website splits them: **upcoming** (starting no more than 12 hours ago;
