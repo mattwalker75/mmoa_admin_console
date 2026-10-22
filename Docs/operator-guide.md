@@ -66,6 +66,14 @@ The website is where events live (Facebook posts just link to them).
 - **Flyer / cover** — appear after the event is saved. Pick a photo; your
   browser shrinks it to 1600 px and uploads it to the website's
   `uploads/events/`. Replacing or removing one deletes the old file.
+- **Generate flyer** — next to the flyer's Upload: builds a 1200 × 1600
+  flyer from the event's details as they are in the form *right now*
+  (title, summary, when, where, the registration note, who it benefits and
+  the event's web address) over the **cover photo** (a dark backdrop if
+  there isn't one), in the website's fonts and colours. **Use as flyer**
+  uploads it as the event's flyer (saving any unsaved edits too);
+  **Download** saves a copy. Change the event and generate again to update
+  it — uploading your own flyer still works the same.
 - **Latest event** — tick "Also show this event at /events/latest" to give
   one event a fixed address you can share (e.g. a pinned Facebook post).
   Only one event can be Latest: ticking it on another event moves it there

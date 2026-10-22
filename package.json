@@ -4,16 +4,18 @@
   "description": "Operator-only admin console for the Mission Men of Anna web app (mmoa_web_app). Connects to the web app's database and host to manage events, raffles, nonprofit verification, the board, data, website content, uploads, configuration, logs, and backups.",
   "main": "app.js",
   "scripts": {
-    "prestart": "npm run build:css && npm run copy:alpine && npm run copy:flatpickr",
+    "prestart": "npm run build:css && npm run copy:alpine && npm run copy:flatpickr && npm run copy:fonts",
     "start": "node app.js",
     "build:css": "tailwindcss -i ./tailwind.input.css -o ./public/css/tailwind.css --minify",
     "watch:css": "tailwindcss -i ./tailwind.input.css -o ./public/css/tailwind.css --watch",
     "copy:alpine": "node -e \"require('fs').copyFileSync('node_modules/alpinejs/dist/cdn.min.js', 'public/js/alpine.min.js')\"",
+    "copy:fonts": "node -e \"const f=require('fs');f.mkdirSync('public/fonts',{recursive:true});for(const [p,n] of [['saira-condensed','saira-condensed-latin-700-normal'],['saira-condensed','saira-condensed-latin-800-normal'],['barlow','barlow-latin-500-normal'],['barlow','barlow-latin-700-normal']])f.copyFileSync('node_modules/@fontsource/'+p+'/files/'+n+'.woff2','public/fonts/'+n+'.woff2')\"",
     "copy:flatpickr": "node -e \"const f=require('fs');f.copyFileSync('node_modules/flatpickr/dist/flatpickr.min.js','public/js/flatpickr.min.js');f.copyFileSync('node_modules/flatpickr/dist/flatpickr.min.css','public/css/flatpickr.min.css')\""
   },
   "type": "commonjs",
   "_dependencies_info": {
     "@aws-sdk/client-ssm": "AWS Systems Manager SDK v3. Used by helpers/awsSsm.js for the 'Remote on EC2 (AWS)' Web App access mode — every command / file read / file write on the web app instance runs as an SSM Run Command (SendCommand + GetCommandInvocation polling). Lazy-required so the app still boots without it. This console never creates or modifies AWS resources.",
+    "@fontsource/saira-condensed": "The website's heading font (and @fontsource/barlow, its body font), self-hosted at /fonts/ (copied by copy:fonts) so the event flyer generator draws with the site's typefaces (CSP blocks Google Fonts).",
     "flatpickr": "Date / time picker for the console's date fields (public/js/date-picker.js enhances any input[data-datetime]). Self-hosted at /js/flatpickr.min.js + /css/flatpickr.min.css (copied by copy:flatpickr) to satisfy CSP.",
     "alpinejs": "Tiny client-side reactivity framework — drives form-field show/hide, live previews, and confirm dialogs via inline x-data directives. Self-hosted at /js/alpine.min.js to satisfy CSP.",
     "bcrypt": "Password hashing for console admin login and for nonprofit passwords set from the Nonprofits page (cost 10, same as the web app).",
@@ -32,6 +34,8 @@
   },
   "dependencies": {
     "@aws-sdk/client-ssm": "^3.1048.0",
+    "@fontsource/barlow": "5.3.0",
+    "@fontsource/saira-condensed": "5.3.0",
     "alpinejs": "^3.15.12",
     "bcrypt": "^6.0.0",
     "compression": "^1.8.1",
