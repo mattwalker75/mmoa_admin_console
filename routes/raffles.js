@@ -406,6 +406,7 @@ module.exports = function (db, appConfig) {
         ${statusCard(r)}
         <section class="card surface-target card-pad space-y-6">
           <h2 class="text-sm font-semibold uppercase tracking-wider text-slate-500 dark:text-slate-400">Images</h2>
+          ${imagesCard(r, images.rows)}
           <div class="rounded-lg border border-slate-200 dark:border-slate-700 p-3 space-y-2">
             <div class="flex items-center justify-between gap-2">
               <div class="text-sm font-semibold text-slate-900 dark:text-slate-100">Flyer</div>
@@ -416,7 +417,6 @@ module.exports = function (db, appConfig) {
             ${r.flyer_path ? `<a href="/wa-uploads/${escapeHtml(r.flyer_path)}" target="_blank" rel="noopener">${kit.uploadImg(r.flyer_path, 'Flyer', 'max-h-48 w-auto rounded-lg border border-slate-200 dark:border-slate-700')}</a>` : '<p class="text-sm text-slate-400 italic">None yet.</p>'}
             ${kit.uploadForm(`/raffles/${id}/flyer`, r.flyer_path ? 'Replace' : 'Upload')}
           </div>
-          ${imagesCard(r, images.rows)}
           <p class="text-xs text-slate-500 dark:text-slate-400">JPEG, PNG or WebP. Your browser shrinks photos to 1600 px before uploading.</p>
         </section>
         ${raffleForm(`/raffles/${id}`, v, orgs.rows, false, lt.zoneOf(appConfig), await currentLatest())}
