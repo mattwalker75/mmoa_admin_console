@@ -406,10 +406,12 @@ module.exports = function (db, appConfig) {
     // ── IRS / ProPublica card ──
     const digits = o ? einDigits(o.ein) : null;
     const lookup = o ? `<section class="card surface-target card-pad" data-url="/nonprofits/${id}/propublica"
-        x-data="{ busy: false, r: null, async run() { this.busy = true; this.r = null;
-            try { const x = await fetch(this.$el.dataset.url, { headers: { 'Accept': 'application/json' } }); this.r = await x.json(); }
+        x-data="{ busy: false, r: null, url: '',
+            init() { this.url = this.$root.dataset.url; ${digits ? 'this.run();' : ''} },
+            async run() { this.busy = true; this.r = null;
+            try { const x = await fetch(this.url, { headers: { 'Accept': 'application/json' } }); this.r = await x.json(); }
             catch (e) { this.r = { ok: false, error: 'Network error: ' + (e.message || e) }; }
-            finally { this.busy = false; } } }" ${digits ? 'x-init="run()"' : ''}>
+            finally { this.busy = false; } } }">
         <div class="flex items-center justify-between gap-2">
           <h2 class="text-sm font-semibold uppercase tracking-wider text-slate-500 dark:text-slate-400">IRS / ProPublica lookup</h2>
           ${digits ? `<button type="button" class="btn-secondary text-xs px-3 py-1" x-on:click="run()" :disabled="busy">Look up again</button>` : ''}

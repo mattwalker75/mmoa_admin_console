@@ -60,7 +60,10 @@
           }
         }
       } catch (e) { /* never let the wrapper break a request */ }
-      return nativeFetch.call(this, input, init);
+      // Always call the real fetch on the window. Alpine (and any bare
+      // `fetch(...)` call) can hand us an undefined or foreign receiver, and
+      // Safari refuses to run fetch on anything but the window.
+      return nativeFetch.call(window, input, init);
     };
   }
 
