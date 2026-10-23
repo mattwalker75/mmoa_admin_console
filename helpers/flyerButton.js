@@ -34,11 +34,19 @@ function flyerButton({ action, formId, kind, photoRel, photoWord, siteUrl }) {
          use() {
            this.busy = true; this.err = '';
            this.$refs.cv.toBlob(b => {
+             if (!b) { this.err = 'Could not encode the flyer image — try again.'; this.busy = false; return; }
              const file = new File([b], 'generated-flyer.jpg', { type: 'image/jpeg' });
              window.macUploadImage(this.cfg.action, file).then(r => {
                if (!r.ok) { this.err = r.error || 'Upload failed'; this.busy = false; return; }
-               if (this.dirty) document.getElementById(this.cfg.form).requestSubmit(); else window.location.reload();
-             });
+               if (!this.dirty) { window.location.reload(); return; }
+               // Saving the unsaved edits too: an invalid form would make
+               // requestSubmit() fail silently behind this dialog, so check
+               // first. The flyer is already uploaded — reload shows it.
+               const form = document.getElementById(this.cfg.form);
+               if (form && form.reportValidity()) { form.requestSubmit(); return; }
+               this.err = 'Flyer uploaded. Your other edits were not saved because a field is invalid — reloading…';
+               setTimeout(() => window.location.reload(), 2500);
+             }).catch(e => { this.err = 'Upload failed: ' + (e && e.message || e); this.busy = false; });
            }, 'image/jpeg', 0.9);
          },
          download() {

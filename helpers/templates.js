@@ -100,6 +100,9 @@ function list(appConfig, kind) {
     const m = /^([a-z0-9-]+)\.json$/.exec(f);
     if (!m || !ID_RE.test(m[1])) continue;
     try {
+      // Regular files only (lstat): a symlink dropped in the folder must not
+      // be read through to wherever it points.
+      if (!fs.lstatSync(path.join(dir, f)).isFile()) continue;
       const j = JSON.parse(fs.readFileSync(path.join(dir, f), 'utf8'));
       out.push({ id: m[1], name: String(j.name || m[1]), content: String(j.content || ''), updatedAt: j.updatedAt || null });
     } catch (e) { /* skip an unreadable file */ }

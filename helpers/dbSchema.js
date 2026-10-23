@@ -71,8 +71,15 @@ async function describeTable(db, table) {
   }
   // PRAGMA can't be parameterized; `table` is a real, already-discovered name.
   const rows = await db.allAsync(`PRAGMA table_info(${quoteIdent(table)})`, []);
-  const pkCount = rows.filter(r => Number(r.pk) > 0).length;
-  return rows.map(r => {
+  return sqliteColumns(rows);
+}
+
+// PRAGMA table_info rows (cid, name, type, notnull, dflt_value, pk) → the
+// column shape above.
+function sqliteColumns(rows) {
+  const sorted = [...rows].sort((a, b) => Number(a.cid) - Number(b.cid));
+  const pkCount = sorted.filter(r => Number(r.pk) > 0).length;
+  return sorted.map(r => {
     const type = String(r.type || '');
     const pk = Number(r.pk) || 0;
     return {
@@ -86,6 +93,38 @@ async function describeTable(db, table) {
       auto: pk > 0 && pkCount === 1 && /^INTEGER$/i.test(type.trim())
     };
   });
+}
+
+// describeTable for MANY catalog tables at once → Map(name → columns).
+// On SQLite this is ONE statement (pragma_table_info() as a table-valued
+// function, UNION ALL per table) — what makes the Data Browser index usable
+// over SSH / SSM, where every statement is a remote command. MySQL keeps the
+// per-table path. `names` must all come from listTables().
+async function describeTables(db, names) {
+  const out = new Map();
+  if (!names.length) return out;
+  if (db.engine === 'mysql') {
+    for (const t of names) out.set(t, await describeTable(db, t));
+    return out;
+  }
+  // The table name is a VALUE here (bound), not an identifier.
+  const sql = names.map(() => 'SELECT ? AS t, cid, name, type, "notnull", dflt_value, pk FROM pragma_table_info(?)').join(' UNION ALL ');
+  const params = [];
+  for (const t of names) params.push(t, t);
+  const rows = await db.allAsync(sql, params);
+  for (const t of names) out.set(t, sqliteColumns(rows.filter(r => r.t === t)));
+  return out;
+}
+
+// Row counts for MANY catalog tables in ONE statement → Map(name → count).
+// Identifiers come from the catalog (quoteIdent); the label is a bound value.
+async function countRows(db, names) {
+  const out = new Map();
+  if (!names.length) return out;
+  const sql = names.map(t => `SELECT ? AS t, COUNT(*) AS c FROM ${quoteIdent(t)}`).join(' UNION ALL ');
+  const rows = await db.allAsync(sql, [...names]);
+  for (const r of rows) out.set(r.t, Number(r.c));
+  return out;
 }
 
 // Look a caller-supplied table name up in the live catalog. Returns the
@@ -116,6 +155,6 @@ function isTextColumn(col) {
 }
 
 module.exports = {
-  quoteIdent, listTables, describeTable, resolveTable, primaryKey,
+  quoteIdent, listTables, describeTable, describeTables, countRows, resolveTable, primaryKey,
   isHashColumn, isTextColumn
 };

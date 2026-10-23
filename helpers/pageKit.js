@@ -148,19 +148,22 @@ function wantsJson(req) {
 }
 
 // Run multer, then the handler; JSON callers get { ok:false, error } on a
-// parse failure, form posts get redirected to `back` with ?error=.
+// parse failure or a handler error, form posts get redirected to `back`
+// with ?error= (same shape as reply() below, so a plain form post never
+// lands on a JSON body).
 function withImage(back, handler) {
   return (req, res) => {
     imageUpload(req, res, (err) => {
+      const to = typeof back === 'function' ? back(req) : back;
       if (err) {
         const msg = err.code === 'LIMIT_FILE_SIZE' ? 'Image is larger than 8 MB.' : (err.message || 'Upload failed');
-        const to = typeof back === 'function' ? back(req) : back;
-        return wantsJson(req) ? res.status(400).json({ ok: false, error: msg })
-                              : res.redirect(to + (to.includes('?') ? '&' : '?') + 'error=' + encodeURIComponent(msg));
+        return reply(req, res, to, false, msg);
       }
       Promise.resolve(handler(req, res)).catch((e) => {
         console.error('[upload] handler failed:', e);
-        if (!res.headersSent) res.status(500).json({ ok: false, error: e.message || 'Upload failed' });
+        if (res.headersSent) return;
+        if (wantsJson(req)) return res.status(500).json({ ok: false, error: e.message || 'Upload failed' });
+        reply(req, res, to, false, e.message || 'Upload failed');
       });
     });
   };

@@ -24,6 +24,11 @@
 //     single atomic BEGIN…COMMIT script in one sqlite3 -bail invocation
 //     (chunk-uploaded to a temp file when large). Reads inside a
 //     transaction are not supported — no current caller does that.
+//   * Large results on EC2: SSM returns at most ~24 KB of stdout, so there
+//     sqlite3 writes to a temp file next to the DB; small outputs are still
+//     echoed inline (one command), bigger ones come back through
+//     accessor.readFileChunked and the temp file is removed. SSH/local are
+//     unaffected (no output cap).
 //   * The remote sqlite3 CLI must exist (the mmoa_web_app_infra EC2 user
 //     data installs it for SETUP_SQLLITE_DB.sh). A missing DB file is an error, never
 //     an implicit create — `sqlite3` happily creates empty DBs otherwise.
@@ -37,11 +42,18 @@
 //     is NOT enforced here. Callers that delete parent rows (Nonprofits
 //     → Delete, Events / Raffles → Delete) remove the child rows explicitly.
 
+const crypto = require('crypto');
 const webAppAccess = require('../helpers/webAppAccess');
 
 // Single-quote for POSIX sh (same rule as webAppAccess.shQuote).
 function shq(s) {
   return `'` + String(s).replace(/'/g, `'\\''`) + `'`;
+}
+
+// Per-call random suffix for temp files next to the DB, so two admins'
+// transactions / result files can't interleave.
+function tmpSuffix() {
+  return crypto.randomBytes(4).toString('hex');
 }
 
 // Encode one JS value as a SQLite literal.
@@ -93,6 +105,24 @@ function terminate(stmt) {
 // (the EC2 transport also base64-inflates it by ~33%).
 const MAX_INLINE_SQL = 12000;
 
+// On EC2, sqlite3 output up to this many BYTES is echoed inline; anything
+// bigger is read back from the temp file in pieces (bytes ≥ chars, so this
+// stays under webAppAccess.SSM_OUTPUT_CAP_CHARS).
+const MAX_INLINE_OUTPUT = 20000;
+
+// Split a script into base64 pieces of at most `maxBytes` BYTES each, for
+// `printf '%s' <b64> | base64 -d >> file`. The split is done on the UTF-8
+// bytes — never on the JS string — so a character that straddles a boundary
+// (an emoji is two UTF-16 units, four UTF-8 bytes) is reassembled intact when
+// the pieces are appended on the host. Exported for the tests.
+function chunkForUpload(text, maxBytes) {
+  const buf = Buffer.from(String(text), 'utf8');
+  const max = Math.max(1, Number(maxBytes) || MAX_INLINE_SQL);
+  const out = [];
+  for (let off = 0; off < buf.length; off += max) out.push(buf.subarray(off, off + max).toString('base64'));
+  return out;
+}
+
 function init(appConfig, sqliteCfg) {
   const cfg = sqliteCfg || {};
 
@@ -116,18 +146,46 @@ function init(appConfig, sqliteCfg) {
   // Run `sqlite3` on the remote host with the given argv statements (each
   // may be SQL or a dot-command), guarded so a missing DB file is an error
   // instead of sqlite3 silently creating an empty database.
+  // `else` branch shared by every sqlite3 invocation (message shell-quoted).
+  function guardMissing(file, body) {
+    return `if [ -f ${shq(file)} ]; then ${body}; else echo ${shq('SQLite file not found on the Web App host: ' + file)} >&2; exit 42; fi`;
+  }
+
   async function execRaw(statements, opts) {
+    const a = accessor();
     const file = dbFile();
     const flags = `-batch ${opts && opts.bail ? '-bail ' : ''}${opts && opts.json ? '-json ' : ''}-cmd ".timeout 5000"`;
     const argv = statements.map(shq).join(' ');
-    const cmd = `if [ -f ${shq(file)} ]; then sqlite3 ${flags} ${shq(file)} ${argv}; else echo "SQLite file not found on the Web App host: ${file}" >&2; exit 42; fi`;
-    const r = await accessor().runCommand(cmd, { timeoutMs: (opts && opts.timeoutMs) || 60000 });
-    if (r.timedOut) throw new Error('Remote SQLite query timed out (the command may still be running on the host).');
+    const run = `sqlite3 ${flags} ${shq(file)} ${argv}`;
+    let cmd, tmp = null;
+    if (a.mode === 'ec2') {
+      // SSM keeps only the first ~24 KB of stdout: write the output to a
+      // temp file; echo it inline when small (one round trip, as before),
+      // otherwise hand back a marker and read the file in pieces.
+      tmp = `${file}.console-out.${tmpSuffix()}.tmp`;
+      cmd = guardMissing(file,
+        `${run} > ${shq(tmp)}; rc=$?; sz=$(wc -c < ${shq(tmp)} | tr -d ' '); ` +
+        `if [ "$rc" -ne 0 ] || [ "$sz" -lt ${MAX_INLINE_OUTPUT} ]; then cat ${shq(tmp)}; rm -f ${shq(tmp)}; exit $rc; fi; echo "__RS_BIG__ $sz"`);
+    } else {
+      cmd = guardMissing(file, run);
+    }
+    const rmTmp = async () => { if (tmp) { try { await a.runCommand(`rm -f ${shq(tmp)}`, { timeoutMs: 30000 }); } catch (e) { /* best effort */ } } };
+    let r;
+    try { r = await a.runCommand(cmd, { timeoutMs: (opts && opts.timeoutMs) || 60000 }); }
+    catch (e) { await rmTmp(); throw e; }
+    if (r.timedOut) { await rmTmp(); throw new Error('Remote SQLite query timed out (the command may still be running on the host).'); }
     if (r.code !== 0) {
       const msg = (r.stderr || '').trim() || (r.stdout || '').trim() || `sqlite3 exited with code ${r.code}`;
       throw new Error(`Remote SQLite error: ${msg}`);
     }
-    return r.stdout || '';
+    const out = r.stdout || '';
+    const big = tmp && /^__RS_BIG__ (\d+)\s*$/.exec(out);
+    if (big) {
+      try { return await a.readFileChunked(tmp, { encoding: 'utf8', timeoutMs: (opts && opts.timeoutMs) || 60000 }); }
+      finally { await rmTmp(); }
+    }
+    if (r.truncated) throw new Error('Result too large for AWS SSM (output truncated at ~24 KB) — use a smaller page size.');
+    return out;
   }
 
   function parseRows(stdout) {
@@ -173,17 +231,17 @@ function init(appConfig, sqliteCfg) {
     }
     const a = accessor();
     const file = dbFile();
-    const tmp = file + '.console-tx.sql';
+    const tmp = `${file}.console-tx.${tmpSuffix()}.sql`;
     const text = script.join('\n') + '\n';
     try {
-      for (let off = 0, first = true; off < text.length; off += MAX_INLINE_SQL, first = false) {
-        const b64 = Buffer.from(text.slice(off, off + MAX_INLINE_SQL), 'utf8').toString('base64');
-        const redir = first ? '>' : '>>';
-        const r = await a.runCommand(`printf '%s' ${shq(b64)} | base64 -d ${redir} ${shq(tmp)}`, { timeoutMs: 60000 });
+      const pieces = chunkForUpload(text, MAX_INLINE_SQL);
+      for (let i = 0; i < pieces.length; i++) {
+        const redir = i === 0 ? '>' : '>>';
+        const r = await a.runCommand(`printf '%s' ${shq(pieces[i])} | base64 -d ${redir} ${shq(tmp)}`, { timeoutMs: 60000 });
         if (r.code !== 0) throw new Error(`Could not stage transaction SQL on the host: ${(r.stderr || '').trim() || 'exit ' + r.code}`);
       }
       const r = await a.runCommand(
-        `if [ -f ${shq(file)} ]; then sqlite3 -batch -bail -cmd ".timeout 5000" ${shq(file)} < ${shq(tmp)}; else echo "SQLite file not found on the Web App host: ${file}" >&2; exit 42; fi`,
+        guardMissing(file, `sqlite3 -batch -bail -cmd ".timeout 5000" ${shq(file)} < ${shq(tmp)}`),
         { timeoutMs: 600000 }
       );
       if (r.timedOut) throw new Error('Remote SQLite transaction timed out (it may still be running on the host).');
@@ -241,5 +299,5 @@ function init(appConfig, sqliteCfg) {
   };
 }
 
-module.exports = { init, bindSql, sqlLit };
+module.exports = { init, bindSql, sqlLit, chunkForUpload, MAX_INLINE_SQL };
 

@@ -124,7 +124,17 @@ async function loadTable(db, req, res, appConfig) {
     refuse(res, appConfig, user, 404, 'Unknown table', `There is no table named "${String(req.params.table).slice(0, 100)}" in the web app's database.`);
     return null;
   }
-  const columns = await dbSchema.describeTable(db, table);
+  let columns;
+  try {
+    columns = await dbSchema.describeTable(db, table);
+  } catch (err) {
+    res.status(503).send(page({
+      title: 'Data Browser',
+      body: `${pageHeader('Data Browser')}${dbBanner(err)}`,
+      appConfig, user, activeNav: 'data'
+    }));
+    return null;
+  }
   return { table, columns, pk: dbSchema.primaryKey(columns) };
 }
 
@@ -196,13 +206,27 @@ module.exports = function (db, appConfig) {
     let tables = [], err = null;
     try {
       const names = await dbSchema.listTables(db);
+      // Remote SQLite (SSH / SSM): every statement is a ~1 s remote command,
+      // so describe every table and count every table in ONE statement each
+      // (3 round trips instead of 2N+1). Local SQLite / MySQL keep the
+      // per-table loop.
+      const batched = !!db.remote;
+      let colsByTable = null, countByTable = null;
+      if (batched) {
+        colsByTable = await dbSchema.describeTables(db, names);
+        try { countByTable = await dbSchema.countRows(db, names); } catch (e) { countByTable = new Map(); /* counts unknown */ }
+      }
       for (const t of names) {
-        const cols = await dbSchema.describeTable(db, t);
+        const cols = batched ? (colsByTable.get(t) || []) : await dbSchema.describeTable(db, t);
         let count = null;
-        try {
-          const r = await db.getAsync(`SELECT COUNT(*) AS c FROM ${dbSchema.quoteIdent(t)}`, []);
-          count = r ? Number(r.c) : null;
-        } catch (e) { /* leave as unknown */ }
+        if (batched) {
+          count = countByTable.has(t) ? countByTable.get(t) : null;
+        } else {
+          try {
+            const r = await db.getAsync(`SELECT COUNT(*) AS c FROM ${dbSchema.quoteIdent(t)}`, []);
+            count = r ? Number(r.c) : null;
+          } catch (e) { /* leave as unknown */ }
+        }
         tables.push({ name: t, columns: cols.length, pk: dbSchema.primaryKey(cols).map(c => c.name), count });
       }
     } catch (e) { err = e; }

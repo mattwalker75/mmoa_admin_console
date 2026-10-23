@@ -12,8 +12,10 @@
 //   ec2   — remote EC2 instance driven via AWS SSM Run Command (awsSsm).
 //
 // Accessor interface (all async unless noted):
-//   runCommand(command, opts) -> { code, stdout, stderr, timedOut }
+//   runCommand(command, opts) -> { code, stdout, stderr, timedOut[, truncated] }
+//                                (truncated: EC2 only — stdout hit SSM's cap)
 //   readFile(remotePath, opts) -> Buffer (default) or string (opts.encoding)
+//   readFileChunked(remotePath, opts) -> same, any size (EC2: pieces over SSM)
 //   writeFile(remotePath, content)
 //   writeFileChunked(remotePath, buffer) -> { bytes, chunks }
 //   exists(remotePath) -> boolean
@@ -44,9 +46,18 @@
 //           (after the runAsUser wrap), appended to a temp file; a final
 //           command checks the size (`stat -c %s`, falling back to `wc -c`)
 //           and only then `mv`s it into place. A failed piece removes the
-//           temp file, so a half-sent upload never becomes the real file. The EC2 mode reads through SSM, whose inline output is
-// capped at ~24 KB — readFile refuses (rather than truncates) anything near
-// that cap, so a read-modify-write can't save a damaged file back.
+//           temp file, so a half-sent upload never becomes the real file.
+//
+// Temp files carry a per-call random suffix (<path>.wa-tmp.<hex>) so two
+// admins saving the same file at once can't interleave.
+//
+// The EC2 mode reads through SSM, whose inline output is capped at ~24 KB
+// (SSM_OUTPUT_CAP_CHARS). readFile never returns a truncated file: at the cap
+// it switches to readFileChunked, which pulls the file back in base64 pieces
+// (one `dd … | base64` command each) and verifies the byte count. Callers
+// that know a result may be large (remote SQLite result sets) use
+// readFileChunked directly. runCommand results carry `truncated` so a caller
+// can tell when a command's own stdout hit the cap.
 //
 // ssh2 is lazy-required (mirrors awsSsm) so the app still boots if it isn't
 // installed yet — callers get a friendly SSH2_MISSING error only when SSH
@@ -96,6 +107,18 @@ function ssmChunkChars(runAsUser) {
   const budget = SSM_MAX_COMMAND_BYTES - 600;
   const raw = runAsUser ? Math.floor(budget * 3 / 4) - 200 : budget;
   return raw - (raw % 4);
+}
+
+// SSM returns at most ~24,000 chars of stdout; at or past this length the
+// output is taken as truncated.
+const SSM_OUTPUT_CAP_CHARS = 23000;
+// Raw bytes per piece for readFileChunked on EC2: 15,000 bytes → 20,000
+// base64 chars, comfortably under the output cap.
+const SSM_READ_CHUNK_BYTES = 15000;
+
+// A per-call temp name next to the target: <path>.wa-tmp.<8 hex>.
+function tmpNameFor(remotePath) {
+  return `${remotePath}.wa-tmp.${require('crypto').randomBytes(4).toString('hex')}`;
 }
 
 // Prefix a command with a `cd` into `cwd` so it runs from that directory.
@@ -208,12 +231,21 @@ function localAccessor(cfg) {
       const buf = await fs.promises.readFile(remotePath);
       return (opts && opts.encoding) ? buf.toString(opts.encoding) : buf;
     },
+    readFileChunked(remotePath, opts) {
+      // No transport cap locally.
+      return self.readFile(remotePath, opts);
+    },
     async writeFile(remotePath, content) {
       // Atomic: write to a temp file then rename into place (atomic on POSIX)
       // so an interrupted write can't leave the remote config truncated/empty.
-      const tmp = remotePath + '.wa-tmp';
-      await fs.promises.writeFile(tmp, content);
-      await fs.promises.rename(tmp, remotePath);
+      const tmp = tmpNameFor(remotePath);
+      try {
+        await fs.promises.writeFile(tmp, content);
+        await fs.promises.rename(tmp, remotePath);
+      } catch (e) {
+        await fs.promises.rm(tmp, { force: true }).catch(() => {});
+        throw e;
+      }
     },
     async writeFileChunked(remotePath, buffer) {
       // Local disk has no payload limit: one atomic write (+ mkdir -p).
@@ -379,6 +411,10 @@ function sshAccessor(cfg) {
         return (opts && opts.encoding) ? buf.toString(opts.encoding) : buf;
       });
     },
+    readFileChunked(remotePath, opts) {
+      // SFTP streams any size.
+      return this.readFile(remotePath, opts);
+    },
     writeFile(remotePath, content) {
       // Atomic, like the local and EC2 accessors: SFTP-write a temp file,
       // then `mv -f` it into place over the same connection (rename is
@@ -388,12 +424,13 @@ function sshAccessor(cfg) {
       // config.json / fragment.
       return withConnection(async (conn) => {
         const sftp = await getSftp(conn);
-        const tmp = remotePath + '.wa-tmp';
+        const tmp = tmpNameFor(remotePath);
         await new Promise((resolve, reject) => {
           sftp.writeFile(tmp, content, (err) => err ? reject(err) : resolve());
         });
         const r = await exec(conn, `mv -f ${shQuote(tmp)} ${shQuote(remotePath)}`, { timeoutMs: 30000 });
         if (r.code !== 0) {
+          await exec(conn, `rm -f -- ${shQuote(tmp)}`, { timeoutMs: 30000 }).catch(() => {});
           throw new Error(`Could not move ${tmp} into place: ${(r.stderr || '').trim() || 'exit ' + r.code}`);
         }
       });
@@ -407,7 +444,7 @@ function sshAccessor(cfg) {
         const mk = await exec(conn, `mkdir -p -- ${shQuote(dirOf(remotePath))}`, { timeoutMs: 30000 });
         if (mk.code !== 0) throw new Error(`Could not create ${dirOf(remotePath)}: ${(mk.stderr || '').trim() || 'exit ' + mk.code}`);
         const sftp = await getSftp(conn);
-        const tmp = remotePath + '.wa-tmp';
+        const tmp = tmpNameFor(remotePath);
         await new Promise((resolve, reject) => {
           sftp.writeFile(tmp, buf, (err) => err ? reject(err) : resolve());
         });
@@ -522,7 +559,40 @@ function ec2Accessor(cfg) {
     const code = r.responseCode == null
       ? (r.status === 'Success' ? 0 : null)
       : r.responseCode;
-    return { code, stdout: r.stdout || '', stderr: r.stderr || '', timedOut: !!r.timedOut, status: r.status, commandId: r.commandId };
+    const stdout = r.stdout || '';
+    return {
+      code, stdout, stderr: r.stderr || '', timedOut: !!r.timedOut, status: r.status, commandId: r.commandId,
+      // SSM keeps only the FIRST ~24,000 chars of stdout: at the cap the end
+      // of the output is gone. Callers that need the end (logs) pipe through
+      // `tail -c`; callers that need all of it (SQLite results) use a file.
+      truncated: stdout.length >= SSM_OUTPUT_CAP_CHARS
+    };
+  }
+
+  // Pull a file back in pieces: one `dd | base64` command per
+  // SSM_READ_CHUNK_BYTES, then verify the total against the file's size.
+  async function readChunked(remotePath, opts) {
+    const q = shQuote(remotePath);
+    let r = await ssmRun(
+      `if [ -f ${q} ]; then sz=$(stat -c %s ${q} 2>/dev/null || wc -c < ${q}); echo "__WA_SIZE__ $(echo $sz | tr -d ' ')"; ` +
+      `else echo ${shQuote('No such file: ' + remotePath)} >&2; exit 2; fi`,
+      { timeoutMs: (opts && opts.timeoutMs) || 60000, comment: 'Admin console chunked read (size)' });
+    if (r.status !== 'Success') throw new Error(`Could not read ${remotePath} via SSM: ${r.stderr || r.status}`);
+    const m = /__WA_SIZE__ (\d+)/.exec(r.stdout || '');
+    if (!m) throw new Error(`Could not read ${remotePath} via SSM: no size reported.`);
+    const size = Number(m[1]);
+    const parts = [];
+    for (let k = 0; k * SSM_READ_CHUNK_BYTES < size; k++) {
+      const p = await ssmRun(`dd if=${q} bs=${SSM_READ_CHUNK_BYTES} skip=${k} count=1 2>/dev/null | base64 | tr -d '\\n'`,
+        { timeoutMs: (opts && opts.timeoutMs) || 60000, comment: `Admin console chunked read (${k + 1})` });
+      if (p.status !== 'Success') throw new Error(`Could not read ${remotePath} via SSM (piece ${k + 1}): ${p.stderr || p.status}`);
+      const raw = (p.stdout || '').replace(/\s+/g, '');
+      if (raw.length >= SSM_OUTPUT_CAP_CHARS) throw new Error(`Could not read ${remotePath} via SSM: piece ${k + 1} was truncated.`);
+      parts.push(Buffer.from(raw, 'base64'));
+    }
+    const buf = Buffer.concat(parts);
+    if (buf.length !== size) throw new Error(`Could not read ${remotePath} via SSM: got ${buf.length} of ${size} bytes.`);
+    return (opts && opts.encoding) ? buf.toString(opts.encoding) : buf;
   }
 
   return {
@@ -548,30 +618,37 @@ function ec2Accessor(cfg) {
       // SSM caps inline command output at ~24,000 chars. At/near the cap the
       // base64 was almost certainly truncated — returning it would let a
       // read-modify-write (e.g. the website editor) save a corrupted, truncated
-      // fragment back over the good one. Fail loudly instead of silently.
-      if (raw.length >= 23000) {
-        throw new Error(`File ${remotePath} is too large to read over SSM (output truncated at ~24 KB). Use a smaller file, or SSH/local Web App access mode.`);
-      }
+      // fragment back over the good one. Read it in verified pieces instead.
+      if (raw.length >= SSM_OUTPUT_CAP_CHARS) return readChunked(remotePath, opts);
       const buf = Buffer.from(raw.replace(/\s+/g, ''), 'base64');
       return (opts && opts.encoding) ? buf.toString(opts.encoding) : buf;
+    },
+    readFileChunked(remotePath, opts) {
+      return readChunked(remotePath, opts);
     },
     async writeFile(remotePath, content) {
       const b64 = Buffer.isBuffer(content)
         ? content.toString('base64')
         : Buffer.from(String(content), 'utf8').toString('base64');
+      // One SSM command carries at most ssmChunkChars() of base64; anything
+      // bigger goes in pieces (writeFileChunked), which is atomic the same way.
+      if (b64.length > ssmChunkChars(runAsUser)) {
+        await this.writeFileChunked(remotePath, content);
+        return;
+      }
       // Atomic: decode to a temp file, then `mv` into place (rename is atomic
       // on POSIX). If the SSM command is interrupted or base64/printf fails,
       // only the temp file is affected — the real remote config.json is never
       // left truncated/empty (which would break the web app's boot).
-      const tmp = remotePath + '.wa-tmp';
-      const r = await ssmRun(`printf '%s' ${shQuote(b64)} | base64 -d > ${shQuote(tmp)} && mv -f ${shQuote(tmp)} ${shQuote(remotePath)}`);
+      const tmp = tmpNameFor(remotePath);
+      const r = await ssmRun(`printf '%s' ${shQuote(b64)} | base64 -d > ${shQuote(tmp)} && mv -f ${shQuote(tmp)} ${shQuote(remotePath)} || { rm -f -- ${shQuote(tmp)}; exit 1; }`);
       if (r.status !== 'Success') {
         throw new Error(`Could not write ${remotePath} via SSM: ${r.stderr || r.status}`);
       }
     },
     async writeFileChunked(remotePath, buffer) {
       const buf = toBuffer(buffer);
-      const tmp = remotePath + '.wa-tmp';
+      const tmp = tmpNameFor(remotePath);
       const b64 = buf.toString('base64');
       const per = ssmChunkChars(runAsUser);
       const fail = async (what, r) => {
@@ -723,6 +800,7 @@ function createAccessorFromConfig(appConfig) {
 module.exports = {
   VALID_MODES,
   SSM_MAX_COMMAND_BYTES,
+  SSM_OUTPUT_CAP_CHARS,
   ssmChunkChars,
   shQuote,
   getMode,

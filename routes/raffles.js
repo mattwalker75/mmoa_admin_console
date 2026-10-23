@@ -108,6 +108,10 @@ function readForm(b, appConfig) {
     is_latest: kit.yes(b.is_latest), item_id: b._item_id || ''
   };
   const fail = (error) => ({ values, error });
+  // Beneficiaries: whatever else fails below, the form echoes the rows as
+  // parsed (or '[]' when the posted JSON is unreadable) — never the raw string.
+  const parsed = beneficiaries.parse(b);
+  if (parsed.json !== undefined) values.bens_json = parsed.json;
   const title = kit.str(b.title, 200);
   if (!title) return fail('Title is required.');
   const slugIn = kit.str(b.slug, 80);
@@ -125,7 +129,6 @@ function readForm(b, appConfig) {
   const drawing = lt.localInputToUtc(b.drawing_at, appConfig);
   if (drawing === undefined) return fail('The drawing date/time is not valid.');
   const claims = normLines(b.claim_requirements).join('\n');
-  const parsed = beneficiaries.parse(b);
   if (parsed.error) return fail(parsed.error);
   return {
     values,
@@ -356,13 +359,18 @@ module.exports = function (db, appConfig) {
     try {
       f.slug = await kit.uniqueSlug(db, 'raffles', 'raffle_id', f.slug, 0);
       const prevLatest = f.is_latest ? await latest.holder(db, latest.RAFFLE, 0) : null;
-      if (f.is_latest) await latest.take(db, latest.RAFFLE, 0);
       const now = kit.sqlTime();
-      const ins = await db.runAsync(`INSERT INTO raffles (slug, title, prize_description_md, total_tickets, ticket_price_text,
-          drawing_at, drawing_location, how_to_buy, claim_requirements, claim_preset, beneficiary_text,
-          status, visibility, is_published, is_latest, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', ?, ?, ?, ?, ?)`,
-        [f.slug, f.title, f.prize_description_md, f.total_tickets, f.ticket_price_text, f.drawing_at, f.drawing_location,
-         f.how_to_buy, f.claim_requirements, f.claim_preset, f.beneficiary_text, f.visibility, f.is_published, f.is_latest, now, now]);
+      // Clearing Latest elsewhere and inserting the row happen in ONE
+      // transaction: a failed insert leaves the old holder in place.
+      const ins = await db.transaction(async (tx) => {
+        if (f.is_latest) await latest.take(tx, latest.RAFFLE, 0);
+        return tx.runAsync(`INSERT INTO raffles (slug, title, prize_description_md, total_tickets, ticket_price_text,
+            drawing_at, drawing_location, how_to_buy, claim_requirements, claim_preset, beneficiary_text,
+            status, visibility, is_published, is_latest, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', ?, ?, ?, ?, ?)`,
+          [f.slug, f.title, f.prize_description_md, f.total_tickets, f.ticket_price_text, f.drawing_at, f.drawing_location,
+           f.how_to_buy, f.claim_requirements, f.claim_preset, f.beneficiary_text, f.visibility, f.is_published, f.is_latest, now, now]);
+      });
+      // Remote SQLite can't report lastID from inside a transaction → by slug.
       let id = ins && ins.lastID ? Number(ins.lastID) : null;
       if (!id) { const row = await db.getAsync('SELECT raffle_id FROM raffles WHERE slug = ?', [f.slug]); id = row && Number(row.raffle_id); }
       if (r.bens.length) await beneficiaries.write(db, beneficiaries.KIND.raffle, id, r.bens);
@@ -447,15 +455,18 @@ module.exports = function (db, appConfig) {
       const exists = await db.getAsync('SELECT raffle_id FROM raffles WHERE raffle_id = ?', [id]);
       if (!exists) return res.redirect('/raffles?error=Raffle+not+found');
       f.slug = await kit.uniqueSlug(db, 'raffles', 'raffle_id', f.slug, id);
-      // Latest is one raffle only: clear it elsewhere before setting it here.
+      // Latest is one raffle only: the save and the clearing of Latest on
+      // every other raffle are one transaction (helpers/latest.js).
       const prevLatest = f.is_latest ? await latest.holder(db, latest.RAFFLE, id) : null;
-      if (f.is_latest) await latest.take(db, latest.RAFFLE, id);
-      await db.runAsync(`UPDATE raffles SET slug = ?, title = ?, prize_description_md = ?, total_tickets = ?, ticket_price_text = ?,
-          drawing_at = ?, drawing_location = ?, how_to_buy = ?, claim_requirements = ?, claim_preset = ?,
-          beneficiary_text = ?, visibility = ?, is_published = ?, is_latest = ?, updated_at = ? WHERE raffle_id = ?`,
-        [f.slug, f.title, f.prize_description_md, f.total_tickets, f.ticket_price_text, f.drawing_at, f.drawing_location,
-         f.how_to_buy, f.claim_requirements, f.claim_preset, f.beneficiary_text, f.visibility, f.is_published,
-         f.is_latest, kit.sqlTime(), id]);
+      await db.transaction(async (tx) => {
+        await tx.runAsync(`UPDATE raffles SET slug = ?, title = ?, prize_description_md = ?, total_tickets = ?, ticket_price_text = ?,
+            drawing_at = ?, drawing_location = ?, how_to_buy = ?, claim_requirements = ?, claim_preset = ?,
+            beneficiary_text = ?, visibility = ?, is_published = ?, is_latest = ?, updated_at = ? WHERE raffle_id = ?`,
+          [f.slug, f.title, f.prize_description_md, f.total_tickets, f.ticket_price_text, f.drawing_at, f.drawing_location,
+           f.how_to_buy, f.claim_requirements, f.claim_preset, f.beneficiary_text, f.visibility, f.is_published,
+           f.is_latest, kit.sqlTime(), id]);
+        if (f.is_latest) await latest.take(tx, latest.RAFFLE, id);
+      });
       await beneficiaries.write(db, beneficiaries.KIND.raffle, id, r.bens);
       const msg = !req.body.set_status ? 'Raffle saved.'
         : f.visibility === 'published' ? 'Saved and published — it is on the website now.'
@@ -569,18 +580,33 @@ module.exports = function (db, appConfig) {
     const back = `/raffles/${id}`;
     const r = await db.getAsync('SELECT raffle_id FROM raffles WHERE raffle_id = ?', [id]);
     if (!r) return kit.reply(req, res, '/raffles', false, 'Raffle not found.');
+    const capMsg = `A raffle can have at most ${MAX_IMAGES} prize photos.`;
     const c = await db.getAsync('SELECT COUNT(*) AS c FROM raffle_images WHERE raffle_id = ?', [id]);
-    if (c && Number(c.c) >= MAX_IMAGES) return kit.reply(req, res, back, false, `A raffle can have at most ${MAX_IMAGES} prize photos.`);
+    if (c && Number(c.c) >= MAX_IMAGES) return kit.reply(req, res, back, false, capMsg);
     let saved;
     try { saved = await uploads.saveImage(appConfig, 'raffles', req.file && req.file.buffer); }
     catch (err) { return kit.reply(req, res, back, false, err.message || 'Upload failed'); }
+    let inserted = true;
     try {
       const sort = await kit.nextSort(db, 'raffle_images', 'raffle_id', id);
-      await db.runAsync('INSERT INTO raffle_images (raffle_id, path, alt, sort) VALUES (?, ?, ?, ?)',
-        [id, saved.rel, kit.str(req.body && req.body.alt, 300), sort]);
+      // The cap is re-checked INSIDE the insert (two uploads racing past the
+      // pre-check above can't both land). Selecting from the raffle's own row
+      // keeps the statement portable (no FROM-less SELECT … WHERE on MySQL).
+      const r = await db.runAsync(`INSERT INTO raffle_images (raffle_id, path, alt, sort)
+          SELECT ?, ?, ?, ? FROM raffles WHERE raffle_id = ?
+            AND (SELECT COUNT(*) FROM raffle_images WHERE raffle_id = ?) < ?`,
+        [id, saved.rel, kit.str(req.body && req.body.alt, 300), sort, id, id, MAX_IMAGES]);
+      // `changes` is known on every engine outside a transaction (remote
+      // SQLite reads changes() in the same sqlite3 run); if it ever isn't,
+      // the pre-check above is all we have.
+      if (r && r.changes != null) inserted = Number(r.changes) > 0;
     } catch (err) {
       await uploads.removeFiles(appConfig, saved.rel);
       return kit.reply(req, res, back, false, 'Saving failed: ' + (err.message || err));
+    }
+    if (!inserted) {
+      await uploads.removeFiles(appConfig, saved.rel);
+      return kit.reply(req, res, back, false, capMsg);
     }
     kit.reply(req, res, back, true, 'Prize photo added.');
   }));

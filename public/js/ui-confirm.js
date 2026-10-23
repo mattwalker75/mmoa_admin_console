@@ -23,6 +23,8 @@
   }
 
   function onKey(e) {
+    // A held-down key auto-repeats; never let a repeat confirm a destructive dialog.
+    if (e.repeat) return;
     if (e.key === 'Escape') { e.preventDefault(); settle(false); }
     else if (e.key === 'Enter') { e.preventDefault(); settle(true); }
   }

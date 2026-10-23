@@ -20,6 +20,7 @@ const { escapeHtml, jsAttrStr } = require('../views/escapeHtml');
 const { requireAdmin } = require('../middleware/auth');
 const tpl = require('../helpers/templates');
 const { tabsNav } = require('./settings');
+const { yes: kitYes } = require('../helpers/pageKit');
 
 const TEXTAREA_CLS = 'block w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900 shadow-sm focus:border-brand-500 focus:outline-none focus:ring-2 focus:ring-brand-500/30 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100';
 
@@ -93,10 +94,16 @@ module.exports = function (appConfig, appConfigModule) {
         <section class="card surface-target card-pad space-y-3">
           <h2 class="text-base font-semibold text-slate-900 dark:text-slate-100">Where templates are saved</h2>
           <p class="text-xs text-slate-500 dark:text-slate-400">A folder on this admin console's server (one sub-folder per field, one <code>.json</code> file per template). A relative path is inside the console's folder. Changing it doesn't move existing templates — copy the files across yourself.</p>
-          <form method="POST" action="/settings/templates/dir" class="flex items-end gap-2 flex-wrap">
-            <div class="flex-1 min-w-[16rem]"><label class="label" for="tpl-dir">Folder</label>
-              <input id="tpl-dir" class="input font-mono" type="text" name="dir" required maxlength="300" value="${escapeHtml(configured)}"></div>
-            <button type="submit" class="btn-primary">Save folder</button>
+          <form method="POST" action="/settings/templates/dir" class="space-y-2">
+            <div class="flex items-end gap-2 flex-wrap">
+              <div class="flex-1 min-w-[16rem]"><label class="label" for="tpl-dir">Folder</label>
+                <input id="tpl-dir" class="input font-mono" type="text" name="dir" required maxlength="300" value="${escapeHtml(configured)}"></div>
+              <button type="submit" class="btn-primary">Save folder</button>
+            </div>
+            <label class="inline-flex items-center gap-2 text-xs text-slate-600 dark:text-slate-300">
+              <input type="checkbox" name="allow_outside" value="1" class="h-4 w-4">
+              Allow a folder outside the console (full path required). Never the console's <code class="font-mono">public/</code> folder — that is served without a login.
+            </label>
           </form>
           <p class="text-xs text-slate-500 dark:text-slate-400">Currently: <code class="font-mono">${escapeHtml(tpl.baseDir(appConfig))}</code></p>
         </section>
@@ -108,9 +115,27 @@ module.exports = function (appConfig, appConfigModule) {
   router.post('/settings/templates/dir', requireAdmin, (req, res) => {
     const dir = String((req.body && req.body.dir) || '').trim();
     if (!dir || dir.length > 300 || /[\0\n\r]/.test(dir)) return res.redirect(back + '?error=' + encodeURIComponent('Enter a folder path.'));
-    const abs = path.resolve(path.join(__dirname, '..'), dir);
-    try { fs.mkdirSync(abs, { recursive: true }); fs.accessSync(abs, fs.constants.W_OK); }
-    catch (e) { return res.redirect(back + '?error=' + encodeURIComponent(`Can't use that folder: ${e.message}`)); }
+    const root = path.resolve(path.join(__dirname, '..'));
+    const abs = path.resolve(root, dir);
+    const inside = (p, parent) => p === parent || p.startsWith(parent + path.sep);
+    const fail = (msg) => res.redirect(back + '?error=' + encodeURIComponent(msg));
+    // public/ is served to anyone without logging in — templates there would
+    // be readable by the whole internet.
+    const publicDir = path.join(root, 'public');
+    if (inside(abs, publicDir)) return fail("Templates can't live under the console's public/ folder — it is served to everyone, without a login.");
+    // Anywhere outside the console folder needs an absolute path AND the
+    // explicit tick, so a typo (../../etc) can't quietly point elsewhere.
+    if (!inside(abs, root)) {
+      if (!path.isAbsolute(dir)) return fail('A relative path must stay inside the console folder. To use a folder elsewhere, enter its full (absolute) path and tick "Allow a folder outside the console".');
+      if (!kitYes(req.body && req.body.allow_outside)) return fail(`${abs} is outside the console folder. Tick "Allow a folder outside the console" if that is what you want.`);
+    }
+    try {
+      fs.mkdirSync(abs, { recursive: true });
+      fs.accessSync(abs, fs.constants.W_OK);
+      // Resolve symlinks too: a link inside the console that points at
+      // public/ is still public/.
+      if (inside(fs.realpathSync(abs), fs.existsSync(publicDir) ? fs.realpathSync(publicDir) : publicDir)) return fail("Templates can't live under the console's public/ folder (that path resolves there).");
+    } catch (e) { return fail(`Can't use that folder: ${e.message}`); }
     appConfig.templates = Object.assign({}, appConfig.templates, { dir });
     appConfigModule.save();
     res.redirect(back + '?msg=' + encodeURIComponent(`Templates are now saved in ${abs}.`));
@@ -142,7 +167,8 @@ module.exports = function (appConfig, appConfigModule) {
     catch (e) { res.status(500).json({ error: 'Templates could not be read: ' + (e.message || e) }); }
   });
 
-  router.post('/templates/:kind', requireAdmin, express.json({ limit: '32kb' }), (req, res) => {
+  // JSON body: parsed by app.js's express.json (64 KB); tpl.save caps the content.
+  router.post('/templates/:kind', requireAdmin, (req, res) => {
     const kind = req.params.kind;
     if (!KIND_RE.test(kind)) return res.status(404).json({ error: 'Unknown template type' });
     try {

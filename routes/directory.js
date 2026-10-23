@@ -127,7 +127,8 @@ module.exports = function (db, appConfig) {
   });
 
   function listOf(req, res) {
-    const L = LISTS[req.params.list];
+    // Own keys only: ':list' = 'constructor' must not hit Object.prototype.
+    const L = Object.hasOwn(LISTS, req.params.list) ? LISTS[req.params.list] : null;
     if (!L) { res.redirect(back + '?error=Unknown+list'); return null; }
     return L;
   }

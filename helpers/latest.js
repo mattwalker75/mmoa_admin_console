@@ -10,8 +10,13 @@
 //                                   (v.is_latest, v.item_id) — placed inside
 //                                   the form's URL slug field, right under it
 //   holder(db, kind, exceptId)      the row that holds it (other than exceptId)
-//   take(db, kind, id)              clear it on every OTHER row (call before
-//                                   saving the row with is_latest = 1)
+//   take(tx, kind, id)              clear it on every OTHER row. Call it INSIDE
+//                                   the same db.transaction() as the row's
+//                                   INSERT / UPDATE so a failed save can't
+//                                   leave no Latest and two saves can't leave
+//                                   two: update → write the row, then take(id);
+//                                   create → take(0), then INSERT (the new id
+//                                   isn't known inside a remote transaction).
 //   message(prev, kind)             " It is now the Latest … — “X” no longer is."
 //   slugCheck(slug, slugIn, kind)   { slug } or { error } — 'latest' is reserved
 

@@ -7,7 +7,8 @@
 // later deleted (org_id → NULL).
 //
 //   editor(benJson, orgs)        the Alpine list editor (posts beneficiaries_json)
-//   parse(body)                  → { bens } or { error }
+//   parse(body)                  → { bens, json } or { error, json } (json = what
+//                                  to echo back into the editor on an error)
 //   write(db, kind, id, bens)    replace the rows
 //   toJson(rows)                 stored rows → the editor's JSON
 //   KIND.event / KIND.raffle     { table, idCol }
@@ -75,20 +76,30 @@ function editor(benJson, orgs) {
   </div>`;
 }
 
+// → { bens, json } or { error, json }. `json` is what the form should echo
+// back into the editor on a re-render: the rows as posted (normalized) when
+// they could be read, '[]' when the posted JSON was malformed. Re-rendering
+// the malformed string itself would show "No beneficiaries" and a follow-up
+// Save would then wipe the stored rows.
 function parse(b) {
   let bensIn;
-  try { bensIn = JSON.parse(b.beneficiaries_json || '[]'); } catch (e) { return { error: 'Beneficiaries could not be read — reload the page and try again.' }; }
+  try { bensIn = JSON.parse(b.beneficiaries_json || '[]'); }
+  catch (e) { return { error: 'Beneficiaries could not be read — reload the page and try again.', json: '[]' }; }
   if (!Array.isArray(bensIn)) bensIn = [];
+  bensIn = bensIn.slice(0, 30);
+  const json = JSON.stringify(bensIn.map(x => ({
+    org_id: x && x.org_id != null ? String(x.org_id) : '', name: x && x.name != null ? String(x.name) : '', url: x && x.url != null ? String(x.url) : ''
+  })));
   const bens = [];
-  for (const x of bensIn.slice(0, 30)) {
+  for (const x of bensIn) {
     const orgId = kit.idParam(x && x.org_id);
     const name = kit.str(x && x.name, 200);
     const u = kit.urlField(x && x.url, 'Beneficiary link');
-    if (u.error) return { error: u.error };
+    if (u.error) return { error: u.error, json };
     if (!orgId && !name) continue; // blank row
     bens.push({ org_id: orgId, name, url: orgId ? null : u.value });
   }
-  return { bens };
+  return { bens, json };
 }
 
 async function write(db, { table, idCol }, id, bens) {

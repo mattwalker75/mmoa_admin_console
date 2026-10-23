@@ -30,9 +30,12 @@ const { escapeHtml } = require('../views/escapeHtml');
 const { requireAdmin } = require('../middleware/auth');
 const webAppAccess = require('../helpers/webAppAccess');
 const waConfig = require('../helpers/webAppConfig');
+const uploads = require('../helpers/webAppUploads');
 
 // Image uploads are buffered in memory then written to the Web App via
 // the transport (so the same code path works for local / SSH / EC2-SSM).
+// The mimetype filter is only a first pass — the real check is sniffImage()
+// on the bytes, after multer.
 const imageUpload = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: 8 * 1024 * 1024, files: 1 },
@@ -44,6 +47,31 @@ const imageUpload = multer({
 }).single('image');
 
 const IMAGE_EXT = /\.(png|jpe?g|gif|webp|svg)$/i;
+
+// What the bytes really are, by magic bytes (JPEG / PNG / WebP via
+// webAppUploads.sniffExt, GIF87a / GIF89a, and SVG — text that opens with an
+// <svg> element, optionally after a BOM / XML declaration / comments).
+// Returns { kind, exts, mimes } or null. SVG is kept because the site's
+// fragments may embed vector art; it is admin-only (this page needs a
+// console login) and the web app serves it as a static file — an SVG can
+// carry script, so only operators ever upload here.
+const SNIFF = {
+  jpg: { exts: ['jpg', 'jpeg'], mimes: ['image/jpeg', 'image/jpg'] },
+  png: { exts: ['png'], mimes: ['image/png'] },
+  webp: { exts: ['webp'], mimes: ['image/webp'] },
+  gif: { exts: ['gif'], mimes: ['image/gif'] },
+  svg: { exts: ['svg'], mimes: ['image/svg+xml'] }
+};
+function sniffImage(buf) {
+  if (!Buffer.isBuffer(buf) || buf.length < 6) return null;
+  const ext = uploads.sniffExt(buf);
+  if (ext) return Object.assign({ kind: ext }, SNIFF[ext]);
+  const head6 = buf.subarray(0, 6).toString('latin1');
+  if (head6 === 'GIF87a' || head6 === 'GIF89a') return Object.assign({ kind: 'gif' }, SNIFF.gif);
+  const text = buf.subarray(0, 4096).toString('utf8').replace(/^\uFEFF/, '').replace(/<!--[\s\S]*?-->/g, '').trim();
+  if (/^(<\?xml[^>]*\?>\s*)?(<!DOCTYPE[^>]*>\s*)?<svg[\s>]/i.test(text)) return Object.assign({ kind: 'svg' }, SNIFF.svg);
+  return null;
+}
 
 // Single-quote a string for POSIX sh (for the ls / rm / mkdir calls below).
 function shq(s) { return `'` + String(s).replace(/'/g, `'\\''`) + `'`; }
@@ -272,6 +300,7 @@ function makeRouter(appConfig) {
 
     let notConfigured = false;
     let accessDesc = '';
+    let readErr = null;
     let cards = '';
     let publicBaseUrl = '';
     let maintenanceCommand = '';
@@ -288,10 +317,19 @@ function makeRouter(appConfig) {
       const fragPaths = SECTIONS.map(s => waConfig.joinPath(accessor.appPath, 'HTML/' + s.key + '.html'));
       const cfgPath = waConfig.joinPath(accessor.appPath, 'config.json');
       const imgDir = imagesDirOf(accessor);
-      const bundle = await accessor.readBundle(
-        { files: [...fragPaths, cfgPath], dirs: [imgDir] },
-        { encoding: 'utf8' }
-      );
+      // A transport failure (SSH refused, SSM credentials, …) renders the
+      // page with the error on every card instead of a bare 500.
+      let bundle;
+      try {
+        bundle = await accessor.readBundle(
+          { files: [...fragPaths, cfgPath], dirs: [imgDir] },
+          { encoding: 'utf8' }
+        );
+      } catch (e) {
+        readErr = e.message || String(e);
+        bundle = { files: {}, dirs: {} };
+        for (const p of fragPaths) bundle.files[p] = { content: null, missing: false, err: readErr };
+      }
 
       const results = SECTIONS.map((s, i) => {
         const f = bundle.files[fragPaths[i]] || { content: null, missing: true, err: null };
@@ -329,6 +367,8 @@ function makeRouter(appConfig) {
 
     const banner = notConfigured
       ? `<div class="flash-error mb-6"><strong class="font-semibold">Web App access is not configured.</strong> Set how this console reaches the Web App under <a class="underline" href="/settings/web-app">Settings → Web App</a> first.</div>`
+      : readErr
+      ? `<div class="flash-error mb-6"><strong class="font-semibold">Could not reach the Web App.</strong> ${escapeHtml(readErr)} (via ${escapeHtml(accessDesc)}). Check <a class="underline" href="/settings/web-app">Settings → Web App</a>.</div>`
       : `<div class="mb-6 text-xs text-slate-500 dark:text-slate-400">Editing <code class="font-mono">HTML/</code> fragments via ${escapeHtml(accessDesc)}. Saved changes go live on the next page load — no restart needed. Leave <code class="font-mono">{{tokens}}</code> in place; the Web App fills them at serve time.</div>`;
 
     let previewV = '';
@@ -358,6 +398,16 @@ function makeRouter(appConfig) {
       if (!req.file) return res.redirect('/web-app-website?error=' + encodeURIComponent('No file received.'));
       const name = sanitizeImageName(req.file.originalname);
       if (!name) return res.redirect('/web-app-website?error=' + encodeURIComponent('Invalid filename.'));
+      // The bytes decide. The browser's Content-Type and the filename's
+      // extension must agree with them, so a renamed / mislabelled file (or
+      // one that isn't an image at all) is refused rather than published.
+      const sniffed = sniffImage(req.file.buffer);
+      if (!sniffed) return res.redirect('/web-app-website?error=' + encodeURIComponent('That file is not a PNG, JPEG, GIF, WebP or SVG image.'));
+      const extM = /\.([A-Za-z0-9]+)$/.exec(name);
+      const ext = extM ? extM[1].toLowerCase() : '';
+      if (!sniffed.exts.includes(ext) || !sniffed.mimes.includes(String(req.file.mimetype || '').toLowerCase())) {
+        return res.redirect('/web-app-website?error=' + encodeURIComponent(`The file's contents are ${sniffed.kind.toUpperCase()}, but its name / type say otherwise — rename it with a .${sniffed.exts[0]} extension and try again.`));
+      }
       try {
         const accessor = webAppAccess.createAccessorFromConfig(appConfig);
         // writeFileChunked: mkdir -p + atomic write, and on EC2 the file goes

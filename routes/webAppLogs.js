@@ -25,6 +25,8 @@ const webAppAccess = require('../helpers/webAppAccess');
 const LOG_REL_PATH = 'logs/app.log';
 const LINE_OPTIONS = [100, 500, 2000, 10000];
 const DEFAULT_LINES = 500;
+// EC2 only: keep the END of the tail under SSM's ~24,000-char output cap.
+const SSM_TAIL_BYTES = webAppAccess.SSM_OUTPUT_CAP_CHARS;
 
 const PRE_CLS = 'font-mono text-xs leading-relaxed whitespace-pre-wrap break-all ' +
   'max-h-[70vh] overflow-auto rounded-lg border p-3 ' +
@@ -54,7 +56,7 @@ function controlsBar(lines) {
   </div>`;
 }
 
-function renderBody({ logText, lines, readErr, notConfigured, accessDesc }) {
+function renderBody({ logText, lines, readErr, notConfigured, accessDesc, truncated }) {
   let banner;
   if (notConfigured) {
     banner = `<div class="flash-error mb-6"><strong class="font-semibold">Web App access is not configured.</strong> Set how this console reaches the Web App under <a class="underline" href="/settings/web-app">Settings → Web App</a> first.</div>`;
@@ -62,6 +64,9 @@ function renderBody({ logText, lines, readErr, notConfigured, accessDesc }) {
     banner = `<div class="flash-error mb-6"><strong class="font-semibold">Could not read the log.</strong> ${escapeHtml(readErr)}</div>`;
   } else {
     banner = `<div class="mb-4 text-xs text-slate-500 dark:text-slate-400">Showing the last ${lines} lines of <code class="font-mono">${escapeHtml(LOG_REL_PATH)}</code> via ${escapeHtml(accessDesc)}.</div>`;
+    if (truncated) {
+      banner += `<div class="flash-warn mb-4 text-sm"><strong class="font-semibold">Truncated to the last ~23 KB by AWS SSM.</strong> SSM returns at most ~24 KB of output per command, so only the end of those ${lines} lines is shown (the first line may start mid-way). Choose fewer lines to see whole entries.</div>`;
+    }
   }
 
   // The <pre> auto-scrolls to the bottom on load so the newest lines show
@@ -88,7 +93,7 @@ module.exports = function (appConfig) {
     let lines = parseInt(req.query.lines, 10);
     if (!LINE_OPTIONS.includes(lines)) lines = DEFAULT_LINES;
 
-    let logText = '', readErr = null, notConfigured = false, accessDesc = '';
+    let logText = '', readErr = null, notConfigured = false, accessDesc = '', truncated = false;
 
     if (!webAppAccess.isConfigured(appConfig)) {
       notConfigured = true;
@@ -98,7 +103,12 @@ module.exports = function (appConfig) {
         accessDesc = accessor.describe();
         // Run from the install dir so the relative logs/app.log resolves the
         // same way the Web App's own scripts reference it.
-        const r = await accessor.runCommand(`tail -n ${lines} ${LOG_REL_PATH}`, {
+        // EC2: SSM returns only the FIRST ~24,000 chars of stdout, which for
+        // a tail would be the OLDEST part. Cut to the last ~23 KB on the host
+        // so the end of the log is what survives.
+        const ec2 = accessor.mode === 'ec2';
+        const cmd = `tail -n ${lines} ${LOG_REL_PATH}` + (ec2 ? ` | tail -c ${SSM_TAIL_BYTES}` : '');
+        const r = await accessor.runCommand(cmd, {
           cwd: accessor.appPath || undefined,
           timeoutMs: 30000,
           comment: 'web app logs'
@@ -107,6 +117,7 @@ module.exports = function (appConfig) {
           readErr = 'Timed out reading the log from the Web App host.';
         } else if (r.code === 0) {
           logText = r.stdout || '';
+          truncated = ec2 && (logText.length >= SSM_TAIL_BYTES || !!r.truncated);
         } else {
           readErr = (r.stderr || '').trim() ||
             `Could not read ${LOG_REL_PATH} (exit ${r.code}). Check that the file exists and the Web App directory path is correct.`;
@@ -116,7 +127,7 @@ module.exports = function (appConfig) {
       }
     }
 
-    const body = renderBody({ logText, lines, readErr, notConfigured, accessDesc });
+    const body = renderBody({ logText, lines, readErr, notConfigured, accessDesc, truncated });
     res.send(page({ title: 'Web App Logs', body, appConfig, user, activeNav: 'web-app-logs' }));
   });
 

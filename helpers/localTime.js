@@ -49,6 +49,11 @@ function localInputToUtc(value, appConfig) {
   const zone = zoneOf(appConfig);
   const guess = Date.UTC(+m[1], +m[2] - 1, +m[3], +m[4], +m[5], +(m[6] || 0));
   if (!Number.isFinite(guess)) return undefined;
+  // Date.UTC rolls out-of-range fields over (2026-02-31 → March 3, 25:00 →
+  // next day 01:00); the input is only valid if it reads back unchanged.
+  const g = new Date(guess);
+  if (g.getUTCFullYear() !== +m[1] || g.getUTCMonth() !== +m[2] - 1 || g.getUTCDate() !== +m[3] ||
+      g.getUTCHours() !== +m[4] || g.getUTCMinutes() !== +m[5] || g.getUTCSeconds() !== +(m[6] || 0)) return undefined;
   // Two passes settle the offset across a DST boundary.
   let utc = guess - offsetAt(guess, zone);
   utc = guess - offsetAt(utc, zone);

@@ -88,6 +88,8 @@ const statusButtons = (current) => vis.buttons(current, { formId: 'ev-form', nou
 const statusSwitch = (current) => vis.switcher(current, { formId: 'ev-form', noun: 'event' });
 
 const SLOTS = { flyer: 'flyer_path', cover: 'cover_path' };
+// Own keys only: req.params.slot = 'constructor' must not hit Object.prototype.
+const slotCol = (slot) => (Object.hasOwn(SLOTS, slot) ? SLOTS[slot] : null);
 const TEXTAREA_CLS = 'block w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900 shadow-sm focus:border-brand-500 focus:outline-none focus:ring-2 focus:ring-brand-500/30 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100';
 
 const EVENT_COLS = `event_id, slug, title, summary, description_md, starts_at, ends_at, venue_name,
@@ -109,6 +111,10 @@ function readForm(b, appConfig) {
     is_latest: kit.yes(b.is_latest), item_id: b._item_id || ''
   };
   const fail = (error) => ({ values, error });
+  // Beneficiaries: whatever else fails below, the form echoes the rows as
+  // parsed (or '[]' when the posted JSON is unreadable) — never the raw string.
+  const parsed = beneficiaries.parse(b);
+  if (parsed.json !== undefined) values.bens_json = parsed.json;
 
   const title = kit.str(b.title, 200);
   if (!title) return fail('Title is required.');
@@ -131,7 +137,6 @@ function readForm(b, appConfig) {
   const reg = kit.urlField(b.registration_url, 'Registration link');
   if (reg.error) return fail(reg.error);
 
-  const parsed = beneficiaries.parse(b);
   if (parsed.error) return fail(parsed.error);
   const bens = parsed.bens;
 
@@ -429,14 +434,19 @@ module.exports = function (db, appConfig) {
     try {
       f.slug = await kit.uniqueSlug(db, 'events', 'event_id', f.slug, 0);
       const prevLatest = f.is_latest ? await latest.holder(db, latest.EVENT, 0) : null;
-      if (f.is_latest) await latest.take(db, latest.EVENT, 0);
       const now = kit.sqlTime();
-      const ins = await db.runAsync(`INSERT INTO events (slug, title, summary, description_md, starts_at, ends_at, venue_name,
-          address, city, map_url, registration_url, registration_label, registration_note, beneficiaries_text,
-          is_published, status, is_latest, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        [f.slug, f.title, f.summary, f.description_md, f.starts_at, f.ends_at, f.venue_name, f.address, f.city,
-         f.map_url, f.registration_url, f.registration_label, f.registration_note, f.beneficiaries_text,
-         f.is_published, f.status, f.is_latest, now, now]);
+      // Clearing Latest elsewhere and inserting the row happen in ONE
+      // transaction: a failed insert leaves the old holder in place.
+      const ins = await db.transaction(async (tx) => {
+        if (f.is_latest) await latest.take(tx, latest.EVENT, 0);
+        return tx.runAsync(`INSERT INTO events (slug, title, summary, description_md, starts_at, ends_at, venue_name,
+            address, city, map_url, registration_url, registration_label, registration_note, beneficiaries_text,
+            is_published, status, is_latest, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          [f.slug, f.title, f.summary, f.description_md, f.starts_at, f.ends_at, f.venue_name, f.address, f.city,
+           f.map_url, f.registration_url, f.registration_label, f.registration_note, f.beneficiaries_text,
+           f.is_published, f.status, f.is_latest, now, now]);
+      });
+      // Remote SQLite can't report lastID from inside a transaction → by slug.
       let id = ins && ins.lastID ? Number(ins.lastID) : null;
       if (!id) { const row = await db.getAsync('SELECT event_id FROM events WHERE slug = ?', [f.slug]); id = row && Number(row.event_id); }
       if (r.bens.length) await writeBeneficiaries(id, r.bens);
@@ -512,15 +522,18 @@ module.exports = function (db, appConfig) {
       const exists = await db.getAsync('SELECT event_id FROM events WHERE event_id = ?', [id]);
       if (!exists) return res.redirect('/events?error=Event+not+found');
       f.slug = await kit.uniqueSlug(db, 'events', 'event_id', f.slug, id);
-      // Latest is one event only: clear it elsewhere before setting it here.
+      // Latest is one event only: the save and the clearing of Latest on
+      // every other event are one transaction (helpers/latest.js).
       const prevLatest = f.is_latest ? await latest.holder(db, latest.EVENT, id) : null;
-      if (f.is_latest) await latest.take(db, latest.EVENT, id);
-      await db.runAsync(`UPDATE events SET slug = ?, title = ?, summary = ?, description_md = ?, starts_at = ?, ends_at = ?,
-          venue_name = ?, address = ?, city = ?, map_url = ?, registration_url = ?, registration_label = ?,
-          registration_note = ?, beneficiaries_text = ?, is_published = ?, status = ?, is_latest = ?, updated_at = ? WHERE event_id = ?`,
-        [f.slug, f.title, f.summary, f.description_md, f.starts_at, f.ends_at, f.venue_name, f.address, f.city,
-         f.map_url, f.registration_url, f.registration_label, f.registration_note, f.beneficiaries_text,
-         f.is_published, f.status, f.is_latest, kit.sqlTime(), id]);
+      await db.transaction(async (tx) => {
+        await tx.runAsync(`UPDATE events SET slug = ?, title = ?, summary = ?, description_md = ?, starts_at = ?, ends_at = ?,
+            venue_name = ?, address = ?, city = ?, map_url = ?, registration_url = ?, registration_label = ?,
+            registration_note = ?, beneficiaries_text = ?, is_published = ?, status = ?, is_latest = ?, updated_at = ? WHERE event_id = ?`,
+          [f.slug, f.title, f.summary, f.description_md, f.starts_at, f.ends_at, f.venue_name, f.address, f.city,
+           f.map_url, f.registration_url, f.registration_label, f.registration_note, f.beneficiaries_text,
+           f.is_published, f.status, f.is_latest, kit.sqlTime(), id]);
+        if (f.is_latest) await latest.take(tx, latest.EVENT, id);
+      });
       await writeBeneficiaries(id, r.bens);
       const msg = !req.body.set_status ? 'Event saved.'
         : f.status === 'published' ? 'Saved and published — it is on the website now.'
@@ -563,7 +576,7 @@ module.exports = function (db, appConfig) {
   // ── Flyer / cover ───────────────────────────────────────────────────
   router.post('/events/:id/image/:slot', requireAdmin, kit.withImage((req) => `/events/${encodeURIComponent(req.params.id)}`, async (req, res) => {
     const id = kit.idParam(req.params.id);
-    const col = SLOTS[req.params.slot];
+    const col = slotCol(req.params.slot);
     const back = `/events/${id}`;
     if (!id || !col) return kit.reply(req, res, '/events', false, 'Unknown image slot.');
     const e = await db.getAsync(`SELECT event_id, ${col} AS old FROM events WHERE event_id = ?`, [id]);
@@ -583,7 +596,7 @@ module.exports = function (db, appConfig) {
 
   router.post('/events/:id/image/:slot/remove', requireAdmin, async (req, res) => {
     const id = kit.idParam(req.params.id);
-    const col = SLOTS[req.params.slot];
+    const col = slotCol(req.params.slot);
     if (!id || !col) return res.redirect('/events?error=Unknown+image');
     try {
       const e = await db.getAsync(`SELECT ${col} AS old FROM events WHERE event_id = ?`, [id]);
