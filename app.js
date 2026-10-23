@@ -25,6 +25,7 @@ const appConfigModule = require('./config/appConfig');
 const { appConfig } = appConfigModule;
 const { init: initDb } = require('./db/database');
 const { enforceInputLimits } = require('./middleware/inputLimits');
+const { csrfProtection } = require('./middleware/csrf');
 const localAdmins = require('./helpers/localAdmins');
 const { escapeHtml } = require('./views/escapeHtml');
 
@@ -47,6 +48,12 @@ const servesHttps = !!(appConfig.server && appConfig.server.ssl) ||
 if (appConfig.security && appConfig.security.headers && appConfig.security.headers.enabled !== false) {
   app.use(helmet({
     strictTransportSecurity: servesHttps,
+    // Helmet's default is `no-referrer`, under which browsers serialise the
+    // Origin header of a same-origin form POST (navigation, not fetch) as
+    // the literal `null` — which the cross-site check below would refuse,
+    // login form included. `same-origin` keeps the Referer inside the
+    // console (nothing is sent to other sites) and keeps Origin intact.
+    referrerPolicy: { policy: 'same-origin' },
     contentSecurityPolicy: appConfig.security.headers.contentSecurityPolicy === false ? false : {
       directives: {
         defaultSrc: ["'self'"],
@@ -113,11 +120,16 @@ app.use(cookieSession({
 }));
 
 // ── Cross-site request check (CSRF defence in depth) ──────────────────────
-// There is no CSRF token; the cookie is SameSite=strict and the CSP has
-// form-action 'self'. On top of that, a state-changing request that a
-// browser labels as coming from somewhere else is refused here:
+// First of the CSRF layers (the per-session token check, middleware/csrf.js,
+// is mounted further down once the body parsers have run; the cookie is
+// SameSite=strict and the CSP has form-action 'self'). A state-changing
+// request that a browser labels as coming from somewhere else is refused
+// here before its body is even parsed:
 //   * Origin present and not this host  → 403 (a cross-site form post /
-//     fetch; 'null' counts as foreign)
+//     fetch; 'null' counts as foreign — unless the browser itself labels
+//     the request Sec-Fetch-Site: same-origin, a header only the browser
+//     sets, which is how a same-origin form POST looks under a
+//     `no-referrer` referrer policy; see the helmet referrerPolicy note)
 //   * Sec-Fetch-Site present and neither same-origin nor none → 403
 //     ('none' = typed URL / bookmark; 'same-site' is a sibling subdomain,
 //     which is still not this console)
@@ -130,7 +142,7 @@ app.use((req, res, next) => {
   const origin = req.get('origin');
   const fetchSite = (req.get('sec-fetch-site') || '').toLowerCase();
   let reason = null;
-  if (origin !== undefined) {
+  if (origin !== undefined && !(origin === 'null' && fetchSite === 'same-origin')) {
     let originHost = null;
     try { originHost = new URL(origin).host.toLowerCase(); } catch (e) { originHost = null; }
     // req.host honours X-Forwarded-Host only when trust proxy is set.
@@ -197,6 +209,19 @@ app.use((req, res, next) => {
   next();
 });
 
+// ── CSRF token (middleware/csrf.js) ──────────────────────────────────────
+// Mints req.session.csrf on first sight and, for POST / PUT / PATCH /
+// DELETE, requires it back as the X-CSRF-Token header or the _csrf body
+// field (403 otherwise). It sits after cookie-session and the urlencoded /
+// JSON parsers (so a plain form's _csrf field is readable) and before every
+// route, including the multer ones — a multipart body isn't parsed yet
+// here, so uploads send the header (public/js/csrf.js does that for every
+// fetch and re-submits the native multipart forms through fetch). The
+// setup gate below is covered too: /setup renders through page(), so its
+// form carries the token. Static files were served above, so they never
+// start a session.
+app.use(csrfProtection);
+
 // ── First-run setup gate ────────────────────────────────────────────────
 // While zero local admins exist, redirect every non-static, non-/setup
 // request to /setup so the operator is forced to create the break-glass
@@ -238,6 +263,7 @@ app.use('/', require('./routes/nonprofits')(db, appConfig));
 app.use('/', require('./routes/directory')(db, appConfig));
 app.use('/', require('./routes/board')(db, appConfig));
 app.use('/', require('./routes/admin')(db, appConfig));
+app.use('/', require('./routes/audit')(db, appConfig));
 
 app.use((req, res) => {
   res.status(404).send(`<!DOCTYPE html><html><head><title>Not found</title>
@@ -263,7 +289,6 @@ app.use((err, req, res, next) => {
   const wantsJson = (req.get('accept') || '').includes('application/json') ||
                     (req.get('content-type') || '').includes('application/json') ||
                     (req.get('x-requested-with') === 'XMLHttpRequest');
-app.use('/', require('./routes/audit')(db, appConfig));
   if (wantsJson) return res.status(status).json({ ok: false, success: false, error: safeMsg });
   res.status(status).send(`<!DOCTYPE html><html><head><title>Error</title>
     <link rel="stylesheet" href="/css/tailwind.css"></head>

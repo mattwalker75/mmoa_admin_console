@@ -10,7 +10,8 @@
     "watch:css": "tailwindcss -i ./tailwind.input.css -o ./public/css/tailwind.css --watch",
     "copy:alpine": "node -e \"require('fs').copyFileSync('node_modules/alpinejs/dist/cdn.min.js', 'public/js/alpine.min.js')\"",
     "copy:fonts": "node -e \"const f=require('fs');f.mkdirSync('public/fonts',{recursive:true});for(const [p,n] of [['saira-condensed','saira-condensed-latin-700-normal'],['saira-condensed','saira-condensed-latin-800-normal'],['barlow','barlow-latin-500-normal'],['barlow','barlow-latin-700-normal']])f.copyFileSync('node_modules/@fontsource/'+p+'/files/'+n+'.woff2','public/fonts/'+n+'.woff2')\"",
-    "copy:flatpickr": "node -e \"const f=require('fs');f.copyFileSync('node_modules/flatpickr/dist/flatpickr.min.js','public/js/flatpickr.min.js');f.copyFileSync('node_modules/flatpickr/dist/flatpickr.min.css','public/css/flatpickr.min.css')\""
+    "copy:flatpickr": "node -e \"const f=require('fs');f.copyFileSync('node_modules/flatpickr/dist/flatpickr.min.js','public/js/flatpickr.min.js');f.copyFileSync('node_modules/flatpickr/dist/flatpickr.min.css','public/css/flatpickr.min.css')\"",
+    "audit": "npm audit --omit=dev"
   },
   "type": "commonjs",
   "_dependencies_info": {

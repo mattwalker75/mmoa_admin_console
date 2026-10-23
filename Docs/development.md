@@ -36,6 +36,18 @@ Useful scripts in [package.json](../package.json):
 | `npm run build:css` | Compile `tailwind.input.css` → `public/css/tailwind.css`      |
 | `npm run watch:css` | Same, but watch source files for changes                      |
 | `npm run copy:alpine` | Copy Alpine bundle from `node_modules` into `public/js/`    |
+| `npm run audit`     | `npm audit --omit=dev` — known vulnerabilities in the production dependencies |
+
+### Dependency check at start
+
+`./START_APP.sh` runs `npm audit --omit=dev --audit-level=high` (capped
+at 30 s) between `npm install` and `npm start`. It never blocks the
+start: if high / critical advisories exist it prints a `WARNING` block
+with the report and boots anyway; offline, slow, or no `npm audit`
+→ one `[audit] skipped …` line. Fix a reported package with
+`npm audit fix` (or bump it in `package.json`), re-run
+`npm run audit` to confirm, and restart. `npm run audit` on its own
+shows everything down to `low`.
 
 During active CSS work, leave `npm run watch:css` running in one
 terminal and `node app.js` in another. The cache-buster on the
@@ -146,6 +158,21 @@ The full flow takes about 5 minutes.
 5. **Restart the server.** Route files are `require`d once at boot;
    changes won't take effect until restart.
 
+**CSRF — nothing to add.** Every `POST` / `PUT` / `PATCH` / `DELETE`
+must carry the session's CSRF token ([Docs/security.md](security.md)),
+and `page()` takes care of it: it puts `<meta name="csrf-token">` in
+`<head>` and a hidden `_csrf` input in every `<form method="POST">` of
+the rendered page. A plain form just works; a `fetch` from an Alpine
+handler or a `public/js` file gets the `X-CSRF-Token` header from the
+global `window.fetch` wrapper in `public/js/csrf.js`. The only
+exception is a new `multipart/form-data` form: the server checks the
+token before multer parses the body, so send the header — either call
+`window.macUploadImage` / `fetch` yourself, or just let the form submit
+natively and `csrf.js` re-submits it through `fetch` and follows the
+redirect. Never read `req.body._csrf` in a handler (it is removed before
+the handler runs), and don't render a page without `page()` — it would
+have no token and its forms would be refused with 403.
+
 ## How to add an Alpine interaction
 
 Alpine v3 is loaded once on every page (see
@@ -170,6 +197,13 @@ Two things to remember:
      …
    </div>
    ```
+
+3. **`fetch` calls are CSRF-safe as written.** Call the global
+   `fetch(...)` for a `POST` and the wrapper in `public/js/csrf.js` adds
+   the `X-CSRF-Token` header for you. Don't cache `window.fetch` into a
+   local before the page loads, and don't reach for `XMLHttpRequest` or
+   `navigator.sendBeacon` — neither gets the header, and the server
+   answers 403.
 
 ## How to style something new
 
@@ -367,7 +401,9 @@ If you ever tighten CSP, remember:
   for subsystem tags: `[db]`, `[settings]`, `[nonprofits]`, `[events]`, `[raffles]`,
   `[uploads]`, `[data]`,
   `[reports]`, `[login]`, `[profile]`, `[admin]`, `[setup]`,
-  `[backup]`, `[boot]`, `[session]`, `[localAdmins]`.
+  `[backup]`, `[boot]`, `[session]`, `[localAdmins]`, `[csrf]` (a
+  refused cross-site request or a missing / wrong CSRF token — see
+  [security.md](security.md)).
 - **Alpine devtools.** The browser DevTools console can inspect any
   element's `_x_dataStack` to see Alpine's current state for that
   scope. Or just sprinkle `console.log` inside an `x-init` /

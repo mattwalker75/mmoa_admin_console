@@ -11,6 +11,11 @@
 //
 // External file (not inline) because the CSP has no 'unsafe-inline'.
 //
+// CSRF: the upload below calls the global fetch(), which public/js/csrf.js
+// (loaded before this file) wraps to add the X-CSRF-Token header — the
+// server checks the token before multer parses a multipart body, so the
+// header is the only way an upload can carry it. Nothing to do here.
+//
 //   window.macResizeImage(file, opts?)          → Promise<Blob|File>
 //   window.macUploadImage(url, file, fields?)   → Promise<{ ok, error?, message? }>
 (function () {

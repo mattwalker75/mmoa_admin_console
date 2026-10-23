@@ -12,6 +12,7 @@
 const fs = require('fs');
 const path = require('path');
 const { escapeHtml } = require('./escapeHtml');
+const { currentToken: currentCsrfToken } = require('../middleware/csrf');
 
 // Cache-bust /css/tailwind.css and /js/alpine.min.js using the file mtime
 // so the browser always picks up freshly-built assets without needing a
@@ -66,6 +67,57 @@ function themeCss(appConfig, isLoginPage) {
   return `<style>${bg}${op}</style>`;
 }
 
+// ── CSRF token plumbing (see middleware/csrf.js) ─────────────────────────
+// The token reaches the browser two ways, both done here so no route has to
+// think about it: a <meta name="csrf-token"> in <head> (public/js/csrf.js
+// turns it into an X-CSRF-Token header on every state-changing fetch) and a
+// hidden _csrf input added to every <form method="POST"> in the finished
+// page. Forms without a method (GET) are left alone.
+function csrfHead(token) {
+  return `<meta name="csrf-token" content="${escapeHtml(token)}">
+  <script src="/js/csrf.js?v=${assetVer('js/csrf.js')}"></script>`;
+}
+
+// Read a <form …> tag's attributes. Values may hold anything — an Alpine
+// x-on:submit expression with "=>" for instance — so this walks quoted
+// values rather than stopping at the first ">".
+const ATTR_RE = /([^\s"'>\/=]+)(?:\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'>]+)))?/g;
+function formTagEnd(html, start) {
+  let quote = null;
+  for (let i = start; i < html.length; i++) {
+    const ch = html[i];
+    if (quote) { if (ch === quote) quote = null; }
+    else if (ch === '"' || ch === "'") quote = ch;
+    else if (ch === '>') return i;
+  }
+  return -1;
+}
+function formMethod(tagInner) {
+  ATTR_RE.lastIndex = 0;
+  let m;
+  while ((m = ATTR_RE.exec(tagInner))) {
+    if (m[1].toLowerCase() === 'method') return (m[2] ?? m[3] ?? m[4] ?? '').trim().toLowerCase();
+  }
+  return 'get';
+}
+function injectCsrfInputs(html, token) {
+  if (!token) return html;
+  const input = `<input type="hidden" name="_csrf" value="${escapeHtml(token)}">`;
+  let out = '';
+  let pos = 0;
+  const re = /<form(?=[\s>\/])/gi;
+  let m;
+  while ((m = re.exec(html))) {
+    const end = formTagEnd(html, m.index + 5);
+    if (end < 0) break;
+    out += html.slice(pos, end + 1);
+    if (formMethod(html.slice(m.index + 5, end)) === 'post') out += input;
+    pos = end + 1;
+    re.lastIndex = pos;
+  }
+  return out + html.slice(pos);
+}
+
 function navItem(href, label, icon, isActive) {
   const cls = isActive ? 'nav-item active' : 'nav-item';
   return `<a class="${cls}" href="${href}">
@@ -97,6 +149,7 @@ function sidebar(appConfig, user, activeNav) {
       ${navItem('/data', 'Data Browser', '▦', activeNav === 'data')}
       ${navItem('/locked-users', 'Locked Users', '🔒', activeNav === 'locked-users')}
       ${navItem('/reports', 'Reports', '▤', activeNav === 'reports')}
+      ${navItem('/audit', 'Audit log', '≡', activeNav === 'audit')}
       <hr class="my-2 border-t-2 border-slate-600">
       ${navItem('/web-app-website', 'Web App Website', '🖥', activeNav === 'web-app-website')}
       ${navItem('/web-app-logs', 'Web App Logs', '📄', activeNav === 'web-app-logs')}
@@ -124,14 +177,17 @@ function page({ title, body, appConfig, user, activeNav }) {
     : escapeHtml(appConfig.appTitle || 'MMoA Admin Console');
   const isLoginPage = !user;
   const themeMode = (appConfig.theme && appConfig.theme.mode) === 'dark' ? 'dark' : '';
+  // Per-session CSRF token for this request ('' outside a request).
+  const csrf = currentCsrfToken();
 
   if (isLoginPage) {
-    return `<!DOCTYPE html>
+    return injectCsrfInputs(`<!DOCTYPE html>
 <html lang="en" class="${themeMode}">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>${fullTitle}</title>
+  ${csrfHead(csrf)}
   <link rel="stylesheet" href="/css/tailwind.css?v=${assetVer('css/tailwind.css')}">
   ${themeCss(appConfig, true)}
   <script defer src="/js/alpine.min.js?v=${assetVer('js/alpine.min.js')}"></script>
@@ -141,18 +197,20 @@ function page({ title, body, appConfig, user, activeNav }) {
 ${body}
   </div>
 </body>
-</html>`;
+</html>`, csrf);
   }
 
-  return `<!DOCTYPE html>
+  return injectCsrfInputs(`<!DOCTYPE html>
 <html lang="en" class="${themeMode}">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>${fullTitle}</title>
+  ${csrfHead(csrf)}
   <link rel="stylesheet" href="/css/tailwind.css?v=${assetVer('css/tailwind.css')}">
   ${themeCss(appConfig, false)}
   <link rel="stylesheet" href="/css/flatpickr.min.css?v=${assetVer('css/flatpickr.min.css')}">
+  <!-- csrf.js above is loaded first (not deferred) so the fetch wrapper is in place for everything below. -->
   <script defer src="/js/image-upload.js?v=${assetVer('js/image-upload.js')}"></script>
   <!-- Date pickers run before Alpine (deferred scripts run in order). -->
   <script defer src="/js/flatpickr.min.js?v=${assetVer('js/flatpickr.min.js')}"></script>
@@ -170,7 +228,7 @@ ${body}
   </main>
   ${confirmDialog()}
 </body>
-</html>`;
+</html>`, csrf);
 }
 
 // Prompt to restart the Web App after its config.json was written — by any

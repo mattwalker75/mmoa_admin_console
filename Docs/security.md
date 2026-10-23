@@ -249,25 +249,85 @@ defined in [app.js](../app.js):
 any cross-origin embeds and turning it on breaks the embedded
 self-hosted Alpine bundle in some browsers.
 
-## Cross-site request check (CSRF)
+## Cross-site request forgery (CSRF)
 
-There is no CSRF token. Three layers stand in for one:
+Four layers, each independent of the others:
 
-1. the session cookie is `SameSite=strict`, so a browser doesn't send it
-   on a request started from another site;
-2. the CSP `form-action 'self'` stops the console's own pages posting
-   elsewhere;
-3. a middleware in [app.js](../app.js) refuses (403, logged as
-   `[csrf] refused …`) any `POST` / `PUT` / `PATCH` / `DELETE` whose
-   `Origin` header names a host other than the request's own (`'null'`
-   counts as foreign), or whose `Sec-Fetch-Site` is neither
-   `same-origin` nor `none`.
+1. **A per-session CSRF token** ([middleware/csrf.js](../middleware/csrf.js)).
+   32 random bytes (hex) stored in the signed session cookie as
+   `req.session.csrf`. It is minted lazily on the first request that has
+   none — the login page needs one before anyone is signed in — kept
+   across login (the cookie is signed and there is no server-side store
+   to rotate against) and dropped with the session on logout, so the
+   next visit gets a fresh one. Every `POST` / `PUT` / `PATCH` / `DELETE`
+   must send it back, either as the `X-CSRF-Token` header or as the
+   `_csrf` form field, and it is compared with `crypto.timingSafeEqual`.
+   A missing or wrong token is refused with 403 — JSON
+   `{ ok: false, error: 'Invalid or missing CSRF token — reload the page
+   and try again.' }` for JSON / XHR callers, a short HTML page with a
+   "Go back" link otherwise — and logged as `[csrf] refused …`. Nothing
+   is exempt. `_csrf` is deleted from `req.body` after the check so
+   handlers that copy the body wholesale (Data Browser, Web App
+   Settings) never see it.
+2. **The Origin / Sec-Fetch-Site check** in [app.js](../app.js), which
+   runs first (before the body is parsed): a state-changing request whose
+   `Origin` names a host other than the request's own (`'null'` counts as
+   foreign), or whose `Sec-Fetch-Site` is neither `same-origin` nor
+   `none`, is refused with 403 and logged as `[csrf] refused …`. A
+   request with neither header passes on to the token check (curl,
+   scripts). Behind a reverse proxy set `server.trustProxy` so
+   `req.host` reads `X-Forwarded-Host`.
 
-A request with neither header passes (curl, scripts, very old
-browsers). The console's own forms, Alpine `fetch` calls and the
-image-upload XHR are same-origin and carry a matching `Origin`, so
-nothing legitimate is affected. Behind a reverse proxy set
-`server.trustProxy` so `req.host` reads `X-Forwarded-Host`.
+   One wrinkle: under a `Referrer-Policy` of `no-referrer` (helmet's
+   default) browsers serialise the `Origin` of a same-origin **form**
+   POST — a navigation, unlike `fetch` — as the literal `null`, which
+   this check would refuse (the login form included; headless Chrome
+   showed exactly that). So `app.js` sets helmet's `referrerPolicy` to
+   `same-origin` (the Referer never leaves the console, and `Origin`
+   stays intact), and the check additionally accepts `Origin: null`
+   when the browser itself labels the request `Sec-Fetch-Site:
+   same-origin` — a header a cross-site page cannot set.
+3. The session cookie is `SameSite=strict`, so a browser doesn't send it
+   on a request started from another site.
+4. The CSP `form-action 'self'` stops the console's own pages posting
+   elsewhere.
+
+### How the token travels
+
+Both ends are handled centrally, so a route or page never has to think
+about it:
+
+- [views/layout.js](../views/layout.js) `page()` puts
+  `<meta name="csrf-token" content="…">` in every `<head>` (login layout
+  and main layout) and injects
+  `<input type="hidden" name="_csrf" value="…">` right after every
+  `<form method="POST" …>` tag in the finished page (forms with no
+  method — GET — are left alone). `page()` reads the token for the
+  current request through an `AsyncLocalStorage` that the middleware
+  sets up, which is why no `req` has to be threaded through to it.
+- [public/js/csrf.js](../public/js/csrf.js) is the first script in both
+  layouts (plain, not deferred). It wraps `window.fetch` so every
+  same-origin request with a method other than GET / HEAD / OPTIONS
+  carries `X-CSRF-Token` unless the caller set one, and exposes
+  `window.csrfToken()`. All the console's JSON calls (Alpine `x-data`
+  handlers, the Preview pop-up, templates, power / maintenance buttons,
+  the backup status poll) and all image uploads (`macUploadImage`) go
+  through the global `fetch`, so none of them needed changing.
+- **Multipart forms.** The token check runs before multer, so a hidden
+  `_csrf` field inside a `multipart/form-data` body is invisible to it;
+  multipart requests must use the header. The image uploads already use
+  `fetch`; the five native multipart forms (backup restore / bundle
+  upload, Settings → Appearance, Web App Website image upload) are
+  submitted by `csrf.js` through `fetch` instead of a plain navigation,
+  then the redirect every one of those routes answers with is followed
+  with `location.assign`. A non-redirect answer (a 403 or 413 page) is
+  shown in place.
+
+If a page's form starts answering 403 "Invalid or missing CSRF token",
+the usual causes are: the page was rendered without `page()` (no meta /
+hidden input), a new multipart form that submits natively, or a
+`fetch` that bypasses the global `window.fetch` (an `XMLHttpRequest`,
+`navigator.sendBeacon`, or a `fetch` captured before `csrf.js` ran).
 
 ## Error responses
 

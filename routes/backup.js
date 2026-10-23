@@ -1318,7 +1318,7 @@ module.exports = function (db, appConfig, appConfigModule) {
             this.showChecks(this.selected, v); this.sw.open = false;
             if (!v.valid) { this.say('err', 'Stopped: the bundle failed verification (see the checklist).'); await this.offerDisableMaintenance('The restore did not start (the bundle failed verification).'); return; }
             this.say('ok', 'Bundle verified.');
-            const go = await window.uiConfirm('Restore ' + this.selected + ' now? This REPLACES the Web App configuration, session keys, website files, uploads' + (this.pruneUploads ? ' (removing files not in the bundle)' : '') + ', the ENTIRE database' + (this.restoreTemplates ? ' and this console\'s raffle text templates' : '') + '.', { title: 'Restore the Web App?', confirmLabel: 'Restore now', cancelLabel: 'Cancel' });
+            const go = await window.uiConfirm('Restore ' + this.selected + ' now? This REPLACES the Web App configuration, session keys, website files, uploads' + (this.pruneUploads ? ' (removing files not in the bundle)' : '') + ', the ENTIRE database' + (this.restoreTemplates ? ' and the raffle text templates' : '') + '.', { title: 'Restore the Web App?', confirmLabel: 'Restore now', cancelLabel: 'Cancel' });
             if (!go) { this.say('info', 'Restore canceled.'); await this.offerDisableMaintenance('The restore was canceled.'); return; }
             this.say('info', 'Step 4/4 — restoring (configuration + secrets → website → uploads → database → templates → maintenance file)…');
             this.sw.op = null; this.startWatch();
