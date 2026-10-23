@@ -396,7 +396,7 @@ function profileForm(action, backHref, v, pickers, status) {
   // name = the posted field; extra.key = the values key when it differs
   const text = (id, name, label, max, extra) => `<div ${extra && extra.wrap ? extra.wrap : ''}>
       <label class="label" for="${id}">${escapeHtml(label)}${extra && extra.req ? ' *' : ''}${extra && extra.hintInline ? ` <span class="text-xs font-normal text-slate-400">${extra.hintInline}</span>` : ''}</label>
-      <input id="${id}" class="input${extra && extra.cls ? ' ' + extra.cls : ''}" type="${(extra && extra.type) || 'text'}" name="${name}" maxlength="${max}" value="${val((extra && extra.key) || name)}"${extra && extra.req ? ' required' : ''}${extra && extra.ph ? ` placeholder="${escapeHtml(extra.ph)}"` : ''}${extra && extra.list ? ` list="${extra.list}"` : ''}${extra && extra.mode ? ` inputmode="${extra.mode}"` : ''} autocomplete="off">
+      <input id="${id}" class="input${extra && extra.cls ? ' ' + extra.cls : ''}" type="${(extra && extra.type) || 'text'}" name="${name}" maxlength="${max}" value="${val((extra && extra.key) || name)}"${extra && extra.req ? ' required' : ''}${extra && extra.ph ? ` placeholder="${escapeHtml(extra.ph)}"` : ''}${extra && extra.list ? ` list="${extra.list}"` : ''}${extra && extra.mode ? ` inputmode="${extra.mode}"` : ''}${extra && extra.mask ? ` x-on:input="$el.value = window.${extra.mask}($el.value)"` : ''} autocomplete="off">
       ${extra && extra.hint ? `<p class="mt-1 text-xs text-slate-500 dark:text-slate-400">${extra.hint}</p>` : ''}
     </div>`;
   const catSet = new Set(v.categories.map(String)), citySet = new Set(v.city_ids.map(Number)), pf = new Set(v.public_fields);
@@ -413,8 +413,8 @@ function profileForm(action, backHref, v, pickers, status) {
       <h2 class="text-sm font-semibold uppercase tracking-wider text-slate-500 dark:text-slate-400">Organization</h2>
       <div class="grid sm:grid-cols-2 gap-4">
         ${text('pf-name', 'org_name', 'Organization name', 200, { req: true, key: 'name' })}
-        ${text('pf-ein', 'ein', 'EIN', 20, { cls: 'font-mono', ph: '12-3456789', mode: 'numeric',
-          hint: `9 digits. ${status === 'unverified' ? 'The organization can still change it in its portal until it is reviewed.' : 'The organization can no longer change it (reviewed) — only the console can.'} Leave blank to keep the stored EIN.` })}
+        ${text('pf-ein', 'ein', 'EIN', 10, { cls: 'font-mono', ph: '12-3456789', mode: 'numeric', mask: 'typeEin',
+          hint: `9 digits — the dash is added for you. ${status === 'unverified' ? 'The organization can still change it in its portal until it is reviewed.' : 'The organization can no longer change it (reviewed) — only the console can.'} Leave blank to keep the stored EIN.` })}
       </div>
     </section>
     <section class="card surface-target card-pad space-y-4">
@@ -508,6 +508,7 @@ function readNew(b) {
     org_name: String(b.org_name || '').trim(),
     ein: String(b.ein || '').trim(),
     password: String(b.password || ''),
+    password_confirm: String(b.password_confirm || ''),
     email_verified: kit.yes(b.email_verified),
     org_verified: kit.yes(b.org_verified)
   };
@@ -523,17 +524,20 @@ function readNew(b) {
   if (f.phone_number && !PHONE_RE.test(f.phone_number)) return { fields: f, error: 'Please enter a valid phone number' };
   if (!EMAIL_STRICT_RE.test(f.email)) return { fields: f, error: 'Please enter a valid email address' };
   if (f.password.length > 128) return { fields: f, error: 'Password must be 128 characters or less' };
+  if (f.password !== f.password_confirm) return { fields: f, error: 'The two passwords do not match' };
   return { fields: f };
 }
 
 function newForm(v, minLen) {
   const val = (k) => escapeHtml(v[k] || '');
-  return `<form method="POST" action="/nonprofits" class="space-y-6" autocomplete="off">
+  return `<form method="POST" action="/nonprofits" class="space-y-6" autocomplete="off" x-data
+        x-on:submit="const a = $el.querySelector('[name=password]').value, b = $el.querySelector('[name=password_confirm]').value; if (a !== b) { $event.preventDefault(); window.uiConfirm('The two passwords do not match.', { title: 'Check the password', confirmLabel: 'OK', danger: false }); }">
     <section class="card surface-target card-pad space-y-4">
       <h2 class="text-sm font-semibold uppercase tracking-wider text-slate-500 dark:text-slate-400">Organization</h2>
       <div class="grid sm:grid-cols-2 gap-4">
         <div><label class="label" for="nn-org">Organization name *</label><input id="nn-org" class="input" type="text" name="org_name" required maxlength="200" value="${val('org_name')}"></div>
-        <div><label class="label" for="nn-ein">EIN <span class="text-xs font-normal text-slate-400">(optional here; sign-up requires it)</span></label><input id="nn-ein" class="input font-mono" type="text" inputmode="numeric" name="ein" maxlength="20" placeholder="12-3456789" value="${val('ein')}"></div>
+        <div><label class="label" for="nn-ein">EIN <span class="text-xs font-normal text-slate-400">(optional here; sign-up requires it)</span></label><input id="nn-ein" class="input font-mono" type="text" inputmode="numeric" name="ein" maxlength="10" placeholder="12-3456789" value="${val('ein')}" x-on:input="$el.value = window.typeEin($el.value)">
+          <p class="mt-1 text-xs text-slate-500 dark:text-slate-400">9 digits — the dash is added for you.</p></div>
       </div>
     </section>
     <section class="card surface-target card-pad space-y-4">
@@ -546,12 +550,13 @@ function newForm(v, minLen) {
         <div><label class="label" for="nn-first">First name *</label><input id="nn-first" class="input" type="text" name="first_name" required maxlength="100" value="${val('first_name')}"></div>
         <div><label class="label" for="nn-last">Last name *</label><input id="nn-last" class="input" type="text" name="last_name" required maxlength="100" value="${val('last_name')}"></div>
         <div><label class="label" for="nn-phone">Phone number</label><input id="nn-phone" class="input" type="tel" name="phone_number" maxlength="32" value="${val('phone_number')}"></div>
-        <div x-data="{ pw: '', show: true,
+        <div class="sm:col-span-2 grid sm:grid-cols-2 gap-4" x-data="{ pw: '', pw2: '', show: true,
               gen() { const u = 'ABCDEFGHJKLMNPQRSTUVWXYZ', l = 'abcdefghijkmnpqrstuvwxyz', d = '23456789', s = '!@#$%&*?', all = u + l + d + s;
                 const pick = (set) => set[crypto.getRandomValues(new Uint32Array(1))[0] % set.length];
                 const a = [pick(u), pick(l), pick(d), pick(s)]; while (a.length < 14) a.push(pick(all));
                 for (let i = a.length - 1; i > 0; i--) { const j = crypto.getRandomValues(new Uint32Array(1))[0] % (i + 1); [a[i], a[j]] = [a[j], a[i]]; }
-                this.pw = a.join(''); this.show = true; } }">
+                this.pw = a.join(''); this.pw2 = this.pw; this.show = true; } }">
+         <div>
           <label class="label" for="nn-pw">Temporary password *</label>
           <div class="flex items-stretch gap-2">
             <input id="nn-pw" class="input flex-1 font-mono" :type="show ? 'text' : 'password'" name="password" required minlength="${minLen}" maxlength="128" autocomplete="new-password" x-model="pw">
@@ -559,6 +564,13 @@ function newForm(v, minLen) {
             <button type="button" class="btn-secondary text-xs px-3" x-on:click="show = !show" x-text="show ? 'Hide' : 'Show'"></button>
           </div>
           <p class="mt-1 text-xs text-slate-500 dark:text-slate-400">At least ${minLen} characters (the console's password rules). It is shown once more on the next page — pass it to the organization; they can change it after signing in.</p>
+         </div>
+         <div>
+          <label class="label" for="nn-pw2">Confirm password *</label>
+          <input id="nn-pw2" class="input font-mono" :type="show ? 'text' : 'password'" name="password_confirm" required minlength="${minLen}" maxlength="128" autocomplete="new-password" x-model="pw2">
+          <p class="mt-1 text-xs text-red-600 dark:text-red-300" x-show="pw && pw2 && pw !== pw2">Passwords do not match</p>
+          <p class="mt-1 text-xs text-slate-500 dark:text-slate-400" x-show="!(pw && pw2 && pw !== pw2)">Type it again (Generate fills both).</p>
+         </div>
         </div>
       </div>
     </section>

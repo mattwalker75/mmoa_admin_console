@@ -154,8 +154,9 @@ directory until a board member verifies them.
 - **New nonprofit** creates a login and its organization profile from the
   console, for an organization that is not signing itself up on the
   website: the same rules as sign-up (login name, email, contact person,
-  organization name, optional EIN) plus a temporary password (**Generate**
-  makes a random one). Two boxes, both off by default: *Mark the email
+  organization name, optional EIN — formatted as you type, like the site)
+  plus a temporary password typed twice (**Generate** makes a random one
+  and fills both fields). Two boxes, both off by default: *Mark the email
   address as verified* (otherwise the login is refused until the
   organization verifies it) and *Mark the organization as verified* (it
   goes straight into the directory, listed, with every field public). The

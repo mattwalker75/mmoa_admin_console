@@ -216,6 +216,7 @@ ${body}
   <script defer src="/js/flatpickr.min.js?v=${assetVer('js/flatpickr.min.js')}"></script>
   <script defer src="/js/date-picker.js?v=${assetVer('js/date-picker.js')}"></script>
   <script defer src="/js/flyer-maker.js?v=${assetVer('js/flyer-maker.js')}"></script>
+  <script defer src="/js/input-masks.js?v=${assetVer('js/input-masks.js')}"></script>
   <script defer src="/js/alpine.min.js?v=${assetVer('js/alpine.min.js')}"></script>
 </head>
 <body>
