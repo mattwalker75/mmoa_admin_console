@@ -250,6 +250,9 @@ the board and the directory come from the database (their own pages).
   palette.
 - Keep the `{{tokens}}` (`{{appTitle}}`, `{{orgName}}`, `{{year}}`) — the
   website fills them in.
+- **Website** — the site's public address (`publicBaseUrl` from Web App
+  Settings → General) with an **Open website** button that opens it in a
+  new browser window.
 - **Images** — upload, then copy the `<img src="/content/images/…">` tag
   into a section. Works in every access mode.
 - **Maintenance Mode** — Enable (with a title and message), Disable, or
