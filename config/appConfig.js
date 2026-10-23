@@ -43,7 +43,10 @@ const defaults = {
   security: {
     rateLimiting: { auth: { windowSeconds: 300, maxAttempts: 10 } },
     headers: { enabled: true, contentSecurityPolicy: true },
-    session: { secure: false, httpOnly: true, sameSite: 'strict' },
+    // session.secure: null = auto (the cookie is Secure whenever the console
+    // serves HTTPS — server.ssl true or an https:// publicBaseUrl). An
+    // explicit true / false in config.json is authoritative.
+    session: { secure: null, httpOnly: true, sameSite: 'strict' },
     password: {
       // Complexity rules applied at admin creation / password change time,
       // and to nonprofit passwords set from the Nonprofits page. (Login itself
@@ -164,10 +167,16 @@ function save() {
   // atomic on POSIX, so a crash/kill mid-write can never leave config.json
   // truncated — which would otherwise make the next boot silently fall back to
   // all-defaults (losing Web App access, SSH key, DB engine, etc.).
+  // The file holds the Web App SSH private key / AWS secret and the MySQL
+  // password, so the temp is created at 0600 from the start (never briefly
+  // world-readable) and the final path is chmod'ed too, in case an older
+  // config.json was created with the default 0644. Same pattern as
+  // helpers/localAdmins.js saveAll.
   const data = JSON.stringify(strip(appConfig), null, 2);
   const tmp = configPath + '.tmp';
-  fs.writeFileSync(tmp, data);
+  fs.writeFileSync(tmp, data, { mode: 0o600 });
   fs.renameSync(tmp, configPath);
+  try { fs.chmodSync(configPath, 0o600); } catch (e) { /* best effort */ }
 }
 
 load();

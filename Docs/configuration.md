@@ -35,7 +35,7 @@ a partial file is fine.
 | `database.mysql.connectionLimit` | `5` | yes | |
 | `security.rateLimiting.auth.windowSeconds` / `maxAttempts` | `300` / `10` | yes | Failed `/login` attempts per IP. |
 | `security.headers.enabled` / `contentSecurityPolicy` | `true` / `true` | yes | helmet + CSP. |
-| `security.session.secure` / `httpOnly` / `sameSite` | `false` / `true` / `"strict"` | yes | Cookie attributes. |
+| `security.session.secure` / `httpOnly` / `sameSite` | `null` / `true` / `"strict"` | yes | Cookie attributes. `secure: null` = auto — `Secure` whenever the console serves HTTPS (`server.ssl` true or an `https://` `publicBaseUrl`); an explicit `true` / `false` is authoritative. |
 | `security.password.minLength` | `8` | no | Applies to console admins **and** to nonprofit passwords set from Nonprofits. |
 | `security.password.requireUpper` / `requireLower` / `requireDigit` / `requireSymbol` | `false` | no | |
 | `theme.mode` | `"light"` | no | `light` / `dark`. |
@@ -78,7 +78,7 @@ or `--status`. Title and message are single-quoted for the shell.
 
 | File | Tracked? | Contents |
 | ---- | -------- | -------- |
-| `config.json` | yes — committed with defaults and **blank secrets** | Fill in locally; don't commit real keys. |
+| `config.json` | yes — committed with defaults and **blank secrets** | Fill in locally; don't commit real keys. Holds the Web App SSH private key / AWS secret and the MySQL password once set, so the console writes it at `0600` on every save (temp file created `0600` + rename + chmod). A fresh clone is `0644` until the first save — `chmod 0600 config.json` after cloning. It stays tracked because the infra scripts depend on it; keep the committed copy scrubbed. |
 | `local_admins.json` | no (gitignored) | bcrypt hashes, `0600`. |
-| `backups/` | no (gitignored) | Rebuild bundles — the web app's secrets, nonprofit password hashes and uploaded images. |
+| `backups/` | no (gitignored) | Rebuild bundles — the web app's secrets, nonprofit password hashes and uploaded images — plus a `<bundle>.json.meta.json` summary sidecar per bundle (what the list page shows, so bundles aren't re-parsed on every view). Directory `0700`, files `0600`. |
 | `public/images/` | no (gitignored) | Uploaded background images. |

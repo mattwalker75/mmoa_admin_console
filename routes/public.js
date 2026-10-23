@@ -8,14 +8,20 @@
 
 const express = require('express');
 const { page, flash } = require('../views/layout');
-const { verifyPassword } = require('../middleware/auth');
+const { verifyPassword, sessionFingerprint, sessionProblem, DUMMY_HASH } = require('../middleware/auth');
 const localAdmins = require('../helpers/localAdmins');
 
 module.exports = function (db, appConfig) {
   const router = express.Router();
 
   router.get('/login', (req, res) => {
-    if (req.session && req.session.user) return res.redirect('/');
+    // Only a session that requireAdmin would still accept skips the form; a
+    // stale one (expired, admin removed, password changed) is dropped here
+    // instead of bouncing / → /login.
+    if (req.session && req.session.user) {
+      if (!sessionProblem(req.session)) return res.redirect('/');
+      req.session = null;
+    }
     const body = `
       <div class="card surface-target card-pad shadow-xl">
         ${flash('error', req.query.error)}
@@ -51,9 +57,11 @@ module.exports = function (db, appConfig) {
 
     try {
       const local = localAdmins.findByUsername(username);
-      if (!local) return fail(generic);
-      const ok = await verifyPassword(password, local.password_hash);
-      if (!ok) return fail(generic);
+      // Unknown username: still run a bcrypt compare (against a throwaway
+      // hash) so the response takes the same time as a wrong password and
+      // timing can't reveal which usernames exist.
+      const ok = await verifyPassword(password, local ? local.password_hash : DUMMY_HASH);
+      if (!local || !ok) return fail(generic);
 
       req.session.user = {
         user_id: 'local:' + local.username,
@@ -62,6 +70,10 @@ module.exports = function (db, appConfig) {
         name: local.name || local.username,
         role: 'admin'
       };
+      // Server-side expiry + "is this still the same admin" check — see
+      // middleware/auth.js sessionProblem.
+      req.session.iat = Date.now();
+      req.session.fp = sessionFingerprint(local.password_hash);
       res.redirect('/');
     } catch (err) {
       console.error('[login] error:', err);

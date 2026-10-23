@@ -20,6 +20,10 @@
 # data show a "Database unavailable" banner.
 set -e
 cd "$(dirname "$0")"
+# Production mode unless the caller set NODE_ENV: Express's default error
+# handler renders stack traces into the response in any other mode (app.js
+# has its own handler, this is belt and braces).
+export NODE_ENV="${NODE_ENV:-production}"
 if [ ! -d node_modules ]; then
   npm install
 fi

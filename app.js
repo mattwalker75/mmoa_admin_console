@@ -26,6 +26,7 @@ const { appConfig } = appConfigModule;
 const { init: initDb } = require('./db/database');
 const { enforceInputLimits } = require('./middleware/inputLimits');
 const localAdmins = require('./helpers/localAdmins');
+const { escapeHtml } = require('./views/escapeHtml');
 
 const db = initDb(appConfig);
 
@@ -96,14 +97,56 @@ if (appConfig.sessionKeyMode !== 'fixed' || !sessionKeys[0] || !sessionKeys[1] |
 }
 
 const sessionSecCfg = (appConfig.security && appConfig.security.session) || {};
+// `secure` follows servesHttps unless config.json says true / false
+// explicitly (null / missing = auto). The cookie's maxAge is what the browser
+// enforces; middleware/auth.js sessionProblem enforces the same
+// sessionMaxAgeHours server-side from the iat stamped at login.
+const cookieSecure = (sessionSecCfg.secure === undefined || sessionSecCfg.secure === null)
+  ? servesHttps : !!sessionSecCfg.secure;
 app.use(cookieSession({
   name: 'mac_session',
   keys: sessionKeys,
   maxAge: (appConfig.sessionMaxAgeHours || 8) * 60 * 60 * 1000,
   httpOnly: sessionSecCfg.httpOnly !== false,
-  secure: !!sessionSecCfg.secure,
+  secure: cookieSecure,
   sameSite: sessionSecCfg.sameSite || 'strict'
 }));
+
+// ── Cross-site request check (CSRF defence in depth) ──────────────────────
+// There is no CSRF token; the cookie is SameSite=strict and the CSP has
+// form-action 'self'. On top of that, a state-changing request that a
+// browser labels as coming from somewhere else is refused here:
+//   * Origin present and not this host  → 403 (a cross-site form post /
+//     fetch; 'null' counts as foreign)
+//   * Sec-Fetch-Site present and neither same-origin nor none → 403
+//     ('none' = typed URL / bookmark; 'same-site' is a sibling subdomain,
+//     which is still not this console)
+// A request with NEITHER header passes — curl, scripts, old browsers. The
+// console's own forms, Alpine fetches and the image-upload XHR are all
+// same-origin, so they carry a matching Origin / 'same-origin'.
+const STATE_CHANGING = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
+app.use((req, res, next) => {
+  if (!STATE_CHANGING.has(req.method)) return next();
+  const origin = req.get('origin');
+  const fetchSite = (req.get('sec-fetch-site') || '').toLowerCase();
+  let reason = null;
+  if (origin !== undefined) {
+    let originHost = null;
+    try { originHost = new URL(origin).host.toLowerCase(); } catch (e) { originHost = null; }
+    // req.host honours X-Forwarded-Host only when trust proxy is set.
+    const ownHost = String(req.host || req.get('host') || '').toLowerCase();
+    if (!originHost || !ownHost || originHost !== ownHost) reason = `Origin ${origin} does not match host ${ownHost || '(none)'}`;
+  }
+  if (!reason && fetchSite && fetchSite !== 'same-origin' && fetchSite !== 'none') {
+    reason = `Sec-Fetch-Site ${fetchSite}`;
+  }
+  if (!reason) return next();
+  console.warn(`[csrf] refused ${req.method} ${req.originalUrl} from ${req.ip}: ${reason}`);
+  const wantsJson = (req.get('accept') || '').includes('application/json') ||
+                    (req.get('content-type') || '').includes('application/json');
+  if (wantsJson) return res.status(403).json({ ok: false, success: false, error: 'Cross-site request refused.' });
+  res.status(403).type('text/plain').send('Cross-site request refused.');
+});
 
 // Capture the signed-in username while the request is still in flight,
 // so morgan's :user token can read it without touching req.session at
@@ -200,6 +243,30 @@ app.use((req, res) => {
   res.status(404).send(`<!DOCTYPE html><html><head><title>Not found</title>
     <link rel="stylesheet" href="/css/tailwind.css"></head>
     <body class="min-h-screen flex items-center justify-center"><div class="card card-pad text-center"><h2 class="text-lg font-semibold">Not found</h2><p class="mt-2"><a class="text-brand-600 hover:underline" href="/">← Home</a></p></div></body></html>`);
+});
+
+// Final error handler. Express's default one renders err.stack (file paths,
+// module names) into the response whenever NODE_ENV isn't 'production'.
+// Log the full error here; the client gets a generic page — JSON for the
+// console's fetch-based endpoints (they send Accept / Content-Type JSON),
+// HTML otherwise. 4xx errors raised by the body parsers (bad JSON, body too
+// large) keep their status and their short, safe message.
+// eslint-disable-next-line no-unused-vars
+app.use((err, req, res, next) => {
+  const status = Number.isInteger(err && err.status) && err.status >= 400 && err.status < 600 ? err.status
+               : Number.isInteger(err && err.statusCode) && err.statusCode >= 400 && err.statusCode < 600 ? err.statusCode
+               : 500;
+  const safeMsg = status < 500 && err && err.expose && typeof err.message === 'string' && err.message
+    ? err.message : 'Something went wrong. The error has been logged.';
+  console.error(`[error] ${req.method} ${req.originalUrl} → ${status}:`, (err && err.stack) || err);
+  if (res.headersSent) return res.end();
+  const wantsJson = (req.get('accept') || '').includes('application/json') ||
+                    (req.get('content-type') || '').includes('application/json') ||
+                    (req.get('x-requested-with') === 'XMLHttpRequest');
+  if (wantsJson) return res.status(status).json({ ok: false, success: false, error: safeMsg });
+  res.status(status).send(`<!DOCTYPE html><html><head><title>Error</title>
+    <link rel="stylesheet" href="/css/tailwind.css"></head>
+    <body class="min-h-screen flex items-center justify-center"><div class="card card-pad text-center max-w-md"><h2 class="text-lg font-semibold">${status < 500 ? 'Request rejected' : 'Something went wrong'}</h2><p class="mt-2 text-sm text-slate-600">${escapeHtml(safeMsg)}</p><p class="mt-2"><a class="text-brand-600 hover:underline" href="/">← Home</a></p></div></body></html>`);
 });
 
 const port = appConfig.port || 3005;

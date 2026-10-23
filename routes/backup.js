@@ -55,6 +55,10 @@ const WA_WEBSITE_LABELS = WA_SECTIONS.reduce((m, s) => { m[s.key] = s.label; ret
 const BUNDLE_DIR = path.join(__dirname, '..', 'backups');
 const BUNDLE_TYPE = 'web-app-bundle';
 const BUNDLE_NAME_RE = /^[A-Za-z0-9._-]+\.json$/;
+// Summary sidecar written next to each bundle (<bundle>.json.meta.json) so
+// the list page never re-parses a multi-MB bundle — see listBundles.
+const META_SUFFIX = '.meta.json';
+const isMetaName = (n) => /\.meta\.json$/i.test(String(n || ''));
 const IMAGE_EXT = /\.(png|jpe?g|gif|webp|svg)$/i;
 const IMAGES_REL_DIR = 'HTML/images';
 const UPLOADS_REL_DIR = 'uploads';
@@ -73,10 +77,56 @@ function bundleStamp() {
   const d = new Date(), p = (n) => String(n).padStart(2, '0');
   return `${String(d.getFullYear()).slice(-2)}_${p(d.getMonth() + 1)}_${p(d.getDate())}-${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}`;
 }
-// A bundle filename from user input: basename only, .json, no traversal.
+// A bundle filename from user input: basename only, .json, no traversal,
+// and never a summary sidecar.
 function safeBundleName(n) {
   const b = path.basename(String(n || ''));
-  return BUNDLE_NAME_RE.test(b) && !b.includes('..') ? b : null;
+  return BUNDLE_NAME_RE.test(b) && !b.includes('..') && !isMetaName(b) ? b : null;
+}
+// backups/ holds the web app's secrets, nonprofit password hashes and
+// uploaded images: owner-only directory, owner-only files (the chmod covers
+// a directory created by hand or by an older version at the default mode).
+function ensureBundleDir() {
+  fs.mkdirSync(BUNDLE_DIR, { recursive: true, mode: 0o700 });
+  try { fs.chmodSync(BUNDLE_DIR, 0o700); } catch (e) { /* best effort */ }
+}
+function writeBundleFile(name, data) {
+  ensureBundleDir();
+  fs.writeFileSync(path.join(BUNDLE_DIR, name), data, { mode: 0o600 });
+  try { fs.chmodSync(path.join(BUNDLE_DIR, name), 0o600); } catch (e) { /* best effort */ }
+}
+// Same rules as views/layout.js (cssUrlSafe / isSafeCssColor) and
+// routes/settings.js: a background image is only ever /images/<file>, a
+// color only a hex or rgb()/rgba() literal. Applied to an imported `theme`
+// section so a tampered settings backup can't put arbitrary text into the
+// inline <style> or the Appearance page's Alpine expressions.
+function cssUrlSafe(v) {
+  return (typeof v === 'string' && /^\/images\/[A-Za-z0-9._-]+$/.test(v)) ? v : '';
+}
+function isSafeCssColor(v) {
+  return typeof v === 'string' && /^#[0-9a-fA-F]{3,8}$|^rgba?\([\d.,\s%]+\)$/.test(v.trim());
+}
+// Returns { theme, dropped } — dropped = names of the values that were
+// replaced with '' because they failed the checks above.
+function sanitizeTheme(t) {
+  const src = (t && typeof t === 'object' && !Array.isArray(t)) ? t : {};
+  const out = Object.assign({}, src);
+  const dropped = [];
+  out.mode = src.mode === 'dark' ? 'dark' : 'light';
+  for (const k of ['login', 'app']) {
+    const blk = Object.assign({}, (src[k] && typeof src[k] === 'object' && !Array.isArray(src[k])) ? src[k] : {});
+    if (blk.backgroundImage !== undefined && blk.backgroundImage !== '') {
+      const safe = cssUrlSafe(blk.backgroundImage);
+      if (!safe) dropped.push(`theme.${k}.backgroundImage`);
+      blk.backgroundImage = safe;
+    }
+    if (blk.backgroundColor !== undefined && blk.backgroundColor !== '') {
+      if (isSafeCssColor(blk.backgroundColor)) blk.backgroundColor = blk.backgroundColor.trim();
+      else { dropped.push(`theme.${k}.backgroundColor`); blk.backgroundColor = ''; }
+    }
+    out[k] = blk;
+  }
+  return { theme: out, dropped };
 }
 function fmtBytes(n) {
   if (n < 1024) return `${n} B`;
@@ -109,6 +159,19 @@ const WA_CONFIG_LABELS = {
   allowMemberRegistration: 'Allow nonprofit sign-ups', site: 'Public site info (phone / EIN / Facebook)', uploads: 'Uploads', maintenanceCommand: 'Maintenance command',
   database: 'Database', security: 'Security', aws: 'AWS (SES credentials)'
 };
+// The only top-level keys of the WEB APP's config.json a restore may write:
+// the keys Web App Settings edits (routes/webAppSettings.js FIELDS, grouped
+// by their top-level key) plus sessionKeys. Anything else in an uploaded
+// file — including keys the web app would treat as commands — is ignored.
+const WA_CONFIG_KEYS = Object.keys(WA_CONFIG_LABELS);
+// Keys whose values THIS console later runs as shell commands on the web
+// app host. A restore leaves them as they are unless the operator ticks
+// "also restore commands" — a tampered backup must not be able to plant a
+// command that the Maintenance Mode / power-bar buttons then execute.
+//   web app config: maintenanceCommand (Web App Website → Maintenance Mode)
+//   console settings: webApp.commands.{start,stop,restart} (power bar)
+const WA_COMMAND_KEYS = ['maintenanceCommand'];
+const RESTORE_COMMANDS_LABEL = 'Also restore the shell commands in this file (the Web App maintenance command / Start · Stop · Restart commands). Leave this off unless you made the backup yourself — the console runs these on the Web App host.';
 
 // Normalize a multi-value form field (checkboxes share name="sections") into
 // an array of strings.
@@ -231,7 +294,10 @@ function downloadBtn(href) {
 //   kind      — 'settings' | 'waconfig' | 'wawebsite' (drives what counts as a section)
 //   validKeys — array to constrain selectable keys, or null (any top-level key)
 //   labelMap  — {key: friendly label}
-function selectiveRestoreForm(kind, action, confirmText, headsHtml, validKeys, labelMap) {
+//   commandsOpt — when true, adds the "also restore commands" checkbox
+//               (name="restore_commands"); without it the handler keeps the
+//               live shell commands (see WA_COMMAND_KEYS)
+function selectiveRestoreForm(kind, action, confirmText, headsHtml, validKeys, labelMap, commandsOpt) {
   const validJson = escapeHtml(JSON.stringify(validKeys || null));
   const labelJson = escapeHtml(JSON.stringify(labelMap || {}));
   return `<form method="POST" action="${action}" enctype="multipart/form-data" class="mt-5 space-y-4"
@@ -265,6 +331,7 @@ function selectiveRestoreForm(kind, action, confirmText, headsHtml, validKeys, l
                         if (metaType && metaType !== 'web-app-config') { this.parseError = 'This is not a Web App config backup.'; return; }
                         const cfg = (parsed.config && typeof parsed.config === 'object') ? parsed.config : parsed;
                         keys = Object.keys(cfg).filter(k => !k.startsWith('_'));
+                        if (valid) keys = keys.filter(k => valid.includes(k));
                       } else {
                         if (metaType && metaType !== 'admin-console-settings') { this.parseError = 'This is not a console settings backup.'; return; }
                         keys = Object.keys(parsed).filter(k => !k.startsWith('_'));
@@ -306,6 +373,10 @@ function selectiveRestoreForm(kind, action, confirmText, headsHtml, validKeys, l
       </div>
     </div>
 
+    ${commandsOpt ? `<label class="flex items-start gap-2 text-xs text-amber-700 dark:text-amber-300" x-show="sections.length" x-cloak>
+      <input type="checkbox" name="restore_commands" value="1" class="mt-0.5">
+      <span>${escapeHtml(RESTORE_COMMANDS_LABEL)}</span>
+    </label>` : ''}
     <label class="flex items-start gap-2 text-sm text-slate-700 dark:text-slate-200" x-show="sections.length" x-cloak>
       <input type="checkbox" x-model="confirmed" class="mt-0.5">
       <span>${confirmText}</span>
@@ -405,16 +476,25 @@ module.exports = function (db, appConfig, appConfigModule) {
     return v;
   }
 
+  // The restore REPLACES the whole database, as the form promises: EVERY
+  // live table is emptied (alphabetical order, FK checks off), then the
+  // tables the backup also has are reloaded. A live table the backup lacks
+  // ends up empty; a backup table the live schema lacks is skipped. Both are
+  // reported in `warnings` so the result never hides what happened.
   async function restoreDatabase(backupTables) {
-    const currentTables = new Set(await dbListTables());
-    // Only touch tables that exist in BOTH the backup and the live schema.
-    const targets = Object.keys(backupTables).filter(t => currentTables.has(t));
+    const has = (t) => Object.prototype.hasOwnProperty.call(backupTables, t);
+    const liveTables = await dbListTables(); // ORDER BY name
+    const liveSet = new Set(liveTables);
+    const targets = liveTables.filter(has);
+    const clearedOnly = liveTables.filter(t => !has(t));
+    const notLive = Object.keys(backupTables).filter(t => !liveSet.has(t));
     const colsByTable = {};
     for (const t of targets) colsByTable[t] = new Set(await dbListColumns(t));
 
     const doWork = async (tx) => {
-      for (const t of targets) {
+      for (const t of liveTables) {
         await tx.runAsync(`DELETE FROM ${quoteIdent(t)}`, []);
+        if (!has(t)) continue;
         const rows = Array.isArray(backupTables[t]) ? backupTables[t] : [];
         const cols = colsByTable[t];
         for (const row of rows) {
@@ -431,8 +511,18 @@ module.exports = function (db, appConfig, appConfigModule) {
     if (db.engine === 'mysql') {
       await db.transaction(async (tx) => {
         await tx.runAsync('SET FOREIGN_KEY_CHECKS = 0', []);
-        await doWork(tx);
-        await tx.runAsync('SET FOREIGN_KEY_CHECKS = 1', []); // restore before COMMIT so the pooled connection is clean
+        try {
+          await doWork(tx);
+        } finally {
+          // FOREIGN_KEY_CHECKS is a SESSION variable on the pooled
+          // connection: put it back whether doWork succeeded or threw —
+          // this runs before the wrapper's COMMIT / ROLLBACK and release,
+          // so the next request to get this connection never runs with FK
+          // checks off. (A statement error doesn't kill a MySQL
+          // connection, so the SET still works after a failed INSERT; if
+          // the connection itself died, mysql2 drops it from the pool.)
+          await tx.runAsync('SET FOREIGN_KEY_CHECKS = 1', []).catch(() => {});
+        }
       });
     } else {
       // SQLite: foreign_keys can't be toggled inside a transaction, so bracket it.
@@ -443,7 +533,10 @@ module.exports = function (db, appConfig, appConfigModule) {
         await db.runAsync('PRAGMA foreign_keys = ON', []).catch(() => {});
       }
     }
-    return { tables: targets.length };
+    const warnings = [];
+    if (clearedOnly.length) warnings.push(`${clearedOnly.length} live table(s) not in the backup were emptied: ${clearedOnly.join(', ')}`);
+    if (notLive.length) warnings.push(`${notLive.length} table(s) in the backup don't exist in the live schema and were skipped: ${notLive.join(', ')}`);
+    return { tables: targets.length, cleared: clearedOnly, skipped: notLive, warnings };
   }
 
   // ── Web App rebuild: bundle helpers ────────────────────────────────
@@ -454,10 +547,19 @@ module.exports = function (db, appConfig, appConfigModule) {
   // window, reload, or navigate away, the operation keeps running here and
   // the page picks the status back up. Restoring the Web App is
   // backbone work; "is it still going?" must always have an answer.
+  // startOp is the ONLY way to claim the slot and it refuses while an
+  // operation is running — check and claim happen in one synchronous step,
+  // so two requests can't both pass (there is no await in between).
+  // Callers must call it BEFORE any await (the access test, the bundle read).
   let opStatus = null;
   function startOp(kind, name) {
+    if (opStatus && opStatus.running) return false;
     opStatus = { kind, name: name || null, running: true, ok: null, error: null,
                  startedAt: new Date().toISOString(), finishedAt: null, steps: [] };
+    return true;
+  }
+  function busyError(res) {
+    return res.status(409).json({ ok: false, error: `A ${opStatus.kind} is already running — wait for it to finish.` });
   }
   function mark(step, state, detail) {
     if (!opStatus) return;
@@ -513,16 +615,46 @@ module.exports = function (db, appConfig, appConfigModule) {
     };
   }
 
+  // ── Bundle summary sidecars ─────────────────────────────────────────
+  // <bundle>.json.meta.json holds summarizeBundle() + the bundle's size and
+  // mtime. The list page reads these (plus a statSync per bundle) instead of
+  // JSON.parsing every bundle on every page view — a few multi-MB bundles
+  // would otherwise block the event loop for seconds each time. Written
+  // when a bundle is created or uploaded; a bundle without one (older
+  // console, hand-copied file) is parsed ONCE and gets its sidecar then. A
+  // sidecar whose size / mtime no longer match the bundle is ignored.
+  function metaPath(name) { return path.join(BUNDLE_DIR, name + META_SUFFIX); }
+  function writeBundleMeta(name, summary, st) {
+    const meta = { version: 1, name, size: st.size, mtimeMs: st.mtimeMs, summary };
+    try { fs.writeFileSync(metaPath(name), JSON.stringify(meta), { mode: 0o600 }); }
+    catch (e) { console.warn(`[backup] could not write ${name}${META_SUFFIX}: ${e.message}`); }
+    return meta;
+  }
+  function readBundleMeta(name, st) {
+    try {
+      const m = JSON.parse(fs.readFileSync(metaPath(name), 'utf8'));
+      if (m && m.version === 1 && m.size === st.size && m.mtimeMs === st.mtimeMs && m.summary && typeof m.summary === 'object') return m;
+    } catch (e) { /* missing or unreadable → re-summarize */ }
+    return null;
+  }
+  function removeBundleMeta(name) {
+    try { fs.unlinkSync(metaPath(name)); } catch (e) { /* none, or already gone */ }
+  }
+
   function listBundles() {
     let names = [];
-    try { names = fs.readdirSync(BUNDLE_DIR).filter(n => BUNDLE_NAME_RE.test(n)); } catch (e) { return []; }
+    try { names = fs.readdirSync(BUNDLE_DIR).filter(n => BUNDLE_NAME_RE.test(n) && !isMetaName(n)); } catch (e) { return []; }
     return names.map((n) => {
       const p = path.join(BUNDLE_DIR, n);
       let st; try { st = fs.statSync(p); } catch (e) { return null; }
-      let summary;
-      try { summary = summarizeBundle(JSON.parse(fs.readFileSync(p, 'utf8'))); }
-      catch (e) { summary = { valid: false, problems: ['not valid JSON: ' + e.message], warnings: [], skippedImages: [] }; }
-      return { name: n, size: st.size, mtime: st.mtime.toISOString(), summary };
+      let meta = readBundleMeta(n, st);
+      if (!meta) {
+        let summary;
+        try { summary = summarizeBundle(JSON.parse(fs.readFileSync(p, 'utf8'))); }
+        catch (e) { summary = { valid: false, problems: ['not valid JSON: ' + e.message], warnings: [], skippedImages: [] }; }
+        meta = writeBundleMeta(n, summary, st);
+      }
+      return { name: n, size: st.size, mtime: st.mtime.toISOString(), summary: meta.summary };
     }).filter(Boolean).sort((a, b) => b.mtime.localeCompare(a.mtime));
   }
 
@@ -653,18 +785,31 @@ module.exports = function (db, appConfig, appConfigModule) {
   // config → website → database, then flag the restart the web app needs to read
   // its new config. The database step is the same all-or-nothing routine the
   // single Database restore uses.
-  async function restoreBundle(bundle, progress = () => {}) {
+  // Only known web-app config keys are written (WA_CONFIG_KEYS); the
+  // maintenance command is kept as the host has it unless
+  // opts.restoreCommands — see WA_COMMAND_KEYS.
+  async function restoreBundle(bundle, progress = () => {}, opts = {}) {
     const accessor = webAppAccess.createAccessorFromConfig(appConfig);
     const steps = [];
 
     progress('Configuration', 'in_progress', 'writing config.json');
     const { json } = await waConfig.readRemoteConfig(accessor);
-    const cfg = (bundle.config && typeof bundle.config === 'object') ? bundle.config : {};
+    const cfg = (bundle.config && typeof bundle.config === 'object' && !Array.isArray(bundle.config)) ? bundle.config : {};
     let nKeys = 0;
-    for (const k of Object.keys(cfg)) { json[k] = cfg[k]; nKeys++; }
+    const keptCommands = [], ignoredKeys = [];
+    for (const k of Object.keys(cfg)) {
+      if (k.startsWith('_')) continue; // the web app's own _comment keys — the host's copy stays
+      if (!WA_CONFIG_KEYS.includes(k)) { ignoredKeys.push(k); continue; }
+      if (WA_COMMAND_KEYS.includes(k) && !opts.restoreCommands) { keptCommands.push(k); continue; }
+      json[k] = cfg[k]; nKeys++;
+    }
     await waConfig.writeRemoteConfig(accessor, json);
-    steps.push({ step: 'Configuration', ok: true, detail: `${nKeys} top-level keys written to config.json` });
-    progress('Configuration', 'ok', `${nKeys} top-level keys`);
+    const cfgNotes = [];
+    if (keptCommands.length) cfgNotes.push(`${keptCommands.join(', ')} left as on the host (tick "also restore commands" to take it from the bundle)`);
+    if (ignoredKeys.length) cfgNotes.push(`${ignoredKeys.length} unknown key(s) ignored: ${ignoredKeys.join(', ')}`);
+    const cfgDetail = `${nKeys} top-level keys written to config.json${cfgNotes.length ? ' — ' + cfgNotes.join('; ') : ''}`;
+    steps.push({ step: 'Configuration', ok: true, detail: cfgDetail });
+    progress('Configuration', cfgNotes.length ? 'warn' : 'ok', cfgDetail);
     progress('Website', 'in_progress', 'HTML sections, images');
 
     const web = bundle.website || {};
@@ -703,8 +848,9 @@ module.exports = function (db, appConfig, appConfigModule) {
     if (!tables) throw new Error('The bundle has no database tables.');
     progress('Database', 'in_progress', `replacing ${Object.keys(tables).length} tables — this is the long step`);
     const r = await restoreDatabase(tables);
-    steps.push({ step: 'Database', ok: true, detail: `${r.tables} tables replaced` });
-    progress('Database', 'ok', `${r.tables} tables replaced`);
+    const dbDetail = `${r.tables} tables replaced${r.warnings.length ? ' — ' + r.warnings.join('; ') : ''}`;
+    steps.push({ step: 'Database', ok: true, detail: dbDetail });
+    progress('Database', r.warnings.length ? 'warn' : 'ok', dbDetail);
 
     waConfig.markWebAppWritten(appConfig);
     appConfigModule.save();
@@ -737,7 +883,7 @@ module.exports = function (db, appConfig, appConfigModule) {
     }).join('');
 
     return `<div class="card surface-target card-pad" x-data="{
-        busy: '', log: [], selected: '', confirmText: '', maintOn: false,
+        busy: '', log: [], selected: '', confirmText: '', maintOn: false, restoreCommands: false,
         md: { open: false, what: '', title: ${jsStr(MAINT_TITLE)}, message: ${jsStr(MAINT_MESSAGE)}, resolve: null },
         sw: { open: false, op: null, timer: null, now: Date.now() },
         say(kind, text) { this.log.push({ kind, text }); },
@@ -860,7 +1006,7 @@ module.exports = function (db, appConfig, appConfigModule) {
             if (!go) { this.say('info', 'Restore canceled.'); await this.offerDisableMaintenance('The restore was canceled.'); return; }
             this.say('info', 'Step 4/4 — restoring (configuration → website → uploads → database)…');
             this.sw.op = null; this.startWatch();
-            const r = await this.post('/backup-restore/bundle/restore', { name: this.selected, confirm: this.confirmText.trim() });
+            const r = await this.post('/backup-restore/bundle/restore', { name: this.selected, confirm: this.confirmText.trim(), restoreCommands: !!this.restoreCommands });
             this.stopWatch(); await this.pollOnce();
             (r.steps || []).forEach(s => this.say(s.ok ? 'ok' : 'err', s.step + ' — ' + s.detail));
             if (!r.ok) { this.say('err', 'Restore failed: ' + (r.error || 'unknown error') + ' — the Web App may be partially restored; fix the cause and run the restore again.'); await this.offerDisableMaintenance('The restore FAILED — the Web App may be partially restored.'); return; }
@@ -894,6 +1040,10 @@ module.exports = function (db, appConfig, appConfigModule) {
             <button type="button" class="btn-secondary" x-on:click="testAccess()" :disabled="!!busy">Test access to the Web App</button>
             <button type="button" class="btn-secondary" x-on:click="verify()" :disabled="!!busy || !selected">Verify selected bundle</button>
           </div>
+          <label class="mt-3 flex items-start gap-2 text-xs text-amber-700 dark:text-amber-300">
+            <input type="checkbox" x-model="restoreCommands" class="mt-0.5">
+            <span>${escapeHtml(RESTORE_COMMANDS_LABEL)}</span>
+          </label>
           <div class="mt-3 flex flex-wrap items-center gap-2">
             <input class="input max-w-[12rem]" type="text" x-model="confirmText" autocomplete="off" placeholder="Type ${RESTORE_CONFIRM}">
             <button type="button" class="btn-danger" x-on:click="fullRestore()"
@@ -1042,8 +1192,8 @@ module.exports = function (db, appConfig, appConfigModule) {
           <p class="mt-1 text-sm text-slate-500 dark:text-slate-400">Upload a console-settings backup, then pick which sections to restore. Selected sections are merged into <code class="font-mono">config.json</code>.</p>
           ${selectiveRestoreForm('settings', '/backup-restore/import',
             'I understand this will overwrite the selected console settings.',
-            `<div class="flash-error text-xs"><strong>Heads up:</strong> restoring the <code class="font-mono">database</code> section requires a restart. Other sections take effect on the next request.</div>`,
-            BACKUP_KEYS, SETTINGS_LABELS)}
+            `<div class="flash-error text-xs"><strong>Heads up:</strong> restoring the <code class="font-mono">database</code> section requires a restart. Other sections take effect on the next request. The Start / Stop / Restart commands inside <code class="font-mono">webApp</code> are kept as they are unless you tick the commands box below.</div>`,
+            BACKUP_KEYS, SETTINGS_LABELS, true)}
         </section>
       </div>`;
 
@@ -1063,8 +1213,8 @@ module.exports = function (db, appConfig, appConfigModule) {
           <p class="mt-1 text-sm text-slate-500 dark:text-slate-400">Upload a snapshot, then pick which sections to restore. Selected sections are merged into the remote <code class="font-mono">config.json</code>; everything else is left untouched.</p>
           ${selectiveRestoreForm('waconfig', '/backup-restore/web-app-config/import',
             'I understand this overwrites the selected sections in the Web App config.json.',
-            `<div class="flash-error text-xs"><strong>Heads up:</strong> restoring the <code class="font-mono">database</code> or <code class="font-mono">server</code> section needs a Web App restart.</div>`,
-            null, WA_CONFIG_LABELS)}
+            `<div class="flash-error text-xs"><strong>Heads up:</strong> restoring the <code class="font-mono">database</code> or <code class="font-mono">server</code> section needs a Web App restart. Only the keys Web App Settings edits can be restored; <code class="font-mono">maintenanceCommand</code> is kept as it is unless you tick the commands box below.</div>`,
+            WA_CONFIG_KEYS, WA_CONFIG_LABELS, true)}
         </section>
       </div>`}`;
 
@@ -1125,6 +1275,7 @@ module.exports = function (db, appConfig, appConfigModule) {
 
       ${flash('error', req.query.error)}
       ${okMsg}
+      ${flash('warn', req.query.warn)}
       ${waRestartPrompt(!!req.query.restored)}
 
       <div class="max-w-5xl">
@@ -1161,12 +1312,32 @@ module.exports = function (db, appConfig, appConfigModule) {
     if (recognized.length === 0) {
       return res.redirect('/backup-restore?error=' + encodeURIComponent('No sections selected to restore.'));
     }
+    const restoreCommands = req.body.restore_commands === '1';
     try {
-      for (const k of recognized) appConfig[k] = parsed[k];
+      const warnings = [];
+      for (const k of recognized) {
+        if (k === 'webApp') {
+          // The Start / Stop / Restart commands are run on the web app host
+          // by the power bar; keep the live ones unless explicitly asked.
+          const incoming = (parsed.webApp && typeof parsed.webApp === 'object' && !Array.isArray(parsed.webApp)) ? Object.assign({}, parsed.webApp) : {};
+          if (!restoreCommands) {
+            incoming.commands = (appConfig.webApp && appConfig.webApp.commands) || appConfigModule.defaults.webApp.commands;
+            warnings.push('webApp.commands (Start / Stop / Restart) kept as they were — tick the commands box to restore them from the file');
+          }
+          appConfig.webApp = incoming;
+        } else if (k === 'theme') {
+          const { theme, dropped } = sanitizeTheme(parsed.theme);
+          appConfig.theme = theme;
+          if (dropped.length) warnings.push(`unsafe appearance value(s) dropped: ${dropped.join(', ')}`);
+        } else {
+          appConfig[k] = parsed[k];
+        }
+      }
       appConfigModule.save();
       // Re-load so defaults are back-filled into the imported data.
       appConfigModule.load();
-      res.redirect('/backup-restore?ok=settings&n=' + recognized.length);
+      res.redirect('/backup-restore?ok=settings&n=' + recognized.length +
+        (warnings.length ? '&warn=' + encodeURIComponent(warnings.join('; ')) : ''));
     } catch (err) {
       console.error('[backup] import failed:', err);
       res.redirect('/backup-restore?error=' + encodeURIComponent('Restore failed: ' + (err.message || 'unknown error')));
@@ -1206,10 +1377,16 @@ module.exports = function (db, appConfig, appConfigModule) {
       return res.redirect('/backup-restore?error=' + encodeURIComponent('No Web App config found in that file.'));
     }
     const selected = normalizeArray(req.body.sections);
-    // Restore only selected top-level sections that exist in the backup.
-    const toRestore = selected.filter(k => !k.startsWith('_') && Object.prototype.hasOwnProperty.call(cfg, k));
+    const restoreCommands = req.body.restore_commands === '1';
+    // Restore only selected, KNOWN top-level sections that exist in the
+    // backup (WA_CONFIG_KEYS); the maintenance command only on request.
+    const present = selected.filter(k => WA_CONFIG_KEYS.includes(k) && Object.prototype.hasOwnProperty.call(cfg, k));
+    const toRestore = present.filter(k => restoreCommands || !WA_COMMAND_KEYS.includes(k));
+    const keptCommands = present.filter(k => !toRestore.includes(k));
     if (toRestore.length === 0) {
-      return res.redirect('/backup-restore?error=' + encodeURIComponent('No sections selected to restore.'));
+      return res.redirect('/backup-restore?error=' + encodeURIComponent(keptCommands.length
+        ? `Only ${keptCommands.join(', ')} was selected — tick the commands box to restore it.`
+        : 'No sections selected to restore.'));
     }
     if (!webAppAccess.isConfigured(appConfig)) {
       return res.redirect('/backup-restore?error=' + encodeURIComponent('Web App access is not configured (Settings → Web App).'));
@@ -1221,7 +1398,8 @@ module.exports = function (db, appConfig, appConfigModule) {
       const { json } = await waConfig.readRemoteConfig(accessor);
       for (const k of toRestore) json[k] = cfg[k];
       await waConfig.writeRemoteConfig(accessor, json);
-      res.redirect('/backup-restore?ok=waconfig&n=' + toRestore.length);
+      res.redirect('/backup-restore?ok=waconfig&n=' + toRestore.length +
+        (keptCommands.length ? '&warn=' + encodeURIComponent(`${keptCommands.join(', ')} kept as on the host — tick the commands box to restore it from the file.`) : ''));
     } catch (err) {
       console.error('[backup] web app config import failed:', err);
       res.redirect('/backup-restore?error=' + encodeURIComponent('Web App config restore failed: ' + (err.message || err)));
@@ -1320,8 +1498,9 @@ module.exports = function (db, appConfig, appConfigModule) {
       return res.redirect('/backup-restore?error=' + encodeURIComponent('Database is not available (Settings → Web App).'));
     }
     try {
-      const { tables } = await restoreDatabase(backupTables);
-      res.redirect('/backup-restore?ok=database&n=' + tables);
+      const { tables, warnings } = await restoreDatabase(backupTables);
+      res.redirect('/backup-restore?ok=database&n=' + tables +
+        (warnings.length ? '&warn=' + encodeURIComponent(warnings.join('; ')) : ''));
     } catch (err) {
       console.error('[backup] database import failed:', err);
       res.redirect('/backup-restore?error=' + encodeURIComponent('Database restore failed: ' + (err.message || err)));
@@ -1338,22 +1517,20 @@ module.exports = function (db, appConfig, appConfigModule) {
     if (!webAppAccess.isConfigured(appConfig)) {
       return res.status(400).json({ ok: false, error: 'Web App access is not configured (Settings → Web App).' });
     }
-    if (opStatus && opStatus.running) {
-      return res.status(409).json({ ok: false, error: `A ${opStatus.kind} is already running — wait for it to finish.` });
-    }
-    startOp('backup');
+    if (!startOp('backup')) return busyError(res);
     try {
       const bundle = await buildBundle(mark);
       mark('Save bundle', 'in_progress', 'writing to backups/');
-      fs.mkdirSync(BUNDLE_DIR, { recursive: true });
       const name = `web_app_bundle_${bundleStamp()}.json`;
-      fs.writeFileSync(path.join(BUNDLE_DIR, name), JSON.stringify(bundle));
+      writeBundleFile(name, JSON.stringify(bundle));
       const st = fs.statSync(path.join(BUNDLE_DIR, name));
+      const summary = summarizeBundle(bundle);
+      writeBundleMeta(name, summary, st);
       mark('Save bundle', 'ok', `${name} (${fmtBytes(st.size)})`);
       opStatus.name = name;
       finishOp(true);
       console.log(`[backup] bundle created: ${name} (${fmtBytes(st.size)})`);
-      res.json({ ok: true, name, size: st.size, summary: summarizeBundle(bundle) });
+      res.json({ ok: true, name, size: st.size, summary });
     } catch (err) {
       finishOp(false, err.message || String(err));
       console.error('[backup] bundle create failed:', err);
@@ -1372,7 +1549,7 @@ module.exports = function (db, appConfig, appConfigModule) {
   router.post('/backup-restore/bundle/delete', requireAdmin, express.json(), (req, res) => {
     const n = safeBundleName(req.body && req.body.name);
     if (!n) return res.status(400).json({ ok: false, error: 'Bad bundle name' });
-    try { fs.unlinkSync(path.join(BUNDLE_DIR, n)); res.json({ ok: true }); }
+    try { fs.unlinkSync(path.join(BUNDLE_DIR, n)); removeBundleMeta(n); res.json({ ok: true }); }
     catch (err) { res.status(500).json({ ok: false, error: err.message || String(err) }); }
   });
 
@@ -1388,8 +1565,8 @@ module.exports = function (db, appConfig, appConfigModule) {
       const base = path.basename(req.file.originalname).replace(/[^A-Za-z0-9._-]/g, '_');
       const name = safeBundleName(base) || `web_app_bundle_${bundleStamp()}.json`;
       try {
-        fs.mkdirSync(BUNDLE_DIR, { recursive: true });
-        fs.writeFileSync(path.join(BUNDLE_DIR, name), req.file.buffer);
+        writeBundleFile(name, req.file.buffer);
+        writeBundleMeta(name, s, fs.statSync(path.join(BUNDLE_DIR, name)));
         res.redirect('/backup-restore?ok=bundleup');
       } catch (e) {
         res.redirect('/backup-restore?error=' + encodeURIComponent('Could not save the bundle: ' + (e.message || e)));
@@ -1416,25 +1593,35 @@ module.exports = function (db, appConfig, appConfigModule) {
     if (confirm !== RESTORE_CONFIRM) {
       return res.status(400).json({ ok: false, error: `Type ${RESTORE_CONFIRM} to confirm.` });
     }
+    const name = safeBundleName(req.body && req.body.name);
+    if (!name) return res.status(400).json({ ok: false, error: 'Bad bundle name.' });
+    const restoreCommands = !!(req.body && req.body.restoreCommands === true);
+    // Claim the one-operation slot BEFORE the awaits below (the access test
+    // takes seconds) — otherwise two restores could both pass the check.
+    if (!startOp('restore', name)) return busyError(res);
     let loaded;
-    try { loaded = readBundleFile(req.body && req.body.name); }
-    catch (err) { return res.status(400).json({ ok: false, error: err.message || String(err) }); }
-    const summary = summarizeBundle(loaded.bundle);
-    if (!summary.valid) {
-      return res.status(400).json({ ok: false, error: 'Bundle is not usable: ' + summary.problems.join('; ') });
-    }
-    if (opStatus && opStatus.running) {
-      return res.status(409).json({ ok: false, error: `A ${opStatus.kind} is already running — wait for it to finish.` });
+    try {
+      mark('Bundle', 'in_progress', 'reading and checking');
+      loaded = readBundleFile(name);
+      const summary = summarizeBundle(loaded.bundle);
+      if (!summary.valid) throw new Error('Bundle is not usable: ' + summary.problems.join('; '));
+      mark('Bundle', 'ok', name);
+    } catch (err) {
+      finishOp(false, err.message || String(err));
+      return res.status(400).json({ ok: false, error: err.message || String(err) });
     }
     // Enforced here too, not just in the browser: the whole point is never
     // starting a restore the transport can't finish.
+    mark('Access check', 'in_progress', 'testing read / write / command access');
     const access = await testAccess();
     if (!access.ok) {
-      return res.status(400).json({ ok: false, error: 'Access check failed: ' + access.checks.filter(c => !c.ok).map(c => c.name).join(', '), checks: access.checks });
+      const failed = access.checks.filter(c => !c.ok).map(c => c.name).join(', ');
+      finishOp(false, 'Access check failed: ' + failed);
+      return res.status(400).json({ ok: false, error: 'Access check failed: ' + failed, checks: access.checks });
     }
-    startOp('restore', loaded.name);
+    mark('Access check', 'ok', '');
     try {
-      const steps = await restoreBundle(loaded.bundle, mark);
+      const steps = await restoreBundle(loaded.bundle, mark, { restoreCommands });
       finishOp(true);
       console.log(`[backup] bundle restored: ${loaded.name}`);
       res.json({ ok: true, steps });

@@ -18,6 +18,12 @@ const path = require('path');
 
 const filePath = path.join(__dirname, '..', 'local_admins.json');
 
+// An entry the login code can use: a string username and a string hash.
+// Anything else (a malformed hand edit, a wrong-shaped import) is ignored.
+function isValidEntry(e) {
+  return !!(e && typeof e.username === 'string' && typeof e.password_hash === 'string');
+}
+
 function loadAll() {
   if (!fs.existsSync(filePath)) return [];
   try {
@@ -27,7 +33,7 @@ function loadAll() {
       console.warn('[localAdmins] local_admins.json is not an array — ignoring');
       return [];
     }
-    return parsed.filter(e => e && typeof e.username === 'string' && typeof e.password_hash === 'string');
+    return parsed.filter(isValidEntry);
   } catch (err) {
     console.warn('[localAdmins] failed to parse local_admins.json:', err.message);
     return [];
@@ -114,15 +120,18 @@ function count() {
 }
 
 // True when the credential file EXISTS but can't be read as a valid admin
-// array (corrupt/truncated JSON, or not an array). The first-run setup gate
+// array (corrupt/truncated JSON, not an array, or a non-empty array in which
+// NO entry has a string username + password_hash). The first-run setup gate
 // must treat this as "locked" — an operator exists but the file is damaged —
 // NOT as "zero admins", which would silently re-open unauthenticated /setup
 // and let anyone mint a new admin. Fails safe: any doubt ⇒ report an error.
+// An empty array ([]) is a genuine "no admins yet" and is NOT an error.
 function fileError() {
   if (!fs.existsSync(filePath)) return false; // genuinely absent → first-run
   try {
     const parsed = JSON.parse(fs.readFileSync(filePath, 'utf8'));
-    return !Array.isArray(parsed);
+    if (!Array.isArray(parsed)) return true;
+    return parsed.length > 0 && !parsed.some(isValidEntry);
   } catch (e) {
     return true;
   }

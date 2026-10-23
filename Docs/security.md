@@ -102,7 +102,9 @@ session object directly — there is no server-side session store.
 Cookie attributes come from `security.session`:
 
 - `httpOnly: true` (default)
-- `secure: false` (default — flip to `true` for production HTTPS)
+- `secure: null` (default = **auto**: the cookie is `Secure` whenever the
+  console serves HTTPS — `server.ssl` true or an `https://`
+  `publicBaseUrl`. An explicit `true` / `false` in `config.json` wins.)
 - `sameSite: 'strict'` (default)
 - `maxAge: sessionMaxAgeHours * 60 * 60 * 1000`
 
@@ -120,25 +122,46 @@ req.session.user = {
   name: 'Matt Walker',
   role: 'admin'
 }
+req.session.iat = 1761150000000   // Date.now() at login
+req.session.fp  = '3f9c…'         // first 16 hex of sha256(password_hash)
 ```
 
 Updated by `/login` on successful sign-in and by `/profile` when the
 operator changes their own name or email (so the sidebar reflects the
-new value without a re-login).
+new value without a re-login). `fp` is refreshed when the operator
+changes their own password (`/profile/password`, or re-adding
+themselves on Admins) so that session survives; every other session for
+that admin ends.
 
 ### `requireAdmin`
 
-[middleware/auth.js](../middleware/auth.js):
+[middleware/auth.js](../middleware/auth.js). A well-formed admin session
+is **re-checked against `local_admins.json` on every request**
+(`sessionProblem`) — the cookie is signed, not stored server-side, so
+this is the only way to revoke one:
 
-```js
-function requireAdmin(req, res, next) {
-  if (req.session && req.session.user && req.session.user.role === 'admin') return next();
-  res.redirect('/login');
-}
-```
+| Problem   | When                                                             |
+| --------- | ---------------------------------------------------------------- |
+| `removed` | the username is no longer in `local_admins.json`                 |
+| `changed` | the stored `password_hash` no longer matches the session's `fp`  |
+| `expired` | `Date.now() - iat` exceeds `sessionMaxAgeHours` (the cookie's own `maxAge` is only enforced by the browser) |
+| `stale`   | a session without `iat` / `fp` (minted before this check existed) |
+
+On any of these the session is cleared and the request is redirected to
+`/login?error=…`; the reason is logged as `[auth] session for "x"
+rejected: …`. Removing an admin on the Admins page therefore ends that
+admin's sessions immediately. The file read is synchronous and tiny —
+the first-run setup gate already does the same once per request.
 
 Every authenticated route uses this. Routes that mutate state (e.g.
 `POST /admins/delete`) also enforce it.
+
+### Login timing
+
+`POST /login` runs a bcrypt compare even when the username is unknown
+(against a throwaway hash made at boot, `DUMMY_HASH`), so a bad
+username and a bad password take the same time and response timing
+can't enumerate admin usernames.
 
 ## Brute-force protection
 
@@ -226,6 +249,37 @@ defined in [app.js](../app.js):
 any cross-origin embeds and turning it on breaks the embedded
 self-hosted Alpine bundle in some browsers.
 
+## Cross-site request check (CSRF)
+
+There is no CSRF token. Three layers stand in for one:
+
+1. the session cookie is `SameSite=strict`, so a browser doesn't send it
+   on a request started from another site;
+2. the CSP `form-action 'self'` stops the console's own pages posting
+   elsewhere;
+3. a middleware in [app.js](../app.js) refuses (403, logged as
+   `[csrf] refused …`) any `POST` / `PUT` / `PATCH` / `DELETE` whose
+   `Origin` header names a host other than the request's own (`'null'`
+   counts as foreign), or whose `Sec-Fetch-Site` is neither
+   `same-origin` nor `none`.
+
+A request with neither header passes (curl, scripts, very old
+browsers). The console's own forms, Alpine `fetch` calls and the
+image-upload XHR are same-origin and carry a matching `Origin`, so
+nothing legitimate is affected. Behind a reverse proxy set
+`server.trustProxy` so `req.host` reads `X-Forwarded-Host`.
+
+## Error responses
+
+A final 4-argument error handler in [app.js](../app.js) replaces
+Express's default one, which prints `err.stack` (file paths, module
+names) into the response unless `NODE_ENV=production`. It logs the full
+error and answers with a generic page — JSON `{ ok: false, error }`
+when the request asked for JSON (the console's fetch endpoints), HTML
+otherwise. Body-parser 4xx errors (bad JSON, body too large) keep their
+status and short message. `START_APP.sh` also exports
+`NODE_ENV=production` unless already set.
+
 ## First-run setup gate
 
 While `localAdmins.count() === 0`, [app.js](../app.js) redirects every
@@ -241,9 +295,11 @@ exists.
 
 **Corrupt credential file fails closed.** A count of 0 can mean either a
 genuine first run *or* a `local_admins.json` that exists but can't be
-parsed. `localAdmins.fileError()` distinguishes them: if the file is
-present-but-unreadable the gate returns a 503 telling the operator to
-restore it, and does **not** offer the unauthenticated setup flow —
+used. `localAdmins.fileError()` distinguishes them: if the file is
+present but unparseable, not an array, or a non-empty array in which
+no entry has a string `username` + `password_hash`, the gate returns a
+503 telling the operator to restore it, and does **not** offer the
+unauthenticated setup flow (an empty `[]` is a genuine first run) —
 otherwise damaging the file would let anyone mint a fresh admin. The file
 is also written atomically (temp + rename, created `0600`) so a crash
 mid-write can't truncate it into that corrupt state in the first place.
@@ -302,13 +358,19 @@ Sensitive files on disk:
 | File                 | What's in it                                | Recommended mode |
 | -------------------- | ------------------------------------------- | ---------------- |
 | `local_admins.json`  | bcrypt hashes                               | `0600` (auto-set on every write) |
-| `config.json`        | session keys (if `fixed`), Web App SSH private key / EC2 access keys, MySQL password | `0600` |
-| `backups/*.json`     | web app rebuild bundles: its config.json secrets + nonprofit password hashes + uploaded images | `0600` |
+| `config.json`        | session keys (if `fixed`), Web App SSH private key / EC2 access keys, MySQL password | `0600` (auto-set on every save from Settings) |
+| `backups/`           | web app rebuild bundles + `.meta.json` summaries | `0700` dir, `0600` files (auto-set when a bundle is created / uploaded) |
 | `public/images/*`    | uploaded background images                  | default |
 
 ```bash
 chmod 0600 config.json local_admins.json
 ```
+
+Do this once after cloning: `config.json` is tracked in git (the infra
+scripts depend on it) and a fresh checkout is `0644` until the console
+first saves it. The Settings → Web App form never echoes the SSH
+private key or the AWS secret back to the browser — a blank field keeps
+the stored value, a "Remove the stored …" checkbox clears it.
 
 Treat `config.json` as a secret. In EC2 mode prefer the instance profile
 (Settings → Web App → "This app is deployed in AWS") over stored access
@@ -334,8 +396,9 @@ belong in `mmoa_web_app`:
   restart** unless you switch to `sessionKeyMode: "fixed"` and provide
   durable keys.
 - Setting `security.session.secure: true` over HTTP will make
-  cookies invisible to the browser. Only flip when you're sure
-  you're on HTTPS.
+  cookies invisible to the browser. Leave it `null` (auto) unless you
+  terminate TLS somewhere the console can't see — then set it
+  explicitly.
 - `skipSuccessfulRequests` resets the failure counter on *every*
   successful login from that IP, so an attacker who eventually
   guesses a password resets their own throttle. The intended use is

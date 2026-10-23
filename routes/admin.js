@@ -15,7 +15,7 @@
 const express = require('express');
 const { page, flash } = require('../views/layout');
 const { escapeHtml } = require('../views/escapeHtml');
-const { requireAdmin, hashPassword, getPasswordRules, validatePassword } = require('../middleware/auth');
+const { requireAdmin, hashPassword, sessionFingerprint, getPasswordRules, validatePassword } = require('../middleware/auth');
 const localAdmins = require('../helpers/localAdmins');
 
 function dbBanner(err) {
@@ -247,6 +247,11 @@ module.exports = function (db, appConfig) {
       const password_hash = await hashPassword(password);
       const existed = !!localAdmins.findByUsername(username);
       localAdmins.upsert({ username, email, name, password_hash });
+      // Re-adding yourself replaces your own hash; keep this session alive
+      // (requireAdmin checks the session fingerprint against the stored hash).
+      if (username === (req.session.user.username || '').toLowerCase()) {
+        req.session.fp = sessionFingerprint(password_hash);
+      }
       res.redirect('/admins?msg=' + encodeURIComponent(existed ? `Admin "${username}" updated.` : `Admin "${username}" added.`));
     } catch (err) {
       console.error('[admin] add local admin failed:', err);

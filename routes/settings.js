@@ -26,7 +26,7 @@ const fs = require('fs');
 const path = require('path');
 const multer = require('multer');
 const { page, flash } = require('../views/layout');
-const { escapeHtml } = require('../views/escapeHtml');
+const { escapeHtml, jsAttrStr } = require('../views/escapeHtml');
 const { requireAdmin } = require('../middleware/auth');
 const awsSsm = require('../helpers/awsSsm');
 const webAppAccess = require('../helpers/webAppAccess');
@@ -528,7 +528,9 @@ module.exports = function (db, appConfig, appConfigModule) {
               <textarea name="sshPrivateKey" rows="8" spellcheck="false"
                         autocomplete="off"
                         class="block w-full font-mono text-xs rounded-lg border border-slate-200 bg-white px-3 py-2 text-slate-900 shadow-sm focus:border-brand-500 focus:outline-none focus:ring-2 focus:ring-brand-500/30 dark:border-slate-700 dark:bg-slate-950 dark:text-slate-100"
-                        placeholder="-----BEGIN OPENSSH PRIVATE KEY-----&#10;…&#10;-----END OPENSSH PRIVATE KEY-----">${escapeHtml(ssh.privateKey || '')}</textarea>
+                        placeholder="${ssh.privateKey ? 'A key is stored — paste a new one to replace it' : '-----BEGIN OPENSSH PRIVATE KEY-----&#10;…&#10;-----END OPENSSH PRIVATE KEY-----'}"></textarea>
+              ${ssh.privateKey ? `<p class="mt-1 text-xs text-emerald-700 dark:text-emerald-300">A key is stored — it is never shown here. Leave this blank to keep it, or paste a new one to replace it.</p>
+              <label class="mt-1 flex items-center gap-2 text-xs text-slate-600 dark:text-slate-300"><input type="checkbox" name="sshPrivateKey_clear" value="1"> Remove the stored key</label>` : ''}
               <p class="mt-1 text-xs text-slate-500 dark:text-slate-400">Paste an <strong>unencrypted</strong> PEM private key (no passphrase). Stored in <code>config.json</code> in plain text — lock down file permissions.</p>
             </div>
 
@@ -580,7 +582,10 @@ module.exports = function (db, appConfig, appConfigModule) {
                 </div>
                 <div>
                   <label class="label">Secret access key</label>
-                  <input class="input" type="password" name="ec2_secretAccessKey" value="${escapeHtml(ec2.secretAccessKey || '')}" autocomplete="off">
+                  <input class="input" type="password" name="ec2_secretAccessKey" value="" autocomplete="off"
+                         placeholder="${ec2.secretAccessKey ? 'A secret is stored — enter a new one to replace it' : ''}">
+                  ${ec2.secretAccessKey ? `<p class="mt-1 text-xs text-emerald-700 dark:text-emerald-300">A secret is stored — it is never shown here. Leave this blank to keep it, or enter a new one to replace it.</p>
+                  <label class="mt-1 flex items-center gap-2 text-xs text-slate-600 dark:text-slate-300"><input type="checkbox" name="ec2_secretAccessKey_clear" value="1"> Remove the stored secret</label>` : ''}
                 </div>
               </div>
             </div>
@@ -779,6 +784,12 @@ module.exports = function (db, appConfig, appConfigModule) {
   // stored values so each mode's sub-block is preserved even when another
   // mode is currently selected, and so secrets are kept when the EC2
   // credentials toggle is on.
+  //
+  // The SSH private key and the AWS secret are WRITE-ONLY: the form never
+  // echoes them, so a blank field means "keep what is stored" and the
+  // "Remove the stored …" checkbox is the only way to blank one. (Test
+  // connection goes through here too, so it tests with the stored secret
+  // when the field is left blank.)
   function webAppFromBody(b, prev) {
     const p = prev || {};
     const pLocal = p.local || {};
@@ -789,13 +800,21 @@ module.exports = function (db, appConfig, appConfigModule) {
     const portNum = parseInt(b.ssh_port, 10);
     const runAsUser = (b.ec2_runAsUser || '').trim();
 
+    // Normalize CRLF → LF so a pasted key keeps valid PEM line endings.
+    const postedKey = (b.sshPrivateKey || '').replace(/\r\n/g, '\n');
+    const sshPrivateKey = b.sshPrivateKey_clear === '1' ? ''
+      : (postedKey.trim() ? postedKey : (pSsh.privateKey || ''));
+    const postedSecret = b.ec2_secretAccessKey || '';
+    const ec2Secret = b.ec2_secretAccessKey_clear === '1' ? ''
+      : (postedSecret.trim() ? postedSecret : (pEc2.secretAccessKey || ''));
+
     const ec2RunningInAws = b.ec2_runningInAws === 'on';
     const ec2 = {
       runningInAws: ec2RunningInAws,
       // Preserve stored creds when the instance-profile toggle is on so
       // flipping it back off doesn't lose them (mirrors the AWS handler).
       accessKeyId: ec2RunningInAws ? (pEc2.accessKeyId || '') : (b.ec2_accessKeyId || '').trim(),
-      secretAccessKey: ec2RunningInAws ? (pEc2.secretAccessKey || '') : (b.ec2_secretAccessKey || ''),
+      secretAccessKey: ec2RunningInAws ? (pEc2.secretAccessKey || '') : ec2Secret,
       region: (b.ec2_region || '').trim() || 'us-east-1',
       instanceId: (b.ec2_instanceId || '').trim(),
       appPath: (b.ec2_appPath || '').trim(),
@@ -814,8 +833,7 @@ module.exports = function (db, appConfig, appConfigModule) {
         host: (b.ssh_host || '').trim(),
         port: Number.isInteger(portNum) && portNum >= 1 && portNum <= 65535 ? portNum : 22,
         username: (b.ssh_username || '').trim(),
-        // Normalize CRLF → LF so a pasted key keeps valid PEM line endings.
-        privateKey: (b.sshPrivateKey || '').replace(/\r\n/g, '\n'),
+        privateKey: sshPrivateKey,
         appPath: (b.ssh_appPath || '').trim()
       },
       ec2,
@@ -915,6 +933,13 @@ function appearanceBlock(title, key, cfg, opacityPct, opacityLabel) {
   const colorField = key + '_background_color';
   const imageField = key + '_background_image';
   const opacityField = key === 'login' ? 'login_card_opacity' : 'app_surface_opacity';
+  // The saved image URL as a JS string literal INSIDE the :style attribute
+  // below (an Alpine expression) — jsAttrStr, not escapeHtml: the browser
+  // decodes HTML entities before Alpine evaluates the expression, so an
+  // HTML-escaped value could still break out of the string. Only /images/…
+  // URLs ever get saved (see the POST handler and views/layout.js
+  // cssUrlSafe), but a tampered settings import could put anything here.
+  const savedImageJs = jsAttrStr(cfg.backgroundImage || '');
 
   const existingThumb = cfg.backgroundImage
     ? `<div class="mt-2 flex items-center gap-3" x-show="!${stagedKey}">
@@ -971,10 +996,10 @@ function appearanceBlock(title, key, cfg, opacityPct, opacityLabel) {
           <div class="text-xs font-semibold uppercase tracking-wider text-slate-500 dark:text-slate-400 mb-2">Preview</div>
           <div class="relative h-48 rounded-xl overflow-hidden border border-slate-200 dark:border-slate-700 flex items-center justify-center bg-center bg-cover bg-no-repeat"
                :style="{
-                 backgroundImage: (${stagedKey} || (!${clearKey} && '${escapeHtml(cfg.backgroundImage || '')}'))
-                   ? ('url(\\'' + (${stagedKey} || '${escapeHtml(cfg.backgroundImage || '')}') + '\\')')
+                 backgroundImage: (${stagedKey} || (!${clearKey} && ${savedImageJs}))
+                   ? ('url(\\'' + (${stagedKey} || ${savedImageJs}) + '\\')')
                    : '',
-                 backgroundColor: (${stagedKey} || (!${clearKey} && '${escapeHtml(cfg.backgroundImage || '')}'))
+                 backgroundColor: (${stagedKey} || (!${clearKey} && ${savedImageJs}))
                    ? ''
                    : ${colorKey}
                }">

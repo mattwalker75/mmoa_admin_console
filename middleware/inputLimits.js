@@ -69,7 +69,9 @@ function enforceInputLimits(req, res, next) {
         `<!DOCTYPE html><html><head><title>Input too long</title></head>` +
         `<body style="font-family:system-ui;padding:24px;max-width:520px;margin:auto;">` +
         `<h2>Input too long</h2><p>${msg}</p>` +
-        `<p><a href="javascript:history.back()">← Go back</a></p></body></html>`
+        // A plain link: the CSP (script-src without 'unsafe-inline') blocks
+        // javascript: URLs, so history.back() here would do nothing.
+        `<p><a href="/">← Home</a></p></body></html>`
       );
     }
   }

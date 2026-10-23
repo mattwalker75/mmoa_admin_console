@@ -16,6 +16,9 @@ from this console.
 ## Profile
 
 Your own name, email and password. Username can't be changed here.
+Changing your password keeps you signed in on this browser and signs
+out every other session for your account. Sessions also end after
+`sessionMaxAgeHours` (8 by default) whatever the browser does.
 
 ## Dashboard
 
@@ -29,7 +32,8 @@ opens that nonprofit. A red banner means the database couldn't be reached.
 
 Who can sign in to **this console**. Re-using a username replaces that
 admin's email / name / password. You can't remove yourself or the last
-admin.
+admin. Removing an admin (or replacing their password) ends their
+existing sessions on the next request — they land on the login page.
 
 ## Events
 
@@ -259,13 +263,31 @@ in the file, including secrets, is left alone — and then offers to
   **Full Restore** walks through: test access → optional Maintenance Mode
   → verify the bundle → restore configuration → website → uploads →
   database, then prompts for the web app restart. Use it
-  after the web app server is rebuilt.
+  after the web app server is rebuilt. Only the config keys Web App
+  Settings edits are written; the bundle's `maintenanceCommand` is left
+  as the host has it unless you tick **Also restore the shell
+  commands**. Bundles are listed from a small `.meta.json` summary
+  written next to each one (a bundle copied in by hand is summarized
+  once, on the next page view).
 - **Console settings** — this console's config (excluding session keys
-  and admin passwords).
+  and admin passwords). The `webApp` section's Start / Stop / Restart
+  commands are kept as they are unless you tick **Also restore the shell
+  commands**; appearance values that aren't an uploaded `/images/…` file
+  or a plain color are dropped (the page says so).
 - **Web App configuration / website** — selective restore by section.
+  Only known config keys are offered; `maintenanceCommand` needs the
+  commands box ticked.
 - **Web App database** — full JSON snapshot; restore replaces *all* data
-  and requires typing `RESTORE`. Stop the web app or enable Maintenance
-  Mode first.
+  and requires typing `RESTORE`. **Every live table is emptied**, then
+  the tables the backup has are reloaded — a live table the backup lacks
+  ends up empty, a backup table the live schema lacks is skipped, and
+  both cases are reported on the result banner. Stop the web app or
+  enable Maintenance Mode first.
+
+**Why the commands box?** The console runs those values as shell
+commands on the Web App host (Maintenance Mode, the power bar). A backup
+file you didn't make yourself could plant one, so a restore keeps the
+live commands unless you say otherwise.
 
 Bundles and configuration backups contain secrets and password hashes —
 store them like the database.
@@ -278,7 +300,10 @@ store them like the database.
 - **Web App** — how the console reaches the website: **Local** (same
   machine), **Remote via SSH** (host, user, private key), or **Remote on
   EC2** (instance id + region, instance profile or access keys, run-as
-  user `mmoa`). Also the web app's directory, the database connection, and
+  user `mmoa`). The SSH private key and the AWS secret are write-only:
+  the form never shows them again — leave the field blank to keep what
+  is stored, paste a new value to replace it, or tick **Remove the
+  stored …** to clear it. Also the web app's directory, the database connection, and
   the Start / Stop / Restart commands. **Test connection** checks the
   values in the form before you save. Database changes need a console
   restart (a dialog says so).

@@ -12,7 +12,7 @@ const express = require('express');
 const { page, flash } = require('../views/layout');
 const { escapeHtml } = require('../views/escapeHtml');
 const {
-  requireAdmin, hashPassword, verifyPassword,
+  requireAdmin, hashPassword, verifyPassword, sessionFingerprint,
   getPasswordRules, validatePassword
 } = require('../middleware/auth');
 const localAdmins = require('../helpers/localAdmins');
@@ -159,6 +159,10 @@ module.exports = function (appConfig) {
 
       const password_hash = await hashPassword(next);
       localAdmins.update(sessionUser.username, { password_hash });
+      // requireAdmin compares the session's fingerprint with the stored
+      // hash on every request; refresh it so THIS session survives the
+      // change (every other session for this admin is ended).
+      req.session.fp = sessionFingerprint(password_hash);
       res.redirect('/profile?msg=Password+updated.');
     } catch (err) {
       console.error('[profile] password change failed:', err);
