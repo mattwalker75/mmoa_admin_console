@@ -373,16 +373,9 @@ function makeRouter(appConfig) {
       cards = results.map((r, i) => sectionCard(r.s, r.content, r.err, i === 0)).join('\n');
     }
 
-    const previewBtn = (!notConfigured && publicBaseUrl)
-      ? `<a href="${escapeHtml(publicBaseUrl)}" target="_blank" rel="noopener" class="btn-secondary inline-flex items-center gap-1.5">Preview live site <span aria-hidden="true">↗</span></a>`
-      : `<span class="btn-secondary opacity-50 cursor-not-allowed inline-flex items-center gap-1.5" title="Set publicBaseUrl under Web App Settings → General to enable preview">Preview live site <span aria-hidden="true">↗</span></span>`;
-
-    const header = `<header class="flex items-start justify-between gap-4 mb-6">
-      <div>
-        <h1 class="text-2xl font-bold text-slate-900 dark:text-slate-100">Web App Website</h1>
-        <p class="mt-1 text-sm text-slate-500 dark:text-slate-400">Edit the website's fixed copy (home hero, our story, how to help, partner page, footer). Events, raffles, the board and the directory have their own pages.</p>
-      </div>
-      <div class="shrink-0">${previewBtn}</div>
+    const header = `<header class="mb-6">
+      <h1 class="text-2xl font-bold text-slate-900 dark:text-slate-100">Web App Website</h1>
+      <p class="mt-1 text-sm text-slate-500 dark:text-slate-400">Edit the website's fixed copy (home hero, our story, how to help, partner page, footer). Events, raffles, the board and the directory have their own pages.</p>
     </header>`;
 
     const banner = notConfigured
