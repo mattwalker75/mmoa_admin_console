@@ -241,7 +241,8 @@ Accounts and IP addresses the website has blocked: automatically after too
 many failed logins (default: 10 failures → 5 minutes; change it under Web
 App Settings → Security), or by an admin with **Lock login** on the
 nonprofit's page (shown as *Locked by MMoA*, never lapses). **Unlock**
-clears either immediately. "Only show currently locked" hides lapsed rows.
+clears either immediately. One entry per account (login name and email,
+linked to the nonprofit's page); "Only show currently locked" hides lapsed rows.
 
 ## Reports
 

@@ -57,18 +57,50 @@ module.exports = function (db, appConfig) {
        ORDER BY locked_until_ms DESC, last_failed_at DESC
     `);
 
-    const lockouts = rows.map(r => ({
-      id: r.id,
-      scope: r.scope || '',
-      scopeLabel: scopeLabel(r.scope),
-      scopeKey: r.scope_key || '',
-      failCount: r.fail_count | 0,
-      // Coerce to a number (or null) so the client can compare against Date.now().
-      lockedUntilMs: r.locked_until_ms == null ? null : Number(r.locked_until_ms),
-      manual: lockHelper.isManual(r.locked_until_ms),
-      lastFailed: r.last_failed_at || '',
-      search: [r.scope, r.scope_key].filter(Boolean).join(' ').toLowerCase()
-    }));
+    // One entry per nonprofit account: the website keys the account axis by
+    // whatever was typed (login name OR email, lower-cased) and an admin
+    // lock writes both, so rows that resolve to the same user are merged
+    // (Unlock clears all of them). IP rows, and typed identifiers that match
+    // no account, stay one row each.
+    const acctKeys = [...new Set(rows.filter(r => r.scope !== 'ip' && r.scope_key).map(r => String(r.scope_key).toLowerCase()))];
+    let userByKey = new Map();
+    if (acctKeys.length) {
+      const ph = acctKeys.map(() => '?').join(',');
+      const { rows: users } = await safeAll(db,
+        `SELECT user_id, login_name, email FROM users WHERE LOWER(login_name) IN (${ph}) OR LOWER(email) IN (${ph})`, [...acctKeys, ...acctKeys]);
+      for (const u of users) {
+        for (const k of [u.login_name, u.email]) if (k) userByKey.set(String(k).toLowerCase(), u);
+      }
+    }
+    const toMs = (v) => (v == null ? null : Number(v));
+    const maxMs = (a, b) => (a == null ? b : b == null ? a : Math.max(a, b));
+    const byUser = new Map();
+    const lockouts = [];
+    for (const r of rows) {
+      const key = String(r.scope_key || '');
+      const u = r.scope !== 'ip' ? userByKey.get(key.toLowerCase()) : null;
+      const base = {
+        id: r.id,
+        scope: r.scope || '',
+        scopeLabel: u ? 'Nonprofit login' : scopeLabel(r.scope),
+        scopeKey: u ? (u.login_name || key) : key,
+        email: u ? (u.email || '') : '',
+        userId: u ? u.user_id : null,
+        failCount: r.fail_count | 0,
+        // Coerce to a number (or null) so the client can compare against Date.now().
+        lockedUntilMs: toMs(r.locked_until_ms),
+        manual: lockHelper.isManual(r.locked_until_ms),
+        lastFailed: r.last_failed_at || '',
+        search: [r.scope, key, u && u.login_name, u && u.email].filter(Boolean).join(' ').toLowerCase()
+      };
+      if (!u) { lockouts.push(base); continue; }
+      const prev = byUser.get(u.user_id);
+      if (!prev) { byUser.set(u.user_id, base); lockouts.push(base); continue; }
+      prev.failCount += base.failCount;
+      prev.lockedUntilMs = maxMs(prev.lockedUntilMs, base.lockedUntilMs);
+      prev.manual = prev.manual || base.manual;
+      if (base.lastFailed > prev.lastFailed) prev.lastFailed = base.lastFailed;
+    }
 
     const lockoutsJson = escapeHtml(JSON.stringify(lockouts));
     const emptyMsg = err ? 'Unavailable.' : 'No lockouts on record.';
@@ -97,7 +129,7 @@ module.exports = function (db, appConfig) {
              },
              fmtUntil(l) {
                if (l.lockedUntilMs == null) return '—';
-               if (l.manual) return 'Locked by MMoA — until unlocked';
+               if (l.manual) return 'Until unlocked';
                try { return new Date(l.lockedUntilMs).toLocaleString(); }
                catch (e) { return String(l.lockedUntilMs); }
              },
@@ -169,7 +201,10 @@ module.exports = function (db, appConfig) {
                   Type <span class="text-xs text-slate-400 ml-1" x-text="sortIcon('scope')"></span>
                 </th>
                 <th class="cursor-pointer select-none" x-on:click="toggleSort('scopeKey')">
-                  Account / IP <span class="text-xs text-slate-400 ml-1" x-text="sortIcon('scopeKey')"></span>
+                  Login / IP <span class="text-xs text-slate-400 ml-1" x-text="sortIcon('scopeKey')"></span>
+                </th>
+                <th class="cursor-pointer select-none" x-on:click="toggleSort('email')">
+                  Email <span class="text-xs text-slate-400 ml-1" x-text="sortIcon('email')"></span>
                 </th>
                 <th class="cursor-pointer select-none" x-on:click="toggleSort('failCount')">
                   Failed attempts <span class="text-xs text-slate-400 ml-1" x-text="sortIcon('failCount')"></span>
@@ -186,14 +221,18 @@ module.exports = function (db, appConfig) {
               <template x-for="l in visible" :key="l.id">
                 <tr>
                   <td>
-                    <span class="text-xs font-medium px-2 py-0.5 rounded-full bg-slate-100 text-slate-700 dark:bg-slate-800 dark:text-slate-200"
+                    <span class="text-xs font-medium px-2 py-0.5 rounded-full whitespace-nowrap bg-slate-100 text-slate-700 dark:bg-slate-800 dark:text-slate-200"
                           x-text="l.scopeLabel"></span>
                   </td>
-                  <td class="font-mono text-xs text-slate-900 dark:text-slate-100 break-all" x-text="l.scopeKey || '—'"></td>
+                  <td class="font-mono text-xs text-slate-900 dark:text-slate-100 whitespace-nowrap">
+                    <template x-if="l.userId"><a class="text-brand-600 hover:underline" :href="'/nonprofits/' + l.userId" x-text="l.scopeKey || '—'"></a></template>
+                    <template x-if="!l.userId"><span x-text="l.scopeKey || '—'"></span></template>
+                  </td>
+                  <td class="text-xs whitespace-nowrap" x-text="l.email || '—'"></td>
                   <td x-text="l.failCount"></td>
                   <td>
                     <template x-if="isLocked(l)">
-                      <span class="inline-flex items-center gap-1.5 text-xs font-medium px-2 py-0.5 rounded-full bg-red-100 text-red-700 dark:bg-red-900/40 dark:text-red-300">
+                      <span class="inline-flex items-center gap-1.5 text-xs font-medium px-2 py-0.5 rounded-full whitespace-nowrap bg-red-100 text-red-700 dark:bg-red-900/40 dark:text-red-300">
                         <span x-text="l.manual ? 'Locked by MMoA' : ('Locked · ' + remaining(l) + ' left')"></span>
                       </span>
                     </template>
@@ -212,7 +251,7 @@ module.exports = function (db, appConfig) {
                 </tr>
               </template>
               <tr x-show="!visible.length">
-                <td colspan="7" class="text-center py-8 text-slate-400">
+                <td colspan="8" class="text-center py-8 text-slate-400">
                   <span x-show="query || onlyLocked">No matching lockouts.</span>
                   <span x-show="!query && !onlyLocked">${emptyMsg}</span>
                 </td>
@@ -235,10 +274,12 @@ module.exports = function (db, appConfig) {
       const row = await db.getAsync('SELECT scope, scope_key, locked_until_ms FROM login_lockouts WHERE id = ?', [id]).catch(() => null);
       const r = await db.runAsync('DELETE FROM login_lockouts WHERE id = ?', [id]);
       if (!r.changes) return res.redirect('/locked-users?error=Lockout+not+found+(already+cleared)');
-      // An admin lock ("Lock login") is two rows — the login name and the
-      // email — so clearing one from here clears its twin too, or the
-      // nonprofit would still be refused under the other identifier.
-      if (row && row.scope === 'account' && lockHelper.isManual(row.locked_until_ms)) {
+      // The list shows one entry per account, but the table can hold two
+      // rows for it (login name and email — an admin lock writes both, and
+      // failed attempts may have been typed either way), so clear every
+      // account row of that user, or they would still be refused under
+      // the other identifier.
+      if (row && row.scope !== 'ip') {
         const u = await db.getAsync('SELECT login_name, email FROM users WHERE LOWER(login_name) = LOWER(?) OR LOWER(email) = LOWER(?)', [row.scope_key, row.scope_key]).catch(() => null);
         if (u) await lockHelper.unlockAccount(db, u);
       }
