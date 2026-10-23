@@ -192,6 +192,12 @@ directory until a board member verifies them.
   error messages). The EIN can be changed here at any status (the
   organization itself can't once reviewed); leaving it blank keeps the
   stored one. The website shows the change within 20 seconds.
+- **Lock login / Unlock login** (under *Login account*) — an admin lock on
+  the account: the website refuses sign-in with "locked by Mission Men of
+  Anna" until you unlock it here (or under Locked Users). It never expires
+  on its own. *Unlock* also clears an automatic too-many-failures lock.
+  Different from **Deactivate login**: a deactivated account is switched
+  off (and signed out) as a matter of record; a lock is a hold.
 - **Hide from directory / Show in directory** (under *Login account*) is
   MMoA's override: a hidden organization is not in the public "Need Help?"
   directory whatever its own listing switch says, and its portal tells it
@@ -231,10 +237,11 @@ Direct access to every table, for anything the pages above don't cover:
 
 ## Locked Users
 
-Accounts and IP addresses the website has temporarily blocked after too
-many failed logins (default: 10 failures → 5 minutes; change it under
-Web App Settings → Security). **Unlock** clears the block immediately.
-"Only show currently locked" hides lapsed rows.
+Accounts and IP addresses the website has blocked: automatically after too
+many failed logins (default: 10 failures → 5 minutes; change it under Web
+App Settings → Security), or by an admin with **Lock login** on the
+nonprofit's page (shown as *Locked by MMoA*, never lapses). **Unlock**
+clears either immediately. "Only show currently locked" hides lapsed rows.
 
 ## Reports
 

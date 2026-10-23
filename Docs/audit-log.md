@@ -74,6 +74,7 @@ Summaries are written to be safe to read over anyone's shoulder:
 | `nonprofit.create` | A login + organization created from the console (New nonprofit) | organization name; *email verified: yes/no, organization verified: yes/no* — never the temporary password |
 | `nonprofit.profile_edit` | Edit profile saved | organization name; the names of the profile fields that changed (`contacts`, `categories`, `cities` count as fields) — never the values |
 | `nonprofit.hide` / `nonprofit.unhide` | Hidden from / shown in the Need Help directory by MMoA (the override) | organization name |
+| `nonprofit.lock` / `nonprofit.unlock` | Login locked by an admin (no expiry) / unlocked (also clears an automatic lock) | organization name |
 | `nonprofit.preview` | A preview link was made | organization name |
 | `nonprofit.photo_remove` | A profile photo removed | organization name |
 | `nonprofit.delete` | The account (and its organization profile) deleted | organization name |

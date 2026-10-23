@@ -48,6 +48,7 @@ const { page, flash } = require('../views/layout');
 const { escapeHtml, jsAttrStr } = require('../views/escapeHtml');
 const { requireAdmin, hashPassword, getPasswordRules, validatePassword } = require('../middleware/auth');
 const kit = require('../helpers/pageKit');
+const lockouts = require('../helpers/lockouts');
 const uploads = require('../helpers/webAppUploads');
 const { renderMarkdownLite } = require('../helpers/markdownLite');
 const preview = require('../helpers/sitePreview');
@@ -606,13 +607,21 @@ module.exports = function (db, appConfig) {
              u.created_at, u.last_login_at, o.org_id, o.name AS org_name, o.ein, o.city, o.verification_status, o.is_listed, o.admin_hidden
         FROM users u LEFT JOIN organizations o ON o.user_id = u.user_id
        ORDER BY u.created_at DESC, u.user_id DESC`, []);
+    const { rows: lockRows } = await kit.safeAll(db,
+      `SELECT LOWER(scope_key) AS k, locked_until_ms FROM login_lockouts WHERE scope = 'account' AND locked_until_ms > ?`, [Date.now()]);
+    const lockedKeys = new Map(lockRows.map(l => [l.k, lockouts.isManual(l.locked_until_ms)]));
+    const lockOf = (r) => {
+      const ks = [r.login_name, r.email].filter(Boolean).map(k => String(k).toLowerCase());
+      if (ks.some(k => lockedKeys.get(k) === true)) return 'manual';
+      return ks.some(k => lockedKeys.has(k)) ? 'auto' : '';
+    };
     const list = rows.map(r => {
       const contact = [r.first_name, r.last_name].filter(Boolean).join(' ');
       const status = r.org_id ? (r.verification_status || 'unverified') : 'no-org';
       return {
         id: r.user_id, name: r.org_name || '', ein: r.ein || '', contact, login: r.login_name || '', email: r.email || '',
         status, listed: r.org_id ? !!Number(r.is_listed) : false, adminHidden: r.org_id ? !!Number(r.admin_hidden) : false, active: !!Number(r.is_active),
-        emailVerified: !!r.email_verified_at, city: r.city || '',
+        emailVerified: !!r.email_verified_at, city: r.city || '', lock: lockOf(r),
         created: r.created_at ? String(r.created_at) : '',
         search: [r.org_name, r.ein, contact, r.email, r.login_name, r.city].filter(Boolean).join(' ').toLowerCase()
       };
@@ -693,6 +702,8 @@ module.exports = function (db, appConfig) {
                     <span x-show="r.status !== 'no-org' && !r.listed" class="pill-terminated">Hidden</span>
                     <span x-show="r.adminHidden" class="pill-failed">Hidden by MMoA</span>
                     <span x-show="!r.active" class="pill-failed">Inactive</span>
+                    <span x-show="r.lock === 'manual'" class="pill-failed">Locked by MMoA</span>
+                    <span x-show="r.lock === 'auto'" class="pill-pending">Locked</span>
                     <span x-show="!r.emailVerified" class="pill-pending">Email unverified</span>
                   </td>
                   <td class="text-slate-500 text-xs whitespace-nowrap" x-text="r.created || '—'"></td>
@@ -794,6 +805,7 @@ module.exports = function (db, appConfig) {
         WHERE scope <> 'ip' AND (LOWER(scope_key) = LOWER(?) OR LOWER(scope_key) = LOWER(?))`, [m.login_name || '', m.email || '']);
     const firstErr = oErr || contacts.err || images.err || cats.err || cities.err || vErr || pErr || lErr || null;
     const lockedNow = lockRows.filter(l => l.locked_until_ms != null && Number(l.locked_until_ms) > Date.now());
+    const manualLock = lockedNow.some(l => lockouts.isManual(l.locked_until_ms));
 
     const contactName = [m.first_name, m.last_name].filter(Boolean).join(' ');
     const title = (o && o.name) || contactName || m.login_name || ('#' + id);
@@ -935,13 +947,22 @@ module.exports = function (db, appConfig) {
           ${field('Email verified', m.email_verified_at ? escapeHtml(String(m.email_verified_at)) : '<span class="pill-pending">No</span>')}
           ${field('Login', Number(m.is_active) ? '<span class="pill-running">Active</span>' : '<span class="pill-failed">Deactivated</span>')}
           ${field('Open links', `${vRow && vRow.c != null ? Number(vRow.c) : '—'} verify · ${pRow && pRow.c != null ? Number(pRow.c) : '—'} reset`)}
-          ${field('Lockout', lockedNow.length ? `<span class="pill-failed">Locked</span> <a class="text-brand-600 hover:underline text-xs" href="/locked-users">Unlock →</a>` : 'Not locked')}
+          ${field('Lockout', manualLock ? '<span class="pill-failed">Locked by MMoA</span>'
+            : lockedNow.length ? `<span class="pill-failed">Locked</span> <span class="text-xs text-slate-500">too many failed logins · ${Math.ceil((Math.max(...lockedNow.map(l => Number(l.locked_until_ms))) - Date.now()) / 60000)} min left</span>`
+            : 'Not locked')}
         </div>
         <div class="flex flex-wrap gap-2 pt-1">
           <form method="POST" action="/nonprofits/${id}/active" class="m-0"
                 x-on:submit.prevent="window.uiConfirmSubmit($event.target, ${jsAttrStr(Number(m.is_active) ? 'Deactivate the login for ' + title + '? They are signed out and cannot sign in until reactivated.' : 'Reactivate the login for ' + title + '?')}, { title: 'Login', confirmLabel: ${Number(m.is_active) ? "'Deactivate'" : "'Activate'"}, danger: ${Number(m.is_active) ? 'true' : 'false'} })">
             <input type="hidden" name="state" value="${Number(m.is_active) ? '0' : '1'}">
             <button type="submit" class="btn-secondary text-sm">${Number(m.is_active) ? 'Deactivate login' : 'Activate login'}</button>
+          </form>
+          <form method="POST" action="/nonprofits/${id}/lock" class="m-0"
+                x-on:submit.prevent="window.uiConfirmSubmit($event.target, ${jsAttrStr(lockedNow.length
+                  ? 'Unlock the login for ' + title + '? They can sign in again right away.'
+                  : 'Lock the login for ' + title + '? Sign-in is refused with a \'locked by MMoA\' message until you unlock it here. It does not expire on its own.')}, { title: 'Login lock', confirmLabel: ${lockedNow.length ? "'Unlock'" : "'Lock'"}, danger: ${lockedNow.length ? 'false' : 'true'} })">
+            <input type="hidden" name="state" value="${lockedNow.length ? '0' : '1'}">
+            <button type="submit" class="${lockedNow.length ? 'btn-secondary' : 'btn-danger'} text-sm">${lockedNow.length ? 'Unlock login' : 'Lock login'}</button>
           </form>
           <form method="POST" action="/nonprofits/${id}/verify-email" class="m-0">
             <input type="hidden" name="state" value="${m.email_verified_at ? '0' : '1'}">
@@ -1182,6 +1203,31 @@ module.exports = function (db, appConfig) {
     } catch (err) {
       console.error('[nonprofits] delete failed:', err);
       res.redirect(`/nonprofits/${id}?error=` + encodeURIComponent('Delete failed: ' + (err.message || err)));
+    }
+  });
+
+  // ── Lock / Unlock login (admin lock, see helpers/lockouts.js) ──────
+  // state=1 → an 'account' lockout row with no expiry for the login name
+  // and the email; state=0 → every account-axis lock for them is deleted
+  // (manual or automatic). The web app refuses sign-in while it stands.
+  router.post('/nonprofits/:id/lock', requireAdmin, async (req, res) => {
+    const id = parseInt(req.params.id, 10);
+    if (!Number.isInteger(id) || id <= 0) return res.redirect('/nonprofits?error=Invalid+id');
+    const lock = kit.yes(req.body.state);
+    try {
+      const m = await db.getAsync('SELECT user_id, login_name, email FROM users WHERE user_id = ?', [id]);
+      if (!m) return res.redirect('/nonprofits?error=Nonprofit+not+found');
+      const label = await orgLabel(id);
+      if (lock) {
+        await lockouts.lockAccount(db, m);
+        await audit(req, 'nonprofit.lock', { kind: 'nonprofit', id, label, summary: 'Login locked by MMoA (no expiry)' });
+        return res.redirect(`/nonprofits/${id}?msg=` + encodeURIComponent('Login locked. Sign-in is refused until you unlock it.'));
+      }
+      const n = await lockouts.unlockAccount(db, m);
+      await audit(req, 'nonprofit.unlock', { kind: 'nonprofit', id, label, summary: n ? 'Login unlocked' : 'Unlock requested (no lock on record)' });
+      res.redirect(`/nonprofits/${id}?msg=` + encodeURIComponent(n ? 'Login unlocked. They can sign in again.' : 'There was no lock on this login.'));
+    } catch (e) {
+      res.redirect(`/nonprofits/${id}?error=` + encodeURIComponent('Could not update the lock: ' + (e.message || e)));
     }
   });
 

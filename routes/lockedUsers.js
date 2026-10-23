@@ -41,6 +41,8 @@ function scopeLabel(scope) {
   return scope || '—';
 }
 
+const lockHelper = require('../helpers/lockouts');
+
 module.exports = function (db, appConfig) {
   const router = express.Router();
   const audit = require('../helpers/audit')(db);
@@ -63,6 +65,7 @@ module.exports = function (db, appConfig) {
       failCount: r.fail_count | 0,
       // Coerce to a number (or null) so the client can compare against Date.now().
       lockedUntilMs: r.locked_until_ms == null ? null : Number(r.locked_until_ms),
+      manual: lockHelper.isManual(r.locked_until_ms),
       lastFailed: r.last_failed_at || '',
       search: [r.scope, r.scope_key].filter(Boolean).join(' ').toLowerCase()
     }));
@@ -87,12 +90,14 @@ module.exports = function (db, appConfig) {
              isLocked(l) { return l.lockedUntilMs != null && l.lockedUntilMs > this.nowMs; },
              remaining(l) {
                if (!this.isLocked(l)) return '';
+               if (l.manual) return 'until unlocked';
                let s = Math.max(0, Math.round((l.lockedUntilMs - this.nowMs) / 1000));
                const m = Math.floor(s / 60); s = s % 60;
                return m > 0 ? (m + 'm ' + s + 's') : (s + 's');
              },
              fmtUntil(l) {
                if (l.lockedUntilMs == null) return '—';
+               if (l.manual) return 'Locked by MMoA — until unlocked';
                try { return new Date(l.lockedUntilMs).toLocaleString(); }
                catch (e) { return String(l.lockedUntilMs); }
              },
@@ -132,7 +137,7 @@ module.exports = function (db, appConfig) {
         <header class="flex items-start justify-between mb-6 gap-4">
           <div>
             <h1 class="text-2xl font-bold text-slate-900 dark:text-slate-100">Locked Users</h1>
-            <p class="mt-1 text-sm text-slate-500 dark:text-slate-400">Nonprofit logins and IP addresses temporarily blocked from the web app's login after too many failed attempts (default 10 failures → 5-minute lockout; see Web App Settings → Security). Unlock clears the block immediately.</p>
+            <p class="mt-1 text-sm text-slate-500 dark:text-slate-400">Nonprofit logins and IP addresses blocked from the web app's login — automatically after too many failed attempts (default 10 failures → 5-minute lockout; see Web App Settings → Security), or by an admin ("Lock login" on the nonprofit's page, which never expires). Unlock clears either immediately.</p>
           </div>
           <div class="text-right shrink-0">
             <div class="text-2xl font-semibold text-slate-900 dark:text-slate-100" x-text="lockedCount"></div>
@@ -189,7 +194,7 @@ module.exports = function (db, appConfig) {
                   <td>
                     <template x-if="isLocked(l)">
                       <span class="inline-flex items-center gap-1.5 text-xs font-medium px-2 py-0.5 rounded-full bg-red-100 text-red-700 dark:bg-red-900/40 dark:text-red-300">
-                        Locked · <span x-text="remaining(l)"></span> left
+                        <span x-text="l.manual ? 'Locked by MMoA' : ('Locked · ' + remaining(l) + ' left')"></span>
                       </span>
                     </template>
                     <template x-if="!isLocked(l)">
@@ -227,9 +232,16 @@ module.exports = function (db, appConfig) {
       return res.redirect('/locked-users?error=Invalid+lockout+id');
     }
     try {
-      const row = await db.getAsync('SELECT scope, scope_key FROM login_lockouts WHERE id = ?', [id]).catch(() => null);
+      const row = await db.getAsync('SELECT scope, scope_key, locked_until_ms FROM login_lockouts WHERE id = ?', [id]).catch(() => null);
       const r = await db.runAsync('DELETE FROM login_lockouts WHERE id = ?', [id]);
       if (!r.changes) return res.redirect('/locked-users?error=Lockout+not+found+(already+cleared)');
+      // An admin lock ("Lock login") is two rows — the login name and the
+      // email — so clearing one from here clears its twin too, or the
+      // nonprofit would still be refused under the other identifier.
+      if (row && row.scope === 'account' && lockHelper.isManual(row.locked_until_ms)) {
+        const u = await db.getAsync('SELECT login_name, email FROM users WHERE LOWER(login_name) = LOWER(?) OR LOWER(email) = LOWER(?)', [row.scope_key, row.scope_key]).catch(() => null);
+        if (u) await lockHelper.unlockAccount(db, u);
+      }
       await audit(req, 'lockout.unlock', { kind: 'lockout', id, label: row ? [row.scope, row.scope_key].filter(Boolean).join(' ') : null, summary: 'Lockout cleared' });
       res.redirect('/locked-users?msg=Unlocked.');
     } catch (err) {
