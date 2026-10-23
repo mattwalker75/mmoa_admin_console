@@ -24,6 +24,11 @@
 //     single atomic BEGIN…COMMIT script in one sqlite3 -bail invocation
 //     (chunk-uploaded to a temp file when large). Reads inside a
 //     transaction are not supported — no current caller does that.
+//   * dumpTables(names): a point-in-time read of MANY tables in ONE sqlite3
+//     invocation (BEGIN; SELECT marker; SELECT * …; COMMIT;), so a backup
+//     is a single snapshot even though every other statement is its own
+//     process. The output is split on per-call random markers
+//     (splitTableDump) — see Backup/Restore.
 //   * Large results on EC2: SSM returns at most ~24 KB of stdout, so there
 //     sqlite3 writes to a temp file next to the DB; small outputs are still
 //     echoed inline (one command), bigger ones come back through
@@ -123,6 +128,44 @@ function chunkForUpload(text, maxBytes) {
   return out;
 }
 
+// ── Multi-table dump (one snapshot) ───────────────────────────────────
+// sqlite3 -json prints one JSON array per SELECT (nothing for zero rows),
+// each row on its own line. dumpTables() interleaves the table SELECTs with
+// marker SELECTs — `SELECT '<nonce> TABLE <name>' AS m;` → the single line
+// [{"m":"<nonce> TABLE <name>"}] — and ends with a '<nonce> END' marker. The
+// nonce is random per call, so no row value can forge a marker, and a
+// missing END marker means the output was cut short (never "fewer rows").
+// Exported for the unit test.
+function dumpMarker(nonce, what) {
+  return `[{"m":"${nonce} ${what}"}]`;
+}
+function splitTableDump(stdout, nonce) {
+  const tables = {};
+  let cur = null, buf = [], complete = false;
+  const flush = () => {
+    if (cur === null) return;
+    const text = buf.join('\n').trim();
+    let rows = [];
+    if (text) {
+      try { rows = JSON.parse(text); }
+      catch (e) { throw new Error(`Could not parse the dump of table "${cur}" as JSON: ${text.slice(0, 120)}`); }
+      if (!Array.isArray(rows)) throw new Error(`Unexpected dump shape for table "${cur}".`);
+    }
+    tables[cur] = rows;
+  };
+  const tableRe = new RegExp('^\\[\\{"m":"' + nonce + ' TABLE (.+)"\\}\\]$');
+  const endLine = dumpMarker(nonce, 'END');
+  for (const raw of String(stdout || '').split('\n')) {
+    const line = raw.replace(/\r$/, '');
+    const m = tableRe.exec(line);
+    if (m) { flush(); cur = m[1]; buf = []; continue; }
+    if (line === endLine) { flush(); cur = null; buf = []; complete = true; break; }
+    if (cur !== null) buf.push(line);
+  }
+  if (!complete) throw new Error('The remote SQLite dump ended early (no END marker) — the output was truncated or sqlite3 stopped before COMMIT.');
+  return tables;
+}
+
 function init(appConfig, sqliteCfg) {
   const cfg = sqliteCfg || {};
 
@@ -218,6 +261,24 @@ function init(appConfig, sqliteCfg) {
     return { lastID: row.lastID, changes: row.changes };
   }
 
+  // One snapshot of every named table (names MUST come from the catalog —
+  // helpers/dbSchema.listTables — they are quoted as identifiers here).
+  // BEGIN … COMMIT in one sqlite3 process: the web app's writes between
+  // tables can't leak in. Output goes through execRaw's large-output path
+  // (temp file + readFileChunked on EC2). Returns { [table]: rows }.
+  async function dumpTables(names) {
+    const nonce = 'DUMP' + crypto.randomBytes(8).toString('hex');
+    const stmts = ['BEGIN;'];
+    for (const t of names) {
+      const q = '`' + String(t).replace(/`/g, '``') + '`';
+      stmts.push(`SELECT '${nonce} TABLE ${String(t).replace(/'/g, "''")}' AS m;`);
+      stmts.push(`SELECT * FROM ${q};`);
+    }
+    stmts.push('COMMIT;', `SELECT '${nonce} END' AS m;`);
+    const out = await execRaw(stmts, { json: true, bail: true, timeoutMs: 600000 });
+    return splitTableDump(out, nonce);
+  }
+
   // Flush a queued transaction atomically. Small scripts go inline; large
   // ones (e.g. a database restore) are chunk-appended to a remote temp file
   // and executed with `sqlite3 < file` — still ONE sqlite3 run, so BEGIN…
@@ -277,9 +338,12 @@ function init(appConfig, sqliteCfg) {
       if (typeof params === 'function') { done = params; params = []; }
       cb(runAsync(sql, params), done);
     },
-    getAsync, allAsync, runAsync,
+    getAsync, allAsync, runAsync, dumpTables,
 
-    async transaction(fn) {
+    // `opts` (database.js's { snapshot } for read transactions) is accepted
+    // for interface parity; reads inside a transaction are not supported
+    // here — use dumpTables() for a consistent multi-table read.
+    async transaction(fn, opts) { // eslint-disable-line no-unused-vars
       const stmts = [];
       const tx = {
         engine: 'sqlite',
@@ -299,5 +363,5 @@ function init(appConfig, sqliteCfg) {
   };
 }
 
-module.exports = { init, bindSql, sqlLit, chunkForUpload, MAX_INLINE_SQL };
+module.exports = { init, bindSql, sqlLit, chunkForUpload, splitTableDump, dumpMarker, MAX_INLINE_SQL };
 

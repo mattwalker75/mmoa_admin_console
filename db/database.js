@@ -38,7 +38,8 @@ function makeDeadDb(engine, initErr, label) {
     statusMessage: label || err.message,
     get: failCb, all: failCb, run: failCb,
     getAsync: failPromise, allAsync: failPromise, runAsync: failPromise,
-    async transaction() { throw err; }
+    async transaction() { throw err; },
+    _dead: true
   };
 }
 
@@ -154,7 +155,13 @@ function initSqlite(cfg) {
       });
     },
 
-    async transaction(fn) {
+    // opts.snapshot: a READ transaction for a point-in-time dump (Backup).
+    // SQLite's BEGIN (deferred) takes its snapshot at the first SELECT and
+    // holds it until COMMIT; with the web app's WAL journal that snapshot
+    // neither blocks the site's writes nor sees them. Same statement either
+    // way — the option exists so callers can state their intent and MySQL
+    // can honour it (see initMysql).
+    async transaction(fn, opts) { // eslint-disable-line no-unused-vars
       const tx = this;
       await tx.runAsync('BEGIN');
       try {
@@ -250,10 +257,19 @@ function initMysql(cfg) {
       });
     },
 
-    async transaction(fn) {
+    // opts.snapshot: a consistent READ snapshot for a point-in-time dump
+    // (Backup) — every SELECT inside sees the database as it was when the
+    // transaction started (InnoDB REPEATABLE READ + WITH CONSISTENT
+    // SNAPSHOT), on ONE pooled connection, without blocking the web app.
+    async transaction(fn, opts) {
       const conn = await pool.promise().getConnection();
       try {
-        await conn.beginTransaction();
+        if (opts && opts.snapshot) {
+          await conn.query('SET TRANSACTION ISOLATION LEVEL REPEATABLE READ');
+          await conn.query('START TRANSACTION WITH CONSISTENT SNAPSHOT, READ ONLY');
+        } else {
+          await conn.beginTransaction();
+        }
         const tx = {
           engine: 'mysql',
           getAsync: async (sql, params) => {

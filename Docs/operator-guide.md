@@ -255,20 +255,108 @@ in the file, including secrets, is left alone — and then offers to
 
 ## Backup/Restore
 
-- **Web App rebuild** — one click captures configuration + website
-  (sections, images) + every uploaded image (`uploads/` — flyers, prize,
-  nonprofit and board photos) + database into a bundle under `backups/` on
-  this machine. Over EC2 (SSM) access, uploads larger than ~18 KB can't be
-  read and are listed as warnings — use SSH / Local for a complete bundle.
-  **Full Restore** walks through: test access → optional Maintenance Mode
-  → verify the bundle → restore configuration → website → uploads →
-  database, then prompts for the web app restart. Use it
-  after the web app server is rebuilt. Only the config keys Web App
-  Settings edits are written; the bundle's `maintenanceCommand` is left
-  as the host has it unless you tick **Also restore the shell
-  commands**. Bundles are listed from a small `.meta.json` summary
-  written next to each one (a bundle copied in by hand is summarized
-  once, on the next page view).
+### What's in a bundle
+
+**Web App rebuild** — one click captures everything needed to rebuild the
+Web App's state at that moment into a single bundle under `backups/` on
+this machine (`web_app_bundle_<stamp>.json`, downloadable):
+
+| Section | What |
+|---|---|
+| `config` | the Web App's `config.json` |
+| `localSecrets` | `local-secrets.json` — the session signing keys, so members stay signed in after a restore |
+| `maintenance` | `maintenance.json` — the Maintenance Mode state |
+| `website` | every `HTML/<section>.html` fragment + `HTML/images/*` |
+| `uploads` | `uploads/**` — event flyers / covers, raffle photos, nonprofit photos, board photos |
+| `database` | every table of the live catalog (`admin_audit`, `raffle_beneficiaries`, `org_*`, … — discovered, not listed by hand), as **one point-in-time snapshot** (see [database.md](database.md)) |
+| `templates` | this console's raffle text templates (`<kind>/<id>.json` under the Settings → Templates folder) |
+| `console` | this console's own settings export (the same file Console settings → Backup downloads) |
+| `_meta` | the manifest: created at, console version, engine, the time window the files and the database were read in, a row count per table, a sha256 + size per file, file count and total bytes, template counts, whether the secrets were captured, and any image path in the database that had **no file on the host** when the bundle was made |
+
+The files are read first, then the database, and the manifest records
+both windows (`_meta.window`) — on a quiet site they are milliseconds
+apart. Over EC2 (SSM) access, files larger than ~18 KB can't be read and
+are listed as warnings — use SSH / Local for a complete bundle. For the
+demo data (31 nonprofits with photos, two events with flyer + cover, two
+raffles with photos) a bundle is about 12 MB.
+
+Bundles are listed from a small `.meta.json` summary written next to each
+one (a bundle copied in by hand is summarized once, on the next page
+view). Each bundle row offers **Download** and, for bundles that carry one,
+**Console settings** — the console settings export inside the bundle as a
+file for Console settings → Restore (a bundle restore never changes this
+console's own settings).
+
+### Verify
+
+**Verify selected bundle** runs a checklist (shown in the Progress area
+and in the status window) and records a `backup.verify` audit row:
+
+- JSON parses · manifest present · bundle type
+- `config.json` present · `local-secrets.json` present (yes / no — never
+  the values) · `maintenance.json` present
+- website HTML sections (all five) · images · uploads
+- database tables present · **every table's row count equals the
+  manifest** · **every file's sha256 matches the manifest**
+- **every image path the database refers to has a file in the bundle**
+  (missing ones are listed)
+- console templates present · console settings present
+
+A failed *error* check (type, config, tables, row counts, hashes) makes the
+bundle invalid and the restore refuses it; the rest are warnings. Bundles
+made by an older console (no manifest) still restore — Verify says what it
+could not check.
+
+### Restore
+
+**Full Restore** walks through: test access → optional Maintenance Mode →
+verify the bundle → restore, with the status window showing each step:
+
+1. configuration — `config.json` (only the keys Web App Settings edits;
+   the bundle's `maintenanceCommand` is left as the host has it unless you
+   tick **Also restore the shell commands**) + `local-secrets.json`
+   (mode 600)
+2. website — HTML sections, images
+3. uploads — every file in the bundle is written; tick **Remove uploads
+   not in the bundle** (off by default) to also delete files under
+   `uploads/` the bundle doesn't have
+4. database — **every live table is emptied**, then the bundle's tables are
+   reloaded in one transaction (a live table the bundle lacks ends up
+   empty, a bundle table the live schema lacks is skipped — both are
+   reported)
+5. console templates — ticked by default; written into the Settings →
+   Templates folder, a template with the same id is replaced, others are
+   kept
+6. `maintenance.json` — last, so a bundle made with Maintenance Mode off
+   can't lift your maintenance screen mid-restore; if the bundle was made
+   with it ON, the page says so and offers to disable it
+
+then it prompts for the Web App restart the new config needs. A
+`backup.restore` audit row lists what was restored and what was skipped
+(`backup.create`, `backup.upload`, `backup.verify` and `backup.delete` are
+recorded too). The safeguards stay: type `RESTORE`, the access test must
+pass, one backup / restore at a time, shell commands only when ticked.
+
+**Restoring to a fresh box**
+
+1. Clone the Web App repo on the new host and run its `START_APP.sh` once,
+   so `node_modules`, the SPA build and the database exist (it bootstraps
+   the schema onto a fresh `mmoa_web_app.db`; on MySQL run
+   `SETUP_MYSQL_DB.sh`). Stop it or enable Maintenance Mode.
+2. On this console, point Settings → Web App at the new host (and its
+   database), then **Test access to the Web App**.
+3. Select the bundle (upload it first if it was made elsewhere), **Verify**,
+   type `RESTORE`, **Web App Full Restore**.
+4. Restart the Web App (the prompt / power bar) so it reads the restored
+   `config.json` and `local-secrets.json`.
+
+**Why not just copy `mmoa_web_app.db`?** The Web App keeps the SQLite
+file in WAL mode: recent commits live in `mmoa_web_app.db-wal` until a
+checkpoint, so a plain copy of the `.db` file alone is **not** a safe
+backup — it can be missing the latest writes or be torn mid-checkpoint.
+Use the console's bundle / database export (a read transaction, one
+snapshot), or on the host `sqlite3 mmoa_web_app.db ".backup backup.db"`.
+
 - **Console settings** — this console's config (excluding session keys
   and admin passwords). The `webApp` section's Start / Stop / Restart
   commands are kept as they are unless you tick **Also restore the shell
@@ -289,8 +377,9 @@ commands on the Web App host (Maintenance Mode, the power bar). A backup
 file you didn't make yourself could plant one, so a restore keeps the
 live commands unless you say otherwise.
 
-Bundles and configuration backups contain secrets and password hashes —
-store them like the database.
+Bundles and configuration backups contain secrets (the Web App's SMTP /
+AWS credentials and session keys, this console's SSH key / AWS keys /
+MySQL password) and password hashes — store them like the database.
 
 ## Settings
 
@@ -311,5 +400,5 @@ store them like the database.
   requirements"): where they're saved (a folder on this console's server,
   default `templates/` in the console folder — one sub-folder per field,
   one `.json` file per template), and create / edit / rename / delete for
-  each. Templates are not part of Backup/Restore — copy the folder to keep
-  them.
+  each. A Web App rebuild bundle carries them too (and puts them back on
+  restore unless you untick it).

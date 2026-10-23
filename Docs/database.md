@@ -130,3 +130,27 @@ envelope:
 A SQLite dump can be restored into MySQL and vice versa (verified both
 ways during development). Restore requires typing `RESTORE`; only tables
 and columns that exist in the live schema are touched.
+
+**Consistency.** The table list comes from the live catalog
+(`dbSchema.listTables`), so a table the web app adds later is dumped
+without a code change, and the dump is **one point-in-time snapshot**,
+not a SELECT per table at slightly different moments:
+
+| Engine | How (`routes/backup.js` `dumpAllTables`) |
+|---|---|
+| local SQLite | every `SELECT *` inside one `BEGIN … COMMIT` (`db.transaction(fn, { snapshot: true })`). The web app keeps the file in WAL mode, so the read transaction sees a stable snapshot and neither blocks nor is blocked by the site's writes. (On a rollback-journal file the same transaction would hold a SHARED lock for its few milliseconds.) |
+| MySQL | `SET TRANSACTION ISOLATION LEVEL REPEATABLE READ` + `START TRANSACTION WITH CONSISTENT SNAPSHOT, READ ONLY` on one pooled connection, every SELECT inside it |
+| remote SQLite (ssh / ec2) | `db.dumpTables(names)` — ONE `sqlite3 -json` invocation on the host: `BEGIN;` then, per table, a marker row (`SELECT '<nonce> TABLE <name>'`) followed by `SELECT *`, then `COMMIT;` and an END marker. The console splits the output on the markers (`splitTableDump`, random nonce per call so no row value can forge one; a missing END marker = truncated output, refused). On EC2 the output goes through the usual temp-file + `readFileChunked` path, so size is no problem. |
+
+The manifest in a rebuild bundle records the per-table row counts and
+the time window of the dump; Verify checks the dump against it. Note that
+the local-SQLite console shares ONE connection across requests, so a
+console write that lands between the dump's `BEGIN` and `COMMIT` joins
+that transaction (the dump takes milliseconds; the Database restore has
+the same property).
+
+**Why a file copy is not a backup.** With WAL, recent commits sit in
+`mmoa_web_app.db-wal` until a checkpoint: copying `mmoa_web_app.db` on its
+own can miss the latest writes or catch a checkpoint half-way. Use the
+console's export, or `sqlite3 mmoa_web_app.db ".backup out.db"` on the
+host, which goes through the SQLite backup API.

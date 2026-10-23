@@ -141,4 +141,38 @@ function remove(appConfig, kind, id) {
   fs.unlinkSync(f);
 }
 
-module.exports = { KINDS, GROUP_HINTS, DEFAULT_DIR, TemplateError, baseDir, list, save, remove, slugify };
+// ── Backup / Restore ─────────────────────────────────────────────────────
+// Every template of every kind, in the shape a Web App bundle carries:
+//   { '<kind>': [{ id, name, content, updatedAt }, …], … }
+function exportAll(appConfig) {
+  const out = {};
+  for (const kind of Object.keys(KINDS)) out[kind] = list(appConfig, kind);
+  return out;
+}
+
+// Write the templates from a bundle into the configured folder: a file per
+// (kind, id), REPLACING a same-id file and leaving every other file alone.
+// Only known kinds and ids that match ID_RE are written (a crafted bundle
+// can't name a path); name / content are clipped to the editor's limits.
+// Returns { written, skipped: [reason…] }.
+function importAll(appConfig, data) {
+  let written = 0;
+  const skipped = [];
+  const src = (data && typeof data === 'object' && !Array.isArray(data)) ? data : {};
+  for (const kind of Object.keys(src)) {
+    if (!KINDS[kind]) { skipped.push(`unknown template type "${kind}"`); continue; }
+    const items = Array.isArray(src[kind]) ? src[kind] : [];
+    for (const t of items) {
+      const id = t && String(t.id || '');
+      if (!ID_RE.test(id)) { skipped.push(`${kind}: bad template id`); continue; }
+      const name = String((t && t.name) || id).replace(/\s+/g, ' ').trim().slice(0, MAX_NAME) || id;
+      const content = String((t && t.content) || '').replace(/\r\n?/g, '\n').slice(0, MAX_CONTENT);
+      const updatedAt = (t && typeof t.updatedAt === 'string') ? t.updatedAt : new Date().toISOString();
+      writeAtomic(fileOf(appConfig, kind, id), JSON.stringify({ name, content, updatedAt }, null, 2) + '\n');
+      written++;
+    }
+  }
+  return { written, skipped };
+}
+
+module.exports = { KINDS, GROUP_HINTS, DEFAULT_DIR, TemplateError, baseDir, list, save, remove, slugify, exportAll, importAll };
