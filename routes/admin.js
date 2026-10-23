@@ -17,6 +17,7 @@ const { page, flash } = require('../views/layout');
 const { escapeHtml } = require('../views/escapeHtml');
 const { requireAdmin, hashPassword, sessionFingerprint, getPasswordRules, validatePassword } = require('../middleware/auth');
 const localAdmins = require('../helpers/localAdmins');
+const lt = require('../helpers/localTime');
 
 function dbBanner(err) {
   if (!err) return '';
@@ -58,6 +59,7 @@ async function safeGet(db, sql, params, fallback) {
 
 module.exports = function (db, appConfig) {
   const router = express.Router();
+  const audit = require('../helpers/audit')(db);
 
   // ── Dashboard ─────────────────────────────────────────────────────────
   // Counts only — every query is a portable COUNT(*). "Upcoming" is the web
@@ -94,6 +96,27 @@ module.exports = function (db, appConfig) {
                                     ORDER BY o.created_at ASC, o.org_id ASC LIMIT 25`, []);
     } catch (err) { if (!firstErr) firstErr = err; }
     const locked = (c.lockedIps == null && c.lockedAccts == null) ? null : (c.lockedIps || 0) + (c.lockedAccts || 0);
+    // Recent activity (the audit trail — /audit). The table is the web app's;
+    // until it has restarted after this update the table is missing, which
+    // is NOT a dashboard error — the card just says so.
+    let recent = [], recentErr = null;
+    try {
+      recent = await db.allAsync('SELECT at, admin, action, target_label, summary FROM admin_audit ORDER BY at DESC, audit_id DESC LIMIT 5', []);
+    } catch (err) { recentErr = err; }
+    const recentHtml = recent.length
+      ? `<div class="table-wrap surface-target"><table class="table-base">
+          <thead><tr><th>When</th><th>Admin</th><th>Action</th><th>Target</th><th>Summary</th></tr></thead>
+          <tbody>${recent.map(a => `<tr>
+            <td class="text-xs text-slate-500 whitespace-nowrap">${escapeHtml(lt.formatLocal(a.at, appConfig) || String(a.at || ''))}</td>
+            <td class="font-mono text-xs">${escapeHtml(a.admin)}</td>
+            <td class="font-mono text-xs">${escapeHtml(a.action)}</td>
+            <td class="text-sm">${escapeHtml(a.target_label || '—')}</td>
+            <td class="text-sm text-slate-700 dark:text-slate-300">${escapeHtml(a.summary || '')}</td>
+          </tr>`).join('')}</tbody></table></div>
+          <p class="mt-2 text-xs text-slate-500"><a class="text-brand-600 hover:underline" href="/audit">Full audit log →</a></p>`
+      : `<p class="text-sm text-slate-500 dark:text-slate-400">${recentErr
+          ? (/no such table|doesn't exist/i.test(recentErr.message || '') ? 'Available once the Web App has been restarted (it creates the audit table when it starts).' : 'Unavailable.')
+          : 'Nothing recorded yet.'} <a class="text-brand-600 hover:underline" href="/audit">Audit log →</a></p>`;
 
     const pendingHtml = pending.length
       ? `<div class="table-wrap surface-target"><table class="table-base">
@@ -139,9 +162,14 @@ module.exports = function (db, appConfig) {
         </div>
       </section>
 
-      <section>
+      <section class="mb-10">
         <h2 class="text-sm font-semibold uppercase tracking-wider text-slate-500 dark:text-slate-400 mb-3">Pending verification</h2>
         ${pendingHtml}
+      </section>
+
+      <section>
+        <h2 class="text-sm font-semibold uppercase tracking-wider text-slate-500 dark:text-slate-400 mb-3">Recent activity</h2>
+        ${recentHtml}
       </section>
     `;
     res.send(page({ title: 'Dashboard', body, appConfig, user, activeNav: 'home' }));
@@ -252,6 +280,8 @@ module.exports = function (db, appConfig) {
       if (username === (req.session.user.username || '').toLowerCase()) {
         req.session.fp = sessionFingerprint(password_hash);
       }
+      await audit(req, existed ? 'admin.replace' : 'admin.add', { kind: 'admin', id: username, label: username,
+        summary: existed ? 'Console admin record replaced (new password, name and email)' : 'Console admin added' });
       res.redirect('/admins?msg=' + encodeURIComponent(existed ? `Admin "${username}" updated.` : `Admin "${username}" added.`));
     } catch (err) {
       console.error('[admin] add local admin failed:', err);
@@ -259,7 +289,7 @@ module.exports = function (db, appConfig) {
     }
   });
 
-  router.post('/admins/delete', requireAdmin, (req, res) => {
+  router.post('/admins/delete', requireAdmin, async (req, res) => {
     const username = (req.body.username || '').trim().toLowerCase();
     if (!username) return res.redirect('/admins?error=Username+is+required');
     if (username === (req.session.user.username || '').toLowerCase()) {
@@ -269,7 +299,10 @@ module.exports = function (db, appConfig) {
       return res.redirect('/admins?error=At+least+one+admin+must+remain');
     }
     const removed = localAdmins.remove(username);
-    if (removed) return res.redirect('/admins?msg=' + encodeURIComponent(`Admin "${username}" removed.`));
+    if (removed) {
+      await audit(req, 'admin.remove', { kind: 'admin', id: username, label: username, summary: 'Console admin removed' });
+      return res.redirect('/admins?msg=' + encodeURIComponent(`Admin "${username}" removed.`));
+    }
     res.redirect('/admins?error=Admin+not+found');
   });
 

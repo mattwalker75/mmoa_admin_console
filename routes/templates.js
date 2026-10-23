@@ -21,6 +21,9 @@ const { requireAdmin } = require('../middleware/auth');
 const tpl = require('../helpers/templates');
 const { tabsNav } = require('./settings');
 const { yes: kitYes } = require('../helpers/pageKit');
+// This router has no db of its own: the audit trail goes through the
+// recorder routes/audit.js captures when app.js mounts it.
+const { record: audit } = require('./audit');
 
 const TEXTAREA_CLS = 'block w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900 shadow-sm focus:border-brand-500 focus:outline-none focus:ring-2 focus:ring-brand-500/30 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100';
 
@@ -138,6 +141,7 @@ module.exports = function (appConfig, appConfigModule) {
     } catch (e) { return fail(`Can't use that folder: ${e.message}`); }
     appConfig.templates = Object.assign({}, appConfig.templates, { dir });
     appConfigModule.save();
+    audit(req, 'templates.dir', { kind: 'settings', id: 'templates', label: 'Templates folder', summary: `Templates folder set to ${abs}` });
     res.redirect(back + '?msg=' + encodeURIComponent(`Templates are now saved in ${abs}.`));
   });
 
@@ -147,6 +151,7 @@ module.exports = function (appConfig, appConfigModule) {
     try {
       const b = req.body || {};
       const r = tpl.save(appConfig, kind, { id: b.id || null, name: b.name, content: b.content });
+      audit(req, b.id ? 'template.update' : 'template.create', { kind: 'template', id: `${kind}/${r.id}`, label: r.name, summary: `${b.id ? 'Updated' : 'Created'} ${kind} template` });
       res.redirect(back + '?msg=' + encodeURIComponent(`Template “${r.name}” saved.`));
     } catch (e) {
       res.redirect(back + '?error=' + encodeURIComponent(e instanceof tpl.TemplateError ? e.message : 'Save failed: ' + (e.message || e)));
@@ -156,7 +161,13 @@ module.exports = function (appConfig, appConfigModule) {
   router.post('/settings/templates/:kind/:id/delete', requireAdmin, (req, res) => {
     const kind = req.params.kind;
     if (!KIND_RE.test(kind)) return res.redirect(back + '?error=Unknown+template+type');
-    try { tpl.remove(appConfig, kind, req.params.id); res.redirect(back + '?msg=Template+deleted.'); }
+    try {
+      let name = null;
+      try { name = (tpl.list(appConfig, kind).find(t => t.id === req.params.id) || {}).name || null; } catch (e) { /* label only */ }
+      tpl.remove(appConfig, kind, req.params.id);
+      audit(req, 'template.delete', { kind: 'template', id: `${kind}/${String(req.params.id).slice(0, 80)}`, label: name || String(req.params.id).slice(0, 100), summary: `Deleted ${kind} template` });
+      res.redirect(back + '?msg=Template+deleted.');
+    }
     catch (e) { res.redirect(back + '?error=' + encodeURIComponent(e instanceof tpl.TemplateError ? e.message : 'Delete failed: ' + (e.message || e))); }
   });
 
@@ -174,6 +185,7 @@ module.exports = function (appConfig, appConfigModule) {
     try {
       const b = req.body || {};
       const r = tpl.save(appConfig, kind, { id: b.id || null, name: b.name, content: b.content });
+      audit(req, b.id ? 'template.update' : 'template.create', { kind: 'template', id: `${kind}/${r.id}`, label: r.name, summary: `${b.id ? 'Updated' : 'Created'} ${kind} template (from a form)` });
       res.json({ ok: true, id: r.id, name: r.name, templates: tpl.list(appConfig, kind) });
     } catch (e) {
       res.status(e instanceof tpl.TemplateError ? 400 : 500).json({ error: e instanceof tpl.TemplateError ? e.message : 'Save failed: ' + (e.message || e) });

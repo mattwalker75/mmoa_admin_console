@@ -13,6 +13,7 @@ const localAdmins = require('../helpers/localAdmins');
 
 module.exports = function (db, appConfig) {
   const router = express.Router();
+  const audit = require('../helpers/audit')(db);
 
   router.get('/login', (req, res) => {
     // Only a session that requireAdmin would still accept skips the form; a
@@ -61,7 +62,12 @@ module.exports = function (db, appConfig) {
       // hash) so the response takes the same time as a wrong password and
       // timing can't reveal which usernames exist.
       const ok = await verifyPassword(password, local ? local.password_hash : DUMMY_HASH);
-      if (!local || !ok) return fail(generic);
+      if (!local || !ok) {
+        // No session yet, so the row's admin is "system"; the attempted
+        // username goes in the summary (never the password).
+        await audit(req, 'login.failure', { kind: 'login', summary: `Failed sign-in for "${username}"` });
+        return fail(generic);
+      }
 
       req.session.user = {
         user_id: 'local:' + local.username,
@@ -74,6 +80,7 @@ module.exports = function (db, appConfig) {
       // middleware/auth.js sessionProblem.
       req.session.iat = Date.now();
       req.session.fp = sessionFingerprint(local.password_hash);
+      await audit(req, 'login.success', { kind: 'login', id: local.username, label: local.username, summary: 'Signed in' });
       res.redirect('/');
     } catch (err) {
       console.error('[login] error:', err);
@@ -81,7 +88,11 @@ module.exports = function (db, appConfig) {
     }
   });
 
-  router.post('/logout', (req, res) => {
+  router.post('/logout', async (req, res) => {
+    // Record while the session (and so the admin's name) is still there.
+    if (req.session && req.session.user) {
+      await audit(req, 'logout', { kind: 'login', id: req.session.user.username, label: req.session.user.username, summary: 'Signed out' });
+    }
     req.session = null;
     res.redirect('/login');
   });

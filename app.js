@@ -263,6 +263,7 @@ app.use((err, req, res, next) => {
   const wantsJson = (req.get('accept') || '').includes('application/json') ||
                     (req.get('content-type') || '').includes('application/json') ||
                     (req.get('x-requested-with') === 'XMLHttpRequest');
+app.use('/', require('./routes/audit')(db, appConfig));
   if (wantsJson) return res.status(status).json({ ok: false, success: false, error: safeMsg });
   res.status(status).send(`<!DOCTYPE html><html><head><title>Error</title>
     <link rel="stylesheet" href="/css/tailwind.css"></head>

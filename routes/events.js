@@ -345,6 +345,7 @@ function imageSlotCard(eventId, slot, label, hint, rel, extra) {
 
 module.exports = function (db, appConfig) {
   const router = express.Router();
+  const audit = require('../helpers/audit')(db);
 
   // ── List ────────────────────────────────────────────────────────────
   router.get('/events', requireAdmin, async (req, res) => {
@@ -451,6 +452,8 @@ module.exports = function (db, appConfig) {
       if (!id) { const row = await db.getAsync('SELECT event_id FROM events WHERE slug = ?', [f.slug]); id = row && Number(row.event_id); }
       if (r.bens.length) await writeBeneficiaries(id, r.bens);
       console.log(`[events] ${req.session.user.username} created event #${id} (${f.slug})`);
+      await audit(req, 'event.create', { kind: 'event', id, label: f.title,
+        summary: `Created as ${f.status}${f.is_latest ? ', marked Latest' : ''}${r.bens.length ? `, ${r.bens.length} beneficiar${r.bens.length === 1 ? 'y' : 'ies'}` : ''}` });
       res.redirect(`/events/${id}?msg=` + encodeURIComponent((f.status === 'published' ? 'Event created and published — it is on the website now.'
         : f.status === 'archived' ? 'Event created as archived.' : 'Event created as a draft.') + latest.message(prevLatest, latest.EVENT) + ' Add the flyer and cover image below.'));
     } catch (err) {
@@ -519,7 +522,7 @@ module.exports = function (db, appConfig) {
     if (r.error) return renderEdit(req, res, id, r.values, r.error);
     const f = r.fields;
     try {
-      const exists = await db.getAsync('SELECT event_id FROM events WHERE event_id = ?', [id]);
+      const exists = await db.getAsync('SELECT event_id, status, title FROM events WHERE event_id = ?', [id]);
       if (!exists) return res.redirect('/events?error=Event+not+found');
       f.slug = await kit.uniqueSlug(db, 'events', 'event_id', f.slug, id);
       // Latest is one event only: the save and the clearing of Latest on
@@ -539,6 +542,10 @@ module.exports = function (db, appConfig) {
         : f.status === 'published' ? 'Saved and published — it is on the website now.'
         : f.status === 'archived' ? 'Saved and archived — it is off the website, kept here for reference.'
         : 'Saved as a draft — it is not on the website.';
+      const statusChanged = req.body.set_status && exists.status !== f.status;
+      await audit(req, 'event.save', { kind: 'event', id, label: f.title,
+        summary: (statusChanged ? `Status ${exists.status} → ${f.status}` : `Saved (status ${f.status} unchanged)`)
+          + (exists.title !== f.title ? ', renamed' : '') + (f.is_latest ? ', marked Latest' : '') });
       res.redirect(`/events/${id}?msg=` + encodeURIComponent(msg + latest.message(prevLatest, latest.EVENT)));
     } catch (err) {
       console.error('[events] update failed:', err);
@@ -551,6 +558,10 @@ module.exports = function (db, appConfig) {
     const id = kit.idParam(req.params.id);
     if (!id) return res.status(400).json({ error: 'Invalid event id' });
     const r = await preview.makePreviewLink(db, appConfig, { table: 'events', idCol: 'event_id', id, path: '/events' });
+    if (r.status === 200) {
+      const e = await db.getAsync('SELECT title FROM events WHERE event_id = ?', [id]).catch(() => null);
+      await audit(req, 'event.preview', { kind: 'event', id, label: e && e.title, summary: `Preview link made (valid ${preview.PREVIEW_MINUTES} min)` });
+    }
     res.status(r.status).json(r.body);
   });
 
@@ -566,6 +577,8 @@ module.exports = function (db, appConfig) {
       });
       await uploads.removeFiles(appConfig, [e.flyer_path, e.cover_path]);
       console.log(`[events] ${req.session.user.username} deleted event #${id} (${e.title})`);
+      await audit(req, 'event.delete', { kind: 'event', id, label: e.title,
+        summary: `Deleted${[e.flyer_path, e.cover_path].filter(Boolean).length ? ` with ${[e.flyer_path, e.cover_path].filter(Boolean).length} image file(s)` : ''}` });
       res.redirect('/events?msg=' + encodeURIComponent(`Event "${e.title}" deleted.`));
     } catch (err) {
       console.error('[events] delete failed:', err);
@@ -579,7 +592,7 @@ module.exports = function (db, appConfig) {
     const col = slotCol(req.params.slot);
     const back = `/events/${id}`;
     if (!id || !col) return kit.reply(req, res, '/events', false, 'Unknown image slot.');
-    const e = await db.getAsync(`SELECT event_id, ${col} AS old FROM events WHERE event_id = ?`, [id]);
+    const e = await db.getAsync(`SELECT event_id, title, ${col} AS old FROM events WHERE event_id = ?`, [id]);
     if (!e) return kit.reply(req, res, '/events', false, 'Event not found.');
     let saved;
     try { saved = await uploads.saveImage(appConfig, 'events', req.file && req.file.buffer); }
@@ -591,6 +604,7 @@ module.exports = function (db, appConfig) {
       return kit.reply(req, res, back, false, 'Saving failed: ' + (err.message || err));
     }
     if (e.old && e.old !== saved.rel) await uploads.removeFiles(appConfig, e.old);
+    await audit(req, 'event.image', { kind: 'event', id, label: e.title, summary: `${req.params.slot === 'flyer' ? 'Flyer' : 'Cover photo'} ${e.old ? 'replaced' : 'uploaded'}` });
     kit.reply(req, res, back, true, `${req.params.slot === 'flyer' ? 'Flyer' : 'Cover photo'} uploaded.`);
   }));
 
@@ -599,10 +613,11 @@ module.exports = function (db, appConfig) {
     const col = slotCol(req.params.slot);
     if (!id || !col) return res.redirect('/events?error=Unknown+image');
     try {
-      const e = await db.getAsync(`SELECT ${col} AS old FROM events WHERE event_id = ?`, [id]);
+      const e = await db.getAsync(`SELECT title, ${col} AS old FROM events WHERE event_id = ?`, [id]);
       if (!e) return res.redirect('/events?error=Event+not+found');
       await db.runAsync(`UPDATE events SET ${col} = NULL, updated_at = ? WHERE event_id = ?`, [kit.sqlTime(), id]);
       await uploads.removeFiles(appConfig, e.old);
+      await audit(req, 'event.image', { kind: 'event', id, label: e.title, summary: `${req.params.slot === 'flyer' ? 'Flyer' : 'Cover photo'} removed` });
       res.redirect(`/events/${id}?msg=Image+removed.`);
     } catch (err) {
       res.redirect(`/events/${id}?error=` + encodeURIComponent('Remove failed: ' + (err.message || err)));

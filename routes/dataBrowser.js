@@ -199,6 +199,7 @@ function collectFields(body, columns, allowed) {
 
 module.exports = function (db, appConfig) {
   const router = express.Router();
+  const audit = require('../helpers/audit')(db);
 
   // ── Table list ──────────────────────────────────────────────────────
   router.get('/data', requireAdmin, async (req, res) => {
@@ -465,6 +466,9 @@ module.exports = function (db, appConfig) {
       const r = await db.runAsync(`UPDATE ${dbSchema.quoteIdent(table)} SET ${sets.join(', ')} WHERE ${key.where}`, [...params, ...key.params]);
       if (r && r.changes === 0) return res.redirect(`/data/${encodeURIComponent(table)}?error=` + encodeURIComponent('Row not found (it may have been deleted).'));
       console.log(`[data] ${user.username} updated ${table} ${JSON.stringify(key.obj)} (${sets.length} column(s))`);
+      // Column NAMES and the row key only — never the values.
+      await audit(req, 'data.update', { kind: 'table', id: table, label: table,
+        summary: `Row ${JSON.stringify(key.obj)} updated: ${[...fields.keys()].map(idx => columns[idx].name).join(', ')}` });
       res.redirect(back + '&msg=' + encodeURIComponent('Row saved.'));
     } catch (err) {
       console.error('[data] update failed:', err);
@@ -483,6 +487,7 @@ module.exports = function (db, appConfig) {
       const r = await db.runAsync(`DELETE FROM ${dbSchema.quoteIdent(table)} WHERE ${key.where}`, key.params);
       if (r && r.changes === 0) return res.redirect(`/data/${encodeURIComponent(table)}?error=` + encodeURIComponent('Row not found (already deleted?).'));
       console.log(`[data] ${user.username} deleted ${table} ${JSON.stringify(key.obj)}`);
+      await audit(req, 'data.delete', { kind: 'table', id: table, label: table, summary: `Row ${JSON.stringify(key.obj)} deleted` });
       res.redirect(`/data/${encodeURIComponent(table)}?msg=` + encodeURIComponent('Row deleted.'));
     } catch (err) {
       console.error('[data] delete failed:', err);
@@ -582,6 +587,8 @@ module.exports = function (db, appConfig) {
         keyObj = {};
         for (const c of pk) keyObj[c.name] = params[cols.indexOf(c.name)];
       }
+      await audit(req, 'data.insert', { kind: 'table', id: table, label: table,
+        summary: `Row inserted${keyObj ? ' ' + JSON.stringify(keyObj) : ''} (${cols.length} column(s): ${cols.join(', ') || 'defaults only'})` });
       if (keyObj) return res.redirect(`/data/${encodeURIComponent(table)}/row?key=${encodeURIComponent(JSON.stringify(keyObj))}&msg=` + encodeURIComponent('Row inserted.'));
       res.redirect(`/data/${encodeURIComponent(table)}?msg=` + encodeURIComponent('Row inserted.'));
     } catch (err) {

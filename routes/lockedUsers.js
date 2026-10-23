@@ -43,6 +43,7 @@ function scopeLabel(scope) {
 
 module.exports = function (db, appConfig) {
   const router = express.Router();
+  const audit = require('../helpers/audit')(db);
 
   // ── List page ─────────────────────────────────────────────────────
   router.get('/locked-users', requireAdmin, async (req, res) => {
@@ -226,8 +227,10 @@ module.exports = function (db, appConfig) {
       return res.redirect('/locked-users?error=Invalid+lockout+id');
     }
     try {
+      const row = await db.getAsync('SELECT scope, scope_key FROM login_lockouts WHERE id = ?', [id]).catch(() => null);
       const r = await db.runAsync('DELETE FROM login_lockouts WHERE id = ?', [id]);
       if (!r.changes) return res.redirect('/locked-users?error=Lockout+not+found+(already+cleared)');
+      await audit(req, 'lockout.unlock', { kind: 'lockout', id, label: row ? [row.scope, row.scope_key].filter(Boolean).join(' ') : null, summary: 'Lockout cleared' });
       res.redirect('/locked-users?msg=Unlocked.');
     } catch (err) {
       console.error('[locked-users] unlock failed:', err);

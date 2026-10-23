@@ -179,6 +179,10 @@ function linkOr(v) {
 
 module.exports = function (db, appConfig) {
   const router = express.Router();
+  const audit = require('../helpers/audit')(db);
+  // Org name (or the login name) for an audit row's label; null if unknown.
+  const orgLabel = (id) => db.getAsync(`SELECT u.login_name, o.name FROM users u LEFT JOIN organizations o ON o.user_id = u.user_id WHERE u.user_id = ?`, [id])
+    .then(r => (r && (r.name || r.login_name)) || null).catch(() => null);
 
   // v1 URLs (bookmarks, old docs) → the page that replaced Members.
   router.get(['/members', '/members/*rest'], requireAdmin, (req, res) => res.redirect(301, '/nonprofits'));
@@ -531,6 +535,10 @@ module.exports = function (db, appConfig) {
             [status, kit.sqlTime(), by, note, kit.sqlTime(), id]);
       if (!r.changes) return res.redirect(`/nonprofits/${id}?error=` + encodeURIComponent('This account has no organization profile to verify.'));
       console.log(`[nonprofits] ${by} set user #${id} organization to ${status}`);
+      // The note's length only — the note itself may be about a real org.
+      await audit(req, status === 'verified' ? 'nonprofit.verify' : status === 'rejected' ? 'nonprofit.reject' : 'nonprofit.reset',
+        { kind: 'nonprofit', id, label: await orgLabel(id),
+          summary: `${status === 'verified' ? 'Verified' : status === 'rejected' ? 'Rejected' : 'Reset to unverified'}${note ? ` with a ${note.length}-character note` : ' (no note)'}` });
       const msg = status === 'verified' ? 'Verified — listed organizations now appear in the Need Help directory.'
         : status === 'rejected' ? 'Marked rejected.' : 'Reset to unverified.';
       res.redirect(`/nonprofits/${id}?msg=` + encodeURIComponent(msg));
@@ -549,6 +557,7 @@ module.exports = function (db, appConfig) {
       const r = await db.runAsync('UPDATE users SET is_active = ? WHERE user_id = ?', [on ? 1 : 0, id]);
       if (!r.changes) return res.redirect('/nonprofits?error=Account+not+found');
       console.log(`[nonprofits] ${req.session.user.username} ${on ? 'activated' : 'deactivated'} user #${id}`);
+      await audit(req, on ? 'nonprofit.activate' : 'nonprofit.deactivate', { kind: 'nonprofit', id, label: await orgLabel(id), summary: on ? 'Login activated' : 'Login deactivated' });
       res.redirect(`/nonprofits/${id}?msg=` + encodeURIComponent(on ? 'Login activated.' : 'Login deactivated.'));
     } catch (err) {
       res.redirect(`/nonprofits/${id}?error=` + encodeURIComponent('Update failed: ' + (err.message || err)));
@@ -568,6 +577,7 @@ module.exports = function (db, appConfig) {
         await db.runAsync('UPDATE email_verification_tokens SET consumed_at = ? WHERE user_id = ? AND consumed_at IS NULL', [kit.sqlTime(), id])
           .catch(e => console.warn('[nonprofits] could not consume verification tokens:', e.message || e));
       }
+      await audit(req, 'nonprofit.email_verified', { kind: 'nonprofit', id, label: await orgLabel(id), summary: verified ? 'Email marked verified' : 'Email marked unverified' });
       res.redirect(`/nonprofits/${id}?msg=` + encodeURIComponent(verified ? 'Email marked verified.' : 'Email marked unverified.'));
     } catch (err) {
       res.redirect(`/nonprofits/${id}?error=` + encodeURIComponent('Update failed: ' + (err.message || err)));
@@ -582,9 +592,14 @@ module.exports = function (db, appConfig) {
     try {
       const conflict = await findConflict(db, f.login_name, f.email, id);
       if (conflict) return res.redirect(`/nonprofits/${id}?error=` + encodeURIComponent(conflict));
+      const before = await db.getAsync('SELECT login_name, email, first_name, last_name, phone_number FROM users WHERE user_id = ?', [id]).catch(() => null);
       const r = await db.runAsync('UPDATE users SET login_name = ?, email = ?, first_name = ?, last_name = ?, phone_number = ? WHERE user_id = ?',
         [f.login_name, f.email, f.first_name, f.last_name, f.phone_number, id]);
       if (!r.changes) return res.redirect('/nonprofits?error=Account+not+found');
+      // Which fields changed — not what they changed to.
+      const changed = before ? ['login_name', 'email', 'first_name', 'last_name', 'phone_number'].filter(k => (before[k] || '') !== (f[k] || '')) : [];
+      await audit(req, 'nonprofit.edit', { kind: 'nonprofit', id, label: await orgLabel(id),
+        summary: changed.length ? `Account fields changed: ${changed.join(', ')}` : 'Account saved (no field changed)' });
       res.redirect(`/nonprofits/${id}?msg=Account+saved.`);
     } catch (err) {
       console.error('[nonprofits] update failed:', err);
@@ -606,6 +621,7 @@ module.exports = function (db, appConfig) {
       await db.runAsync('UPDATE password_reset_tokens SET consumed_at = ? WHERE user_id = ? AND consumed_at IS NULL', [kit.sqlTime(), id])
         .catch(e => console.warn('[nonprofits] could not consume reset tokens:', e.message || e));
       console.log(`[nonprofits] ${req.session.user.username} reset the password of user #${id}`);
+      await audit(req, 'nonprofit.password_reset', { kind: 'nonprofit', id, label: await orgLabel(id), summary: 'Password set by an admin' });
       res.redirect(`/nonprofits/${id}?msg=Password+reset.`);
     } catch (err) {
       res.redirect(`/nonprofits/${id}?error=` + encodeURIComponent('Reset failed: ' + (err.message || err)));
@@ -622,6 +638,7 @@ module.exports = function (db, appConfig) {
       await db.runAsync('DELETE FROM org_images WHERE image_id = ?', [imageId]);
       await uploads.removeFiles(appConfig, im.path);
       console.log(`[nonprofits] ${req.session.user.username} removed photo #${imageId} of user #${id}`);
+      await audit(req, 'nonprofit.photo_remove', { kind: 'nonprofit', id, label: await orgLabel(id), summary: `Profile photo #${imageId} removed` });
       res.redirect(`/nonprofits/${id}?msg=Photo+removed.`);
     } catch (err) {
       res.redirect(`/nonprofits/${id}?error=` + encodeURIComponent('Remove failed: ' + (err.message || err)));
@@ -657,6 +674,8 @@ module.exports = function (db, appConfig) {
       await uploads.removeFiles(appConfig, paths);
       const label = (o && o.name) || u.login_name;
       console.log(`[nonprofits] ${req.session.user.username} deleted user #${id} (${label}), ${paths.length} photo file(s)`);
+      await audit(req, 'nonprofit.delete', { kind: 'nonprofit', id, label,
+        summary: `Account deleted${o ? ' with its organization profile' : ''} (${paths.length} photo file(s))` });
       res.redirect('/nonprofits?msg=' + encodeURIComponent(`"${label}" deleted.`));
     } catch (err) {
       console.error('[nonprofits] delete failed:', err);

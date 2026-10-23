@@ -106,6 +106,9 @@ function listCard(key, L, rows, usage) {
 module.exports = function (db, appConfig) {
   const router = express.Router();
   const back = '/categories-cities';
+  const audit = require('../helpers/audit')(db);
+  // Name of a list row for an audit label; null if gone / DB down.
+  const nameOf = (L, id) => db.getAsync(`SELECT name FROM ${L.table} WHERE ${L.id} = ?`, [id]).then(r => (r && r.name) || null).catch(() => null);
 
   router.get('/categories-cities', requireAdmin, async (req, res) => {
     const user = req.session.user;
@@ -146,6 +149,7 @@ module.exports = function (db, appConfig) {
       } else {
         await db.runAsync(`INSERT INTO ${L.table} (name, sort, is_active) VALUES (?, ?, 1)`, [name, sort]);
       }
+      await audit(req, `${L.one}.add`, { kind: L.one, label: name, summary: `Added ${L.one} "${name}"` });
       res.redirect(back + '?msg=' + encodeURIComponent(`Added "${name}".`));
     } catch (err) {
       res.redirect(back + '?error=' + encodeURIComponent(uniqueMsg(err, L) || ('Add failed: ' + (err.message || err))));
@@ -159,6 +163,7 @@ module.exports = function (db, appConfig) {
     if (!id || !name) return res.redirect(back + '?error=Name+is+required');
     try {
       let r;
+      const oldName = await nameOf(L, id);
       if (L.hasSlug) {
         const slug = kit.str(req.body.slug, 60);
         if (!slug || !kit.SLUG_RE.test(slug)) return res.redirect(back + '?error=' + encodeURIComponent('Slugs may only contain lowercase letters, digits and dashes.'));
@@ -171,6 +176,8 @@ module.exports = function (db, appConfig) {
         r = await db.runAsync(`UPDATE ${L.table} SET name = ? WHERE ${L.id} = ?`, [name, id]);
       }
       if (!r.changes) return res.redirect(back + '?error=Not+found');
+      await audit(req, `${L.one}.rename`, { kind: L.one, id, label: name,
+        summary: oldName && oldName !== name ? `Renamed "${oldName}" → "${name}"` : `Saved "${name}"${L.hasSlug ? ' (name / slug)' : ''}` });
       res.redirect(back + '?msg=' + encodeURIComponent(`Saved "${name}".`));
     } catch (err) {
       res.redirect(back + '?error=' + encodeURIComponent(uniqueMsg(err, L) || ('Save failed: ' + (err.message || err))));
@@ -182,7 +189,9 @@ module.exports = function (db, appConfig) {
     const id = kit.idParam(req.params.id);
     if (!id) return res.redirect(back + '?error=Invalid+id');
     try {
-      await kit.moveRow(db, L.table, L.id, id, req.body && req.body.dir === 'up' ? 'up' : 'down');
+      const dir = req.body && req.body.dir === 'up' ? 'up' : 'down';
+      const moved = await kit.moveRow(db, L.table, L.id, id, dir);
+      if (moved) await audit(req, `${L.one}.move`, { kind: L.one, id, label: await nameOf(L, id), summary: `Moved ${dir}` });
       res.redirect(back);
     } catch (err) {
       res.redirect(back + '?error=' + encodeURIComponent('Reorder failed: ' + (err.message || err)));
@@ -197,6 +206,7 @@ module.exports = function (db, appConfig) {
     try {
       const r = await db.runAsync(`UPDATE ${L.table} SET is_active = ? WHERE ${L.id} = ?`, [on ? 1 : 0, id]);
       if (!r.changes) return res.redirect(back + '?error=Not+found');
+      await audit(req, `${L.one}.active`, { kind: L.one, id, label: await nameOf(L, id), summary: on ? 'Activated' : 'Deactivated' });
       res.redirect(back + '?msg=' + encodeURIComponent(on ? 'Activated.' : 'Deactivated — hidden from the website and the portal.'));
     } catch (err) {
       res.redirect(back + '?error=' + encodeURIComponent('Update failed: ' + (err.message || err)));
@@ -220,6 +230,7 @@ module.exports = function (db, appConfig) {
       // ago isn't orphaned (portable NOT EXISTS; no read inside a transaction).
       const r = await db.runAsync(`DELETE FROM ${L.table} WHERE ${L.id} = ? AND NOT EXISTS (SELECT 1 FROM ${L.join} WHERE ${L.join}.${L.id} = ?)`, [id, id]);
       if (!r.changes) return res.redirect(back + '?error=' + encodeURIComponent('Not deleted — it is in use (or already gone).'));
+      await audit(req, `${L.one}.delete`, { kind: L.one, id, label: row && row.name, summary: `Deleted ${L.one}` });
       res.redirect(back + '?msg=Deleted.');
     } catch (err) {
       res.redirect(back + '?error=' + encodeURIComponent('Delete failed: ' + (err.message || err)));

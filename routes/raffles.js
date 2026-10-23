@@ -285,6 +285,9 @@ function imagesCard(r, images) {
 
 module.exports = function (db, appConfig) {
   const router = express.Router();
+  const audit = require('../helpers/audit')(db);
+  // Title for an audit row's label (null when the raffle is gone / DB down).
+  const titleOf = (id) => db.getAsync('SELECT title FROM raffles WHERE raffle_id = ?', [id]).then(r => (r && r.title) || null).catch(() => null);
 
   // The raffle currently marked Latest (for the form's note), or null.
   async function currentLatest() {
@@ -375,6 +378,8 @@ module.exports = function (db, appConfig) {
       if (!id) { const row = await db.getAsync('SELECT raffle_id FROM raffles WHERE slug = ?', [f.slug]); id = row && Number(row.raffle_id); }
       if (r.bens.length) await beneficiaries.write(db, beneficiaries.KIND.raffle, id, r.bens);
       console.log(`[raffles] ${req.session.user.username} created raffle #${id} (${f.slug})`);
+      await audit(req, 'raffle.create', { kind: 'raffle', id, label: f.title,
+        summary: `Created as ${f.visibility} (stage open)${f.is_latest ? ', marked Latest' : ''}${r.bens.length ? `, ${r.bens.length} beneficiar${r.bens.length === 1 ? 'y' : 'ies'}` : ''}` });
       res.redirect(`/raffles/${id}?msg=` + encodeURIComponent((f.visibility === 'published' ? 'Raffle created and published — it is on the website now (stage: open).'
         : f.visibility === 'archived' ? 'Raffle created as archived.' : 'Raffle created as a draft (stage: open).') + latest.message(prevLatest, latest.RAFFLE) + ' Add the flyer and prize photos below.'));
     } catch (err) {
@@ -452,7 +457,7 @@ module.exports = function (db, appConfig) {
     if (r.error) return renderEdit(req, res, id, r.values, r.error);
     const f = r.fields;
     try {
-      const exists = await db.getAsync('SELECT raffle_id FROM raffles WHERE raffle_id = ?', [id]);
+      const exists = await db.getAsync('SELECT raffle_id, visibility, title FROM raffles WHERE raffle_id = ?', [id]);
       if (!exists) return res.redirect('/raffles?error=Raffle+not+found');
       f.slug = await kit.uniqueSlug(db, 'raffles', 'raffle_id', f.slug, id);
       // Latest is one raffle only: the save and the clearing of Latest on
@@ -472,6 +477,10 @@ module.exports = function (db, appConfig) {
         : f.visibility === 'published' ? 'Saved and published — it is on the website now.'
         : f.visibility === 'archived' ? 'Saved and archived — it is off the website, kept here for reference.'
         : 'Saved as a draft — it is not on the website.';
+      const visChanged = req.body.set_status && exists.visibility !== f.visibility;
+      await audit(req, 'raffle.save', { kind: 'raffle', id, label: f.title,
+        summary: (visChanged ? `Visibility ${exists.visibility} → ${f.visibility}` : `Saved (visibility ${f.visibility} unchanged)`)
+          + (exists.title !== f.title ? ', renamed' : '') + (f.is_latest ? ', marked Latest' : '') });
       res.redirect(`/raffles/${id}?msg=` + encodeURIComponent(msg + latest.message(prevLatest, latest.RAFFLE)));
     } catch (err) {
       console.error('[raffles] update failed:', err);
@@ -488,7 +497,7 @@ module.exports = function (db, appConfig) {
     const to = (req.body && req.body.status) || '';
     if (!STAGES.includes(to)) return res.redirect(`/raffles/${id}?error=Unknown+stage`);
     try {
-      const r = await db.getAsync('SELECT status FROM raffles WHERE raffle_id = ?', [id]);
+      const r = await db.getAsync('SELECT status, title FROM raffles WHERE raffle_id = ?', [id]);
       if (!r) return res.redirect('/raffles?error=Raffle+not+found');
       const from = r.status;
       if (Math.abs(STAGES.indexOf(to) - STAGES.indexOf(from)) !== 1) {
@@ -503,6 +512,9 @@ module.exports = function (db, appConfig) {
         [to, to === 'drawn' ? winning : null, kit.sqlTime(), id, from]);
       if (!u.changes) return res.redirect(`/raffles/${id}?error=` + encodeURIComponent('The raffle changed meanwhile — reload and try again.'));
       console.log(`[raffles] ${req.session.user.username} moved raffle #${id} ${from} → ${to}`);
+      // The winning ticket number itself stays out of the log.
+      await audit(req, 'raffle.stage', { kind: 'raffle', id, label: r.title,
+        summary: `Stage ${from} → ${to}${to === 'drawn' ? ' (winner recorded)' : from === 'drawn' ? ' (winner cleared)' : ''}` });
       res.redirect(`/raffles/${id}?msg=` + encodeURIComponent(`Stage: ${STATUS_LABEL[to]}.`));
     } catch (err) {
       res.redirect(`/raffles/${id}?error=` + encodeURIComponent('Update failed: ' + (err.message || err)));
@@ -515,6 +527,9 @@ module.exports = function (db, appConfig) {
     const id = kit.idParam(req.params.id);
     if (!id) return res.status(400).json({ error: 'Invalid raffle id' });
     const r = await preview.makePreviewLink(db, appConfig, { table: 'raffles', idCol: 'raffle_id', id, path: '/raffles' });
+    if (r.status === 200) {
+      await audit(req, 'raffle.preview', { kind: 'raffle', id, label: await titleOf(id), summary: `Preview link made (valid ${preview.PREVIEW_MINUTES} min)` });
+    }
     res.status(r.status).json(r.body);
   });
 
@@ -532,6 +547,8 @@ module.exports = function (db, appConfig) {
       });
       await uploads.removeFiles(appConfig, [r.flyer_path, ...imgs.map(x => x.path)]);
       console.log(`[raffles] ${req.session.user.username} deleted raffle #${id} (${r.title})`);
+      await audit(req, 'raffle.delete', { kind: 'raffle', id, label: r.title,
+        summary: `Deleted (${imgs.length} prize photo(s)${r.flyer_path ? ', flyer' : ''})` });
       res.redirect('/raffles?msg=' + encodeURIComponent(`Raffle "${r.title}" deleted.`));
     } catch (err) {
       console.error('[raffles] delete failed:', err);
@@ -544,7 +561,7 @@ module.exports = function (db, appConfig) {
     const id = kit.idParam(req.params.id);
     if (!id) return kit.reply(req, res, '/raffles', false, 'Invalid raffle id.');
     const back = `/raffles/${id}`;
-    const r = await db.getAsync('SELECT flyer_path FROM raffles WHERE raffle_id = ?', [id]);
+    const r = await db.getAsync('SELECT flyer_path, title FROM raffles WHERE raffle_id = ?', [id]);
     if (!r) return kit.reply(req, res, '/raffles', false, 'Raffle not found.');
     let saved;
     try { saved = await uploads.saveImage(appConfig, 'raffles', req.file && req.file.buffer); }
@@ -556,6 +573,7 @@ module.exports = function (db, appConfig) {
       return kit.reply(req, res, back, false, 'Saving failed: ' + (err.message || err));
     }
     if (r.flyer_path && r.flyer_path !== saved.rel) await uploads.removeFiles(appConfig, r.flyer_path);
+    await audit(req, 'raffle.image', { kind: 'raffle', id, label: r.title, summary: `Flyer ${r.flyer_path ? 'replaced' : 'uploaded'}` });
     kit.reply(req, res, back, true, 'Flyer uploaded.');
   }));
 
@@ -563,10 +581,11 @@ module.exports = function (db, appConfig) {
     const id = kit.idParam(req.params.id);
     if (!id) return res.redirect('/raffles?error=Invalid+raffle+id');
     try {
-      const r = await db.getAsync('SELECT flyer_path FROM raffles WHERE raffle_id = ?', [id]);
+      const r = await db.getAsync('SELECT flyer_path, title FROM raffles WHERE raffle_id = ?', [id]);
       if (!r) return res.redirect('/raffles?error=Raffle+not+found');
       await db.runAsync('UPDATE raffles SET flyer_path = NULL, updated_at = ? WHERE raffle_id = ?', [kit.sqlTime(), id]);
       await uploads.removeFiles(appConfig, r.flyer_path);
+      await audit(req, 'raffle.image', { kind: 'raffle', id, label: r.title, summary: 'Flyer removed' });
       res.redirect(`/raffles/${id}?msg=Flyer+removed.`);
     } catch (err) {
       res.redirect(`/raffles/${id}?error=` + encodeURIComponent('Remove failed: ' + (err.message || err)));
@@ -578,8 +597,8 @@ module.exports = function (db, appConfig) {
     const id = kit.idParam(req.params.id);
     if (!id) return kit.reply(req, res, '/raffles', false, 'Invalid raffle id.');
     const back = `/raffles/${id}`;
-    const r = await db.getAsync('SELECT raffle_id FROM raffles WHERE raffle_id = ?', [id]);
-    if (!r) return kit.reply(req, res, '/raffles', false, 'Raffle not found.');
+    const raffle = await db.getAsync('SELECT raffle_id, title FROM raffles WHERE raffle_id = ?', [id]);
+    if (!raffle) return kit.reply(req, res, '/raffles', false, 'Raffle not found.');
     const capMsg = `A raffle can have at most ${MAX_IMAGES} prize photos.`;
     const c = await db.getAsync('SELECT COUNT(*) AS c FROM raffle_images WHERE raffle_id = ?', [id]);
     if (c && Number(c.c) >= MAX_IMAGES) return kit.reply(req, res, back, false, capMsg);
@@ -608,6 +627,7 @@ module.exports = function (db, appConfig) {
       await uploads.removeFiles(appConfig, saved.rel);
       return kit.reply(req, res, back, false, capMsg);
     }
+    await audit(req, 'raffle.image', { kind: 'raffle', id, label: raffle.title, summary: 'Prize photo added' });
     kit.reply(req, res, back, true, 'Prize photo added.');
   }));
 
@@ -615,7 +635,9 @@ module.exports = function (db, appConfig) {
     const id = kit.idParam(req.params.id), imageId = kit.idParam(req.params.imageId);
     if (!id || !imageId) return res.redirect('/raffles?error=Invalid+id');
     try {
-      await kit.moveRow(db, 'raffle_images', 'image_id', imageId, req.body && req.body.dir === 'up' ? 'up' : 'down', 'raffle_id', id);
+      const dir = req.body && req.body.dir === 'up' ? 'up' : 'down';
+      const moved = await kit.moveRow(db, 'raffle_images', 'image_id', imageId, dir, 'raffle_id', id);
+      if (moved) await audit(req, 'raffle.image', { kind: 'raffle', id, label: await titleOf(id), summary: `Prize photo #${imageId} moved ${dir}` });
       res.redirect(`/raffles/${id}`);
     } catch (err) {
       res.redirect(`/raffles/${id}?error=` + encodeURIComponent('Reorder failed: ' + (err.message || err)));
@@ -630,6 +652,7 @@ module.exports = function (db, appConfig) {
       if (!im) return res.redirect(`/raffles/${id}?error=Photo+not+found`);
       await db.runAsync('DELETE FROM raffle_images WHERE image_id = ? AND raffle_id = ?', [imageId, id]);
       await uploads.removeFiles(appConfig, im.path);
+      await audit(req, 'raffle.image', { kind: 'raffle', id, label: await titleOf(id), summary: `Prize photo #${imageId} deleted` });
       res.redirect(`/raffles/${id}?msg=Photo+deleted.`);
     } catch (err) {
       res.redirect(`/raffles/${id}?error=` + encodeURIComponent('Delete failed: ' + (err.message || err)));

@@ -24,6 +24,10 @@ const uploads = require('../helpers/webAppUploads');
 module.exports = function (db, appConfig) {
   const router = express.Router();
   const back = '/board';
+  const audit = require('../helpers/audit')(db);
+  // "Role — Person" for an audit label; null if gone / DB down.
+  const roleLabel = (id) => db.getAsync('SELECT role_title, person_name FROM board_members WHERE board_id = ?', [id])
+    .then(r => r ? [r.role_title, r.person_name].filter(Boolean).join(' — ') : null).catch(() => null);
 
   router.get('/board', requireAdmin, async (req, res) => {
     const user = req.session.user;
@@ -88,8 +92,9 @@ module.exports = function (db, appConfig) {
     if (!title) return res.redirect(back + '?error=Role+is+required');
     try {
       const sort = await kit.nextSort(db, 'board_members');
-      await db.runAsync('INSERT INTO board_members (role_title, role_description, person_name, photo_path, sort) VALUES (?, ?, NULL, NULL, ?)',
+      const ins = await db.runAsync('INSERT INTO board_members (role_title, role_description, person_name, photo_path, sort) VALUES (?, ?, NULL, NULL, ?)',
         [title, kit.str(req.body.role_description, 500), sort]);
+      await audit(req, 'board.add', { kind: 'board', id: ins && ins.lastID ? Number(ins.lastID) : null, label: title, summary: `Added board role "${title}"` });
       res.redirect(back + '?msg=' + encodeURIComponent(`Added "${title}".`));
     } catch (err) {
       res.redirect(back + '?error=' + encodeURIComponent('Add failed: ' + (err.message || err)));
@@ -101,9 +106,11 @@ module.exports = function (db, appConfig) {
     const title = kit.str(req.body.role_title, 100);
     if (!id || !title) return res.redirect(back + '?error=Role+is+required');
     try {
+      const person = kit.str(req.body.person_name, 200);
       const r = await db.runAsync('UPDATE board_members SET role_title = ?, role_description = ?, person_name = ? WHERE board_id = ?',
-        [title, kit.str(req.body.role_description, 500), kit.str(req.body.person_name, 200), id]);
+        [title, kit.str(req.body.role_description, 500), person, id]);
       if (!r.changes) return res.redirect(back + '?error=Role+not+found');
+      await audit(req, 'board.save', { kind: 'board', id, label: [title, person].filter(Boolean).join(' — '), summary: 'Role, description or person saved' });
       res.redirect(back + '?msg=' + encodeURIComponent(`Saved "${title}".`));
     } catch (err) {
       res.redirect(back + '?error=' + encodeURIComponent('Save failed: ' + (err.message || err)));
@@ -114,7 +121,9 @@ module.exports = function (db, appConfig) {
     const id = kit.idParam(req.params.id);
     if (!id) return res.redirect(back + '?error=Invalid+id');
     try {
-      await kit.moveRow(db, 'board_members', 'board_id', id, req.body && req.body.dir === 'up' ? 'up' : 'down');
+      const dir = req.body && req.body.dir === 'up' ? 'up' : 'down';
+      const moved = await kit.moveRow(db, 'board_members', 'board_id', id, dir);
+      if (moved) await audit(req, 'board.move', { kind: 'board', id, label: await roleLabel(id), summary: `Moved ${dir}` });
       res.redirect(back);
     } catch (err) {
       res.redirect(back + '?error=' + encodeURIComponent('Reorder failed: ' + (err.message || err)));
@@ -136,6 +145,7 @@ module.exports = function (db, appConfig) {
       return kit.reply(req, res, back, false, 'Saving failed: ' + (err.message || err));
     }
     if (b.photo_path && b.photo_path !== saved.rel) await uploads.removeFiles(appConfig, b.photo_path);
+    await audit(req, 'board.photo', { kind: 'board', id, label: await roleLabel(id), summary: `Photo ${b.photo_path ? 'replaced' : 'uploaded'}` });
     kit.reply(req, res, back, true, 'Photo uploaded.');
   }));
 
@@ -147,6 +157,7 @@ module.exports = function (db, appConfig) {
       if (!b) return res.redirect(back + '?error=Role+not+found');
       await db.runAsync('UPDATE board_members SET photo_path = NULL WHERE board_id = ?', [id]);
       await uploads.removeFiles(appConfig, b.photo_path);
+      await audit(req, 'board.photo', { kind: 'board', id, label: await roleLabel(id), summary: 'Photo removed' });
       res.redirect(back + '?msg=Photo+removed.');
     } catch (err) {
       res.redirect(back + '?error=' + encodeURIComponent('Remove failed: ' + (err.message || err)));
@@ -157,10 +168,11 @@ module.exports = function (db, appConfig) {
     const id = kit.idParam(req.params.id);
     if (!id) return res.redirect(back + '?error=Invalid+id');
     try {
-      const b = await db.getAsync('SELECT role_title, photo_path FROM board_members WHERE board_id = ?', [id]);
+      const b = await db.getAsync('SELECT role_title, person_name, photo_path FROM board_members WHERE board_id = ?', [id]);
       if (!b) return res.redirect(back + '?error=Role+not+found');
       await db.runAsync('DELETE FROM board_members WHERE board_id = ?', [id]);
       await uploads.removeFiles(appConfig, b.photo_path);
+      await audit(req, 'board.delete', { kind: 'board', id, label: [b.role_title, b.person_name].filter(Boolean).join(' — '), summary: `Removed board role${b.photo_path ? ' and its photo' : ''}` });
       res.redirect(back + '?msg=' + encodeURIComponent(`Removed "${b.role_title}".`));
     } catch (err) {
       res.redirect(back + '?error=' + encodeURIComponent('Remove failed: ' + (err.message || err)));

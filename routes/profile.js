@@ -16,6 +16,9 @@ const {
   getPasswordRules, validatePassword
 } = require('../middleware/auth');
 const localAdmins = require('../helpers/localAdmins');
+// This router has no db of its own: the audit trail goes through the
+// recorder routes/audit.js captures when app.js mounts it.
+const { record: audit } = require('./audit');
 
 module.exports = function (appConfig) {
   const router = express.Router();
@@ -108,7 +111,7 @@ module.exports = function (appConfig) {
     res.send(page({ title: 'My profile', body, appConfig, user, activeNav: 'profile' }));
   });
 
-  router.post('/profile', requireAdmin, (req, res) => {
+  router.post('/profile', requireAdmin, async (req, res) => {
     try {
       const sessionUser = req.session.user;
       const name = (req.body.name || '').trim();
@@ -116,6 +119,9 @@ module.exports = function (appConfig) {
       if (!name) return res.redirect('/profile?error=Name+is+required');
       if (!email) return res.redirect('/profile?error=Email+is+required');
 
+      const changed = [];
+      if (name !== (sessionUser.name || '')) changed.push('name');
+      if (email !== (sessionUser.email || '')) changed.push('email');
       const saved = localAdmins.update(sessionUser.username, { name, email });
       if (!saved) return res.redirect('/login?error=Account+not+found');
 
@@ -125,6 +131,8 @@ module.exports = function (appConfig) {
         name: saved.name || saved.username,
         email: saved.email || ''
       });
+      await audit(req, 'profile.save', { kind: 'admin', id: sessionUser.username, label: sessionUser.username,
+        summary: changed.length ? `Changed own ${changed.join(' and ')}` : 'Saved own profile (no change)' });
       res.redirect('/profile?msg=Profile+saved.');
     } catch (err) {
       console.error('[profile] update failed:', err);
@@ -163,6 +171,7 @@ module.exports = function (appConfig) {
       // hash on every request; refresh it so THIS session survives the
       // change (every other session for this admin is ended).
       req.session.fp = sessionFingerprint(password_hash);
+      await audit(req, 'profile.password', { kind: 'admin', id: sessionUser.username, label: sessionUser.username, summary: 'Changed own password' });
       res.redirect('/profile?msg=Password+updated.');
     } catch (err) {
       console.error('[profile] password change failed:', err);

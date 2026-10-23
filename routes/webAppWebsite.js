@@ -31,6 +31,9 @@ const { requireAdmin } = require('../middleware/auth');
 const webAppAccess = require('../helpers/webAppAccess');
 const waConfig = require('../helpers/webAppConfig');
 const uploads = require('../helpers/webAppUploads');
+// This router has no db of its own: the audit trail goes through the
+// recorder routes/audit.js captures when app.js mounts it.
+const { record: audit } = require('./audit');
 
 // Image uploads are buffered in memory then written to the Web App via
 // the transport (so the same code path works for local / SSH / EC2-SSM).
@@ -413,6 +416,7 @@ function makeRouter(appConfig) {
         // writeFileChunked: mkdir -p + atomic write, and on EC2 the file goes
         // over in ≤40 KB SSM pieces, so large photos work in every mode.
         await accessor.writeFileChunked(waConfig.joinPath(imagesDirOf(accessor), name), req.file.buffer);
+        await audit(req, 'website.image', { kind: 'website', id: 'images', label: name, summary: `Image uploaded (${Math.ceil(req.file.buffer.length / 1024)} KB)` });
         res.redirect('/web-app-website?imgok=' + encodeURIComponent(name));
       } catch (e) {
         console.error('[web-app-website] image upload failed:', e);
@@ -434,6 +438,7 @@ function makeRouter(appConfig) {
       const accessor = webAppAccess.createAccessorFromConfig(appConfig);
       const dir = imagesDirOf(accessor);
       await accessor.runCommand(`rm -f -- ${shq(waConfig.joinPath(dir, name))}`, { timeoutMs: 20000 });
+      await audit(req, 'website.image', { kind: 'website', id: 'images', label: name, summary: 'Image deleted' });
       res.redirect('/web-app-website?imgdel=' + encodeURIComponent(name));
     } catch (e) {
       console.error('[web-app-website] image delete failed:', e);
@@ -480,6 +485,8 @@ function makeRouter(appConfig) {
         timeoutMs: 120000,
         comment: `web app maintenance ${action}`
       });
+      await audit(req, `maintenance.${action}`, { kind: 'website', id: 'maintenance', label: 'Maintenance mode',
+        summary: `${action === 'enable' ? 'Enabled' : action === 'disable' ? 'Disabled' : 'Status checked'} — exit code ${r.code}${r.timedOut ? ' (timed out)' : ''}` });
       res.json({ ok: r.code === 0, code: r.code, stdout: r.stdout, stderr: r.stderr, timedOut: !!r.timedOut });
     } catch (err) {
       console.error('[web-app-website] maintenance failed:', err);
@@ -500,6 +507,7 @@ function makeRouter(appConfig) {
       const accessor = webAppAccess.createAccessorFromConfig(appConfig);
       const p = waConfig.joinPath(accessor.appPath, 'HTML/' + section.key + '.html');
       await accessor.writeFile(p, html);
+      await audit(req, 'website.section', { kind: 'website', id: section.key, label: section.label, summary: `Section saved (${html.length} characters)` });
       res.json({ ok: true });
     } catch (err) {
       console.error(`[web-app-website] save ${section.key} failed:`, err);

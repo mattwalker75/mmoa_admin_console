@@ -25,6 +25,9 @@ const { escapeHtml } = require('../views/escapeHtml');
 const { requireAdmin } = require('../middleware/auth');
 const webAppAccess = require('../helpers/webAppAccess');
 const waConfig = require('../helpers/webAppConfig');
+// This router has no db of its own: the audit trail goes through the
+// recorder routes/audit.js captures when app.js mounts it.
+const { record: audit } = require('./audit');
 
 const WA_TABS = [
   { key: 'general',  label: 'General' },
@@ -447,9 +450,12 @@ module.exports = function (appConfig, appConfigModule) {
         appConfig.webApp.restartPending = false;
         appConfigModule.save();
       }
+      await audit(req, 'webapp.power', { kind: 'webapp', id: action, label: `Web App ${action}`,
+        summary: `${action} — exit code ${r.code}${r.timedOut ? ' (timed out)' : ''}` });
       res.json({ ok: r.code === 0, code: r.code, stdout: r.stdout, stderr: r.stderr, timedOut: !!r.timedOut });
     } catch (err) {
       console.error('[web-app-settings] power failed:', err);
+      await audit(req, 'webapp.power', { kind: 'webapp', id: action, label: `Web App ${action}`, summary: `${action} — could not run the command` });
       res.status(500).json({ ok: false, error: err.message || 'Command failed' });
     }
   });
@@ -512,6 +518,14 @@ module.exports = function (appConfig, appConfigModule) {
         waConfig.markWebAppWritten(appConfig);
         appConfigModule.save();
       }
+      // Audit: which of this tab's keys changed — names only, never values
+      // (the Email and AWS tabs hold passwords / secret keys).
+      const beforeJson = JSON.parse(before);
+      const keys = FIELDS[tab].filter(d => d.type !== 'heading' && d.path)
+        .map(d => d.path)
+        .filter(p => JSON.stringify(waConfig.getPath(beforeJson, p) ?? null) !== JSON.stringify(waConfig.getPath(json, p) ?? null));
+      await audit(req, 'webapp_settings.save', { kind: 'webapp_settings', id: tab, label: `Web App Settings → ${(WA_TABS.find(t => t.key === tab) || {}).label || tab}`,
+        summary: changed ? `Changed: ${[...new Set(keys)].join(', ') || '(keys outside the form)'} — written to the Web App's config.json, restart pending` : 'Saved, nothing changed' });
       res.redirect(`/web-app-settings/${tab}?saved=1` + (changed ? '&wa=1' : ''));
     } catch (err) {
       console.error('[web-app-settings] save failed:', err);

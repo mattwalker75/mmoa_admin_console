@@ -31,6 +31,25 @@ const { requireAdmin } = require('../middleware/auth');
 const awsSsm = require('../helpers/awsSsm');
 const webAppAccess = require('../helpers/webAppAccess');
 
+// Dotted paths whose values differ between two plain objects — the NAMES
+// only, never the values (some are secrets). Nested objects are walked;
+// everything else is compared as JSON. Used for the audit trail's "which
+// settings changed" summaries.
+function changedPaths(before, after, prefix) {
+  const out = [];
+  const isObj = (v) => v && typeof v === 'object' && !Array.isArray(v);
+  const keys = new Set([...Object.keys(isObj(before) ? before : {}), ...Object.keys(isObj(after) ? after : {})]);
+  for (const k of keys) {
+    const p = prefix ? `${prefix}.${k}` : k;
+    const a = isObj(before) ? before[k] : undefined;
+    const b = isObj(after) ? after[k] : undefined;
+    if (isObj(a) && isObj(b)) out.push(...changedPaths(a, b, p));
+    else if (JSON.stringify(a === undefined ? null : a) !== JSON.stringify(b === undefined ? null : b)) out.push(p);
+  }
+  return out;
+}
+const snapshot = (v) => JSON.parse(JSON.stringify(v === undefined ? null : v));
+
 const imagesDir = path.join(__dirname, '..', 'public', 'images');
 if (!fs.existsSync(imagesDir)) {
   try { fs.mkdirSync(imagesDir, { recursive: true }); } catch (e) { /* best effort */ }
@@ -127,6 +146,7 @@ function pageHeader(title, subtitle) {
 
 module.exports = function (db, appConfig, appConfigModule) {
   const router = express.Router();
+  const audit = require('../helpers/audit')(db);
 
   router.get('/settings', requireAdmin, (req, res) => {
     res.redirect('/settings/security');
@@ -218,9 +238,10 @@ module.exports = function (db, appConfig, appConfigModule) {
     res.send(page({ title: 'Security', body, appConfig, user, activeNav: 'settings' }));
   });
 
-  router.post('/settings/security', requireAdmin, (req, res) => {
+  router.post('/settings/security', requireAdmin, async (req, res) => {
     try {
       const b = req.body || {};
+      const before = snapshot(appConfig.security || {});
       const sec = (appConfig.security && typeof appConfig.security === 'object') ? appConfig.security : {};
       const pw = (sec.password && typeof sec.password === 'object') ? sec.password : {};
       const rl = (sec.rateLimiting && typeof sec.rateLimiting === 'object') ? sec.rateLimiting : {};
@@ -249,6 +270,9 @@ module.exports = function (db, appConfig, appConfigModule) {
       appConfig.passwordMinLength = pw.minLength;
 
       appConfigModule.save();
+      const changed = changedPaths(before, appConfig.security, 'security');
+      await audit(req, 'settings.save', { kind: 'settings', id: 'security', label: 'Settings → Security',
+        summary: changed.length ? `Changed: ${changed.join(', ')}` : 'Saved, nothing changed' });
       res.redirect('/settings/security?saved=1');
     } catch (err) {
       console.error('[settings] security save failed:', err);
@@ -328,11 +352,12 @@ module.exports = function (db, appConfig, appConfigModule) {
     res.send(page({ title: 'Appearance', body, appConfig, user, activeNav: 'settings' }));
   });
 
-  router.post('/settings/appearance', requireAdmin, uploadAppearance, (req, res) => {
+  router.post('/settings/appearance', requireAdmin, uploadAppearance, async (req, res) => {
     try {
       const b = req.body || {};
       const files = req.files || {};
 
+      const before = snapshot(appConfig.theme || {});
       const theme = (appConfig.theme && typeof appConfig.theme === 'object') ? appConfig.theme : {};
       const login = (theme.login && typeof theme.login === 'object') ? theme.login : {};
       const appBg = (theme.app && typeof theme.app === 'object') ? theme.app : {};
@@ -368,6 +393,14 @@ module.exports = function (db, appConfig, appConfigModule) {
       appConfig.theme = theme;
       appConfigModule.save();
 
+      const changed = changedPaths(before, appConfig.theme, 'theme');
+      const notes = [];
+      if (newLoginImg) notes.push('login background image uploaded');
+      else if (b.login_background_image_clear === '1') notes.push('login background image cleared');
+      if (newAppImg) notes.push('app background image uploaded');
+      else if (b.app_background_image_clear === '1') notes.push('app background image cleared');
+      await audit(req, 'settings.save', { kind: 'settings', id: 'appearance', label: 'Settings → Appearance',
+        summary: (changed.length ? `Changed: ${changed.join(', ')}` : 'Saved, nothing changed') + (notes.length ? ` (${notes.join('; ')})` : '') });
       res.redirect('/settings/appearance?saved=1');
     } catch (err) {
       console.error('[settings] appearance save failed:', err);
@@ -882,10 +915,29 @@ module.exports = function (db, appConfig, appConfigModule) {
       const prevDb = (appConfig.database && typeof appConfig.database === 'object') ? appConfig.database : {};
       const prevMode = (appConfig.webApp && appConfig.webApp.mode) || 'local';
       const dbBefore = JSON.stringify(prevDb);
+      const beforeWa = snapshot(appConfig.webApp || {});
+      const beforeDbCfg = snapshot(prevDb);
 
       appConfig.webApp = webAppFromBody(b, appConfig.webApp || {});
       appConfig.database = databaseFromBody(b, prevDb);
       appConfigModule.save();
+
+      // Audit: the NAMES of what changed. The three secrets are reported as
+      // replaced / cleared, never by value.
+      const SECRETS = {
+        'webApp.ssh.privateKey': 'SSH private key',
+        'webApp.ec2.secretAccessKey': 'AWS secret access key',
+        'database.mysql.password': 'MySQL password'
+      };
+      const after = { webApp: appConfig.webApp, database: appConfig.database };
+      const changed = changedPaths({ webApp: beforeWa, database: beforeDbCfg }, after, '')
+        .map(p => {
+          if (!SECRETS[p]) return p;
+          const now = p.split('.').reduce((o, k) => (o ? o[k] : undefined), after);
+          return `${SECRETS[p]} ${now ? 'replaced' : 'cleared'}`;
+        });
+      await audit(req, 'settings.save', { kind: 'settings', id: 'web-app', label: 'Settings → Web App',
+        summary: changed.length ? `Changed: ${changed.join(', ')}` : 'Saved, nothing changed' });
       // Drop any memoized SSM client so changed EC2 credentials take effect
       // without a restart.
       try { awsSsm.resetClient(); } catch (e) { /* best effort */ }
