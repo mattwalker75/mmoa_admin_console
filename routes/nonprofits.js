@@ -4,9 +4,17 @@
 // logins are other nonprofits, each with exactly one organization profile.
 //
 //   GET  /nonprofits                        → list + search + status / listing filters
+//   GET  /nonprofits/new, POST /nonprofits  → create a login + organization from the console
+//                                             (temporary password shown once on the next page)
 //   GET  /nonprofits/:id                    → whole profile (incl. hidden fields + photos),
 //                                             account, verification, IRS / ProPublica panel
 //   GET  /nonprofits/:id/propublica         → JSON: server-side ProPublica lookup of the EIN
+//   GET/POST /nonprofits/:id/profile        → edit the organization profile — every field the
+//                                             org can edit in its portal, validated the same way
+//   POST /nonprofits/:id/hidden             → state=1 hide from / state=0 show in the directory
+//                                             (organizations.admin_hidden — MMoA's override)
+//   POST /nonprofits/:id/preview            → JSON { url }: a ~30-minute preview link to the
+//                                             profile page whatever its status (Preview pop-up)
 //   POST /nonprofits/:id/verification       → status=verified|rejected|unverified + note
 //   POST /nonprofits/:id/active             → state=1 activate / state=0 deactivate the login
 //   POST /nonprofits/:id/verify-email       → state=1 mark email verified / state=0 unverified
@@ -21,9 +29,15 @@
 // 1:1 with it (an account created outside the sign-up flow may lack one; the
 // page then says so).
 //
-// Only `verified` + listed organizations appear in the public directory; the
-// web app never shows the EIN or fields the org marked hidden. The console
-// sees everything.
+// Only `verified` + listed + not admin-hidden organizations appear in the
+// public directory; the web app never shows the EIN or fields the org marked
+// hidden. The console sees everything. The web app caches the directory for
+// 20 s (helpers/orgCache.js), so a change made here shows within that.
+//
+// Edit profile validates EXACTLY like the portal's PUT /api/portal/org
+// (mmoa_web_app/routes/portal.js): same normalizers (helpers/formats.js is a
+// verbatim copy of the web app's), same length limits, ZIP / contact rules
+// and error messages. Create uses the sign-up rules (routes/api.js).
 //
 // Remote SQLite has no FK enforcement and no reads inside transactions, so
 // Delete reads the photo paths first, then deletes every child explicitly in
@@ -36,11 +50,27 @@ const { requireAdmin, hashPassword, getPasswordRules, validatePassword } = requi
 const kit = require('../helpers/pageKit');
 const uploads = require('../helpers/webAppUploads');
 const { renderMarkdownLite } = require('../helpers/markdownLite');
+const preview = require('../helpers/sitePreview');
+const fmt = require('../helpers/formats');
+const { markdownField, TEXTAREA_CLS } = require('./events');
 
 const STATUS_PILL = { verified: 'pill-running', unverified: 'pill-pending', rejected: 'pill-failed' };
 const STATUS_LABEL = { verified: 'Verified', unverified: 'Pending verification', rejected: 'Rejected' };
 const DEFAULT_PUBLIC = ['address', 'phone', 'public_email', 'website_url', 'facebook_url', 'instagram_url',
   'other_social_url', 'description', 'hours', 'what_to_bring', 'contacts', 'images', 'service_cities', 'categories'];
+const PUBLIC_FIELD_LABELS = {
+  address: 'Address', phone: 'Phone', public_email: 'Public email', website_url: 'Website', facebook_url: 'Facebook',
+  instagram_url: 'Instagram', other_social_url: 'Other link', description: 'Description', hours: 'Hours',
+  what_to_bring: 'What to bring', contacts: 'Contacts', images: 'Photos', service_cities: 'Cities served', categories: 'Services'
+};
+// The portal's rules (mmoa_web_app/routes/portal.js).
+const ZIP_RE = /^\d{5}(-\d{4})?$/;
+const MAX_CONTACTS = 10;
+// The sign-up rules (mmoa_web_app/routes/api.js).
+const NAME_RE = /^[\p{L}\p{M} .,'-]{1,100}$/u;
+const EMAIL_STRICT_RE = /^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$/;
+const LOGIN_NAME_RE = /^[A-Za-z0-9._-]{3,30}$/;
+const PHONE_RE = /^[0-9+().\- ]{7,32}$/;
 const PROPUBLICA_API = 'https://projects.propublica.org/nonprofits/api/v2/organizations/';
 const PROPUBLICA_PAGE = 'https://projects.propublica.org/nonprofits/organizations/';
 const IRS_TEOS = 'https://apps.irs.gov/app/eos/';
@@ -177,6 +207,375 @@ function linkOr(v) {
     : textOr(v);
 }
 
+// ── Edit profile ────────────────────────────────────────────────────────
+// The form's values: from the stored rows (profileValues) or echoed back
+// from a rejected post (valuesFromBody). Arrays: categories = slugs,
+// city_ids = numbers, public_fields = keys; contacts_json = the contacts
+// editor's JSON.
+const toArr = (v) => (v == null ? [] : Array.isArray(v) ? v : [v]);
+const TEXT_KEYS = ['name', 'ein', 'address_line1', 'address_line2', 'city', 'state', 'zip', 'phone', 'phone_ext', 'public_email',
+  'website_url', 'facebook_url', 'instagram_url', 'other_social_url', 'description_md', 'hours', 'what_to_bring', 'search_tags'];
+
+function contactsJson(rows) {
+  return JSON.stringify((rows || []).map(c => ({
+    name: c.name || '', role: c.role || '', email: c.email || '', phone: c.phone || '', phone_ext: c.phone_ext || '',
+    is_public: Number(c.is_public) === 1 || c.is_public === true
+  })));
+}
+
+function profileValues(o, contacts, catSlugs, cityIds) {
+  const v = {};
+  for (const k of TEXT_KEYS) v[k] = o[k] == null ? '' : String(o[k]);
+  v.categories = catSlugs.map(String);
+  v.city_ids = cityIds.map(Number);
+  v.public_fields = parsePublicFields(o.public_fields);
+  v.is_listed = Number(o.is_listed) === 1;
+  v.contacts_json = contactsJson(contacts);
+  return v;
+}
+
+function valuesFromBody(b) {
+  const v = {};
+  // A non-string (a repeated field) is kept as it came so readProfile rejects
+  // it with the portal's "… must be text" instead of a comma-joined value.
+  // The form posts the name as org_name (middleware/inputLimits.js caps a
+  // field called `name` at 100 — an organization name may be 200).
+  for (const k of TEXT_KEYS) { const raw = b[k === 'name' ? 'org_name' : k]; v[k] = raw == null ? '' : typeof raw === 'string' ? raw.replace(/\r\n?/g, '\n') : raw; }
+  v.categories = toArr(b.categories).map(String);
+  v.city_ids = toArr(b.city_ids).map(Number).filter(Number.isInteger);
+  v.public_fields = toArr(b.pf).map(String).filter(k => DEFAULT_PUBLIC.includes(k));
+  v.is_listed = kit.yes(b.is_listed);
+  // contacts_json: what to echo back into the editor (normalized), and
+  // whether it could be read at all (an unreadable list must not save as
+  // "no contacts").
+  v.contacts_json = '[]'; v.contacts_unreadable = false;
+  try {
+    if (b.contacts_json != null && typeof b.contacts_json !== 'string') throw new Error('not text');
+    const a = JSON.parse(b.contacts_json || '[]');
+    if (!Array.isArray(a)) throw new Error('not a list');
+    v.contacts_json = contactsJson(a.slice(0, 50));
+  } catch (e) { v.contacts_unreadable = true; }
+  return v;
+}
+
+// The portal's validation, line for line (routes/portal.js PUT /org): the
+// same `str` helper, limits, normalizers and messages. Returns { set,
+// contacts, categorySlugs, cityIds } or throws BadInput. `cur` is the stored
+// row (EIN compare).
+class BadInput extends Error { constructor(msg) { super(msg); this.status = 400; } }
+function pstr(body, key, max, { required = false, label = key } = {}) {
+  const v = body[key];
+  if (v != null && typeof v !== 'string') throw new BadInput(`${label} must be text`);
+  const s = (v || '').trim();
+  if (required && !s) throw new BadInput(`${label} is required`);
+  if (s.length > max) throw new BadInput(`${label} must be ${max} characters or less`);
+  return s;
+}
+function readProfile(v, cur) {
+  const set = {};
+  const name = pstr(v, 'name', 200, { required: true, label: 'Organization name' });
+  if (name.length < 2) throw new BadInput('Organization name is too short');
+  set.name = name;
+  // Blank keeps the stored EIN (as in the portal, where the field is optional
+  // in the body); an admin may change it at any status.
+  const einRaw = String(v.ein || '').trim();
+  if (einRaw) {
+    const ein = fmt.normalizeEin(einRaw);
+    if (!ein) throw new BadInput('EIN must be 9 digits (for example 12-3456789)');
+    if (ein !== (cur.ein || '')) set.ein = ein;
+  }
+  for (const [k, max, label] of [['address_line1', 200, 'Address'], ['address_line2', 200, 'Address line 2'],
+    ['city', 100, 'City'], ['hours', 1000, 'Hours'], ['what_to_bring', 2000, 'What to bring'],
+    ['description_md', 5000, 'Description']]) {
+    set[k] = pstr(v, k, max, { label }) || null;
+  }
+  const st = fmt.normalizeState(pstr(v, 'state', 40, { label: 'State' }));
+  if (!st) throw new BadInput('Please pick a valid US state (for example TX)');
+  set.state = st;
+  const zip = pstr(v, 'zip', 10, { label: 'ZIP' });
+  if (zip && !ZIP_RE.test(zip)) throw new BadInput('ZIP must be 5 digits (or ZIP+4)');
+  set.zip = zip || null;
+  const phone = fmt.formatPhone(pstr(v, 'phone', 32, { label: 'Phone' }));
+  if (phone === null) throw new BadInput('Phone must be a 10-digit US number, like (972) 555-0100');
+  set.phone = phone || null;
+  const ext = fmt.normalizeExt(pstr(v, 'phone_ext', 10, { label: 'Extension' }));
+  if (ext === null) throw new BadInput('Extension must be 1–6 digits');
+  set.phone_ext = ext || null;
+  if (!set.phone) set.phone_ext = null; // an extension means nothing without the number
+  const em = fmt.normalizeEmail(pstr(v, 'public_email', 255, { label: 'Public email' }));
+  if (em === null) throw new BadInput('Public email must look like name@example.org');
+  set.public_email = em || null;
+  for (const [k, norm, msg] of [
+    ['website_url', fmt.normalizeUrl, 'Website must be a web address like https://example.org'],
+    ['facebook_url', fmt.normalizeFacebook, 'Facebook must be a Facebook page, like facebook.com/yourpage'],
+    ['instagram_url', fmt.normalizeInstagram, 'Instagram must be an Instagram account, like instagram.com/yourname or @yourname'],
+    ['other_social_url', fmt.normalizeUrl, 'Other link must be a web address like https://example.org']]) {
+    if (v[k] != null && typeof v[k] !== 'string') throw new BadInput('Links must be text');
+    const u = norm(v[k]);
+    if (u === null) throw new BadInput(msg);
+    set[k] = u || null;
+  }
+  if (v.search_tags != null && typeof v.search_tags !== 'string') throw new BadInput('Search keywords must be text');
+  const tags = fmt.normalizeSearchTags(String(v.search_tags || '').slice(0, 4000));
+  if (tags === null) throw new BadInput(`Search keywords: up to ${fmt.MAX_TAGS}, each up to ${fmt.MAX_TAG_LEN} characters`);
+  set.search_tags = tags || null;
+  if (!Array.isArray(v.public_fields)) throw new BadInput('public_fields must be a list');
+  set.public_fields = JSON.stringify(DEFAULT_PUBLIC.filter(k => v.public_fields.includes(k)));
+  set.is_listed = v.is_listed ? 1 : 0;
+
+  if (v.contacts_unreadable) throw new BadInput('Contacts could not be read — reload the page and try again.');
+  let rows;
+  try { rows = JSON.parse(v.contacts_json || '[]'); } catch (e) { throw new BadInput('Contacts could not be read — reload the page and try again.'); }
+  if (!Array.isArray(rows)) throw new BadInput('contacts must be a list');
+  if (rows.length > MAX_CONTACTS) throw new BadInput(`Up to ${MAX_CONTACTS} contacts`);
+  const contacts = [];
+  for (const c of rows) {
+    if (!c || typeof c !== 'object') throw new BadInput('Bad contact entry');
+    const cname = pstr(c, 'name', 200, { label: 'Contact name' });
+    const role = pstr(c, 'role', 200, { label: 'Contact role' });
+    const emailRaw = pstr(c, 'email', 255, { label: 'Contact email' });
+    const phoneRaw = pstr(c, 'phone', 32, { label: 'Contact phone' });
+    const cext = fmt.normalizeExt(pstr(c, 'phone_ext', 10, { label: 'Contact extension' }));
+    const email = fmt.normalizeEmail(emailRaw);
+    const cphone = fmt.formatPhone(phoneRaw);
+    if (!cname && !role && !emailRaw && !phoneRaw) continue; // blank row
+    if (!cname) throw new BadInput('Each contact needs a name');
+    if (email === null) throw new BadInput(`Contact email for ${cname} must look like name@example.org`);
+    if (cphone === null) throw new BadInput(`Contact phone for ${cname} must be a 10-digit US number`);
+    if (cext === null) throw new BadInput(`Contact extension for ${cname} must be 1–6 digits`);
+    contacts.push({ name: cname, role: role || null, email: email || null, phone: cphone || null, phone_ext: (cphone && cext) || null, is_public: c.is_public ? 1 : 0 });
+  }
+  if (!Array.isArray(v.categories) || v.categories.length > 50) throw new BadInput('categories must be a list');
+  if (!Array.isArray(v.city_ids) || v.city_ids.length > 100) throw new BadInput('city_ids must be a list');
+  return { set, contacts, categorySlugs: v.categories.map(String), cityIds: v.city_ids.map(Number) };
+}
+
+// Alpine contacts editor (posts contacts_json) — same shape as
+// helpers/beneficiaries.js. The portal's rules per row: a name is required
+// once anything is filled in; email / phone / extension are normalized on
+// save; Public = shown on the website (when "Contacts" is public too).
+function contactsEditor(json) {
+  return `<div data-contacts="${escapeHtml(json || '[]')}"
+       x-data="{ rows: [],
+         init() { this.rows = JSON.parse(this.$el.dataset.contacts || '[]').map(c => ({ name: c.name || '', role: c.role || '', email: c.email || '', phone: c.phone || '', phone_ext: c.phone_ext || '', is_public: !!c.is_public })); },
+         add() { if (this.rows.length < ${MAX_CONTACTS}) this.rows.push({ name: '', role: '', email: '', phone: '', phone_ext: '', is_public: false }); },
+         remove(i) { this.rows.splice(i, 1); },
+         move(i, d) { const j = i + d; if (j < 0 || j >= this.rows.length) return; const t = this.rows[i]; this.rows[i] = this.rows[j]; this.rows[j] = t; },
+         get json() { return JSON.stringify(this.rows); } }">
+    <input type="hidden" name="contacts_json" :value="json">
+    <div class="flex items-center justify-between">
+      <span class="label mb-0">Contacts <span class="text-xs font-normal text-slate-400">(up to ${MAX_CONTACTS})</span></span>
+      <button type="button" class="btn-secondary text-xs px-3 py-1" x-on:click="add()" :disabled="rows.length >= ${MAX_CONTACTS}">＋ Add contact</button>
+    </div>
+    <p class="mt-1 text-xs text-slate-500 dark:text-slate-400">People to reach at the organization. Each needs a name; "Public" shows that person on the website (when Contacts is public below).</p>
+    <div class="mt-3 space-y-2">
+      <template x-for="(c, i) in rows" :key="i">
+        <div class="grid grid-cols-2 md:grid-cols-12 gap-2 items-center rounded-lg border border-slate-200 dark:border-slate-700 p-2">
+          <input class="input md:col-span-3" type="text" maxlength="200" x-model="c.name" placeholder="Name *" aria-label="Contact name">
+          <input class="input md:col-span-2" type="text" maxlength="200" x-model="c.role" placeholder="Role" aria-label="Role">
+          <input class="input md:col-span-3" type="text" inputmode="email" maxlength="255" x-model="c.email" placeholder="Email" aria-label="Email">
+          <input class="input md:col-span-2" type="tel" maxlength="32" x-model="c.phone" placeholder="Phone" aria-label="Phone">
+          <input class="input md:col-span-1" type="text" inputmode="numeric" maxlength="10" x-model="c.phone_ext" placeholder="Ext." aria-label="Extension">
+          <div class="md:col-span-1 col-span-2 flex items-center justify-end gap-1">
+            <label class="inline-flex items-center gap-1 text-xs text-slate-600 dark:text-slate-300 mr-1"><input type="checkbox" class="h-4 w-4" x-model="c.is_public"> Public</label>
+            <button type="button" class="btn-ghost text-xs px-2 py-1" x-on:click="move(i, -1)" aria-label="Move up">▲</button>
+            <button type="button" class="btn-ghost text-xs px-2 py-1" x-on:click="move(i, 1)" aria-label="Move down">▼</button>
+            <button type="button" class="btn-ghost text-xs px-2 py-1 text-red-600" x-on:click="remove(i)" aria-label="Remove">✕</button>
+          </div>
+        </div>
+      </template>
+      <p x-show="!rows.length" class="text-sm text-slate-400 italic">No contacts.</p>
+    </div>
+  </div>`;
+}
+
+// The Edit profile form. pickers: { categories: [{category_id, slug, name}],
+// cities: [{city_id, name}] } (active ones only — what the portal offers).
+function profileForm(action, backHref, v, pickers, status) {
+  const val = (k) => escapeHtml(typeof v[k] === 'string' ? v[k] : '');
+  // name = the posted field; extra.key = the values key when it differs
+  const text = (id, name, label, max, extra) => `<div ${extra && extra.wrap ? extra.wrap : ''}>
+      <label class="label" for="${id}">${escapeHtml(label)}${extra && extra.req ? ' *' : ''}${extra && extra.hintInline ? ` <span class="text-xs font-normal text-slate-400">${extra.hintInline}</span>` : ''}</label>
+      <input id="${id}" class="input${extra && extra.cls ? ' ' + extra.cls : ''}" type="${(extra && extra.type) || 'text'}" name="${name}" maxlength="${max}" value="${val((extra && extra.key) || name)}"${extra && extra.req ? ' required' : ''}${extra && extra.ph ? ` placeholder="${escapeHtml(extra.ph)}"` : ''}${extra && extra.list ? ` list="${extra.list}"` : ''}${extra && extra.mode ? ` inputmode="${extra.mode}"` : ''} autocomplete="off">
+      ${extra && extra.hint ? `<p class="mt-1 text-xs text-slate-500 dark:text-slate-400">${extra.hint}</p>` : ''}
+    </div>`;
+  const catSet = new Set(v.categories.map(String)), citySet = new Set(v.city_ids.map(Number)), pf = new Set(v.public_fields);
+  const tiles = pickers.categories.length ? pickers.categories.map(c => `
+        <label class="flex items-center gap-2 rounded-lg border border-slate-200 dark:border-slate-700 px-3 py-2 text-sm cursor-pointer hover:bg-slate-50 dark:hover:bg-slate-800/60">
+          <input type="checkbox" class="h-4 w-4" name="categories" value="${escapeHtml(c.slug)}" ${catSet.has(String(c.slug)) ? 'checked' : ''}> ${escapeHtml(c.name)}</label>`).join('')
+    : '<p class="text-sm text-slate-400 italic">No active categories — add some under Categories &amp; Cities.</p>';
+  const cityBoxes = pickers.cities.length ? pickers.cities.map(c => `
+        <label class="inline-flex items-center gap-2 text-sm mr-4 mb-2"><input type="checkbox" class="h-4 w-4" name="city_ids" value="${Number(c.city_id)}" ${citySet.has(Number(c.city_id)) ? 'checked' : ''}> ${escapeHtml(c.name)}</label>`).join('')
+    : '<p class="text-sm text-slate-400 italic">No active cities — add some under Categories &amp; Cities.</p>';
+  const states = fmt.US_STATES.map(([code, name]) => `<option value="${code}">${escapeHtml(name)}</option>`).join('');
+  return `<form method="POST" action="${action}" class="space-y-6" x-data x-on:input="window.mmoaFormDirty = true">
+    <section class="card surface-target card-pad space-y-4">
+      <h2 class="text-sm font-semibold uppercase tracking-wider text-slate-500 dark:text-slate-400">Organization</h2>
+      <div class="grid sm:grid-cols-2 gap-4">
+        ${text('pf-name', 'org_name', 'Organization name', 200, { req: true, key: 'name' })}
+        ${text('pf-ein', 'ein', 'EIN', 20, { cls: 'font-mono', ph: '12-3456789', mode: 'numeric',
+          hint: `9 digits. ${status === 'unverified' ? 'The organization can still change it in its portal until it is reviewed.' : 'The organization can no longer change it (reviewed) — only the console can.'} Leave blank to keep the stored EIN.` })}
+      </div>
+    </section>
+    <section class="card surface-target card-pad space-y-4">
+      <h2 class="text-sm font-semibold uppercase tracking-wider text-slate-500 dark:text-slate-400">Address</h2>
+      <div class="grid sm:grid-cols-2 gap-4">
+        ${text('pf-addr1', 'address_line1', 'Address line 1', 200)}
+        ${text('pf-addr2', 'address_line2', 'Address line 2', 200)}
+        ${text('pf-city', 'city', 'City', 100)}
+        <div class="grid grid-cols-2 gap-4">
+          ${text('pf-state', 'state', 'State', 40, { list: 'pf-states', hint: 'USPS code, e.g. TX' })}
+          ${text('pf-zip', 'zip', 'ZIP', 10, { mode: 'numeric', ph: '75409', hint: '5 digits, or ZIP+4' })}
+        </div>
+        <datalist id="pf-states">${states}</datalist>
+      </div>
+    </section>
+    <section class="card surface-target card-pad space-y-4">
+      <h2 class="text-sm font-semibold uppercase tracking-wider text-slate-500 dark:text-slate-400">Contact</h2>
+      <div class="grid sm:grid-cols-2 gap-4">
+        <div class="grid grid-cols-3 gap-4">
+          ${text('pf-phone', 'phone', 'Phone', 32, { type: 'tel', wrap: 'class="col-span-2"', ph: '(972) 555-0100', hint: '10-digit US number' })}
+          ${text('pf-ext', 'phone_ext', 'Ext.', 10, { mode: 'numeric', hint: '1–6 digits' })}
+        </div>
+        ${text('pf-email', 'public_email', 'Public email', 255, { mode: 'email', ph: 'help@example.org' })}
+      </div>
+    </section>
+    <section class="card surface-target card-pad space-y-4">
+      <h2 class="text-sm font-semibold uppercase tracking-wider text-slate-500 dark:text-slate-400">Links</h2>
+      <div class="grid sm:grid-cols-2 gap-4">
+        ${text('pf-web', 'website_url', 'Website', 500, { mode: 'url', ph: 'https://example.org', hint: 'https:// is added when missing' })}
+        ${text('pf-fb', 'facebook_url', 'Facebook', 500, { mode: 'url', ph: 'facebook.com/yourpage', hint: 'A Facebook page link, or just the page name' })}
+        ${text('pf-ig', 'instagram_url', 'Instagram', 500, { mode: 'url', ph: '@yourname', hint: 'An Instagram link or @handle' })}
+        ${text('pf-other', 'other_social_url', 'Other link', 500, { mode: 'url', ph: 'https://…' })}
+      </div>
+    </section>
+    <section class="card surface-target card-pad space-y-4">
+      <h2 class="text-sm font-semibold uppercase tracking-wider text-slate-500 dark:text-slate-400">About</h2>
+      ${markdownField('description_md', 'Description (up to 5,000 characters)', typeof v.description_md === 'string' ? v.description_md : '', 8)}
+      <div class="grid sm:grid-cols-2 gap-4">
+        <div>
+          <label class="label" for="pf-hours">Hours <span class="text-xs font-normal text-slate-400">(up to 1,000 characters)</span></label>
+          <textarea id="pf-hours" name="hours" rows="4" maxlength="1000" class="${TEXTAREA_CLS}" placeholder="Mon–Fri 9am–4pm">${val('hours')}</textarea>
+        </div>
+        <div>
+          <label class="label" for="pf-bring">What to bring <span class="text-xs font-normal text-slate-400">(one item per line, up to 2,000 characters)</span></label>
+          <textarea id="pf-bring" name="what_to_bring" rows="4" maxlength="2000" class="${TEXTAREA_CLS}" placeholder="Photo ID&#10;Proof of address">${val('what_to_bring')}</textarea>
+        </div>
+      </div>
+      <div>
+        <label class="label" for="pf-tags">Search keywords <span class="text-xs font-normal text-slate-400">(private — only the "Need Help?" keyword search uses them; comma-separated, up to ${fmt.MAX_TAGS} of ${fmt.MAX_TAG_LEN} characters)</span></label>
+        <textarea id="pf-tags" name="search_tags" rows="2" maxlength="4000" class="${TEXTAREA_CLS}" placeholder="food bank, groceries, snap">${val('search_tags')}</textarea>
+      </div>
+    </section>
+    <section class="card surface-target card-pad space-y-4">
+      <h2 class="text-sm font-semibold uppercase tracking-wider text-slate-500 dark:text-slate-400">Services</h2>
+      <p class="text-xs text-slate-500 dark:text-slate-400">The categories visitors browse by. Only active categories are offered (Categories &amp; Cities).</p>
+      <div class="grid sm:grid-cols-2 md:grid-cols-3 gap-2">${tiles}</div>
+    </section>
+    <section class="card surface-target card-pad space-y-3">
+      <h2 class="text-sm font-semibold uppercase tracking-wider text-slate-500 dark:text-slate-400">Cities served</h2>
+      <div>${cityBoxes}</div>
+    </section>
+    <section class="card surface-target card-pad">
+      ${contactsEditor(v.contacts_json)}
+    </section>
+    <section class="card surface-target card-pad space-y-4">
+      <h2 class="text-sm font-semibold uppercase tracking-wider text-slate-500 dark:text-slate-400">Visibility</h2>
+      <label class="flex items-center gap-3 text-sm font-medium text-slate-700 dark:text-slate-200">
+        <span class="toggle"><input type="checkbox" name="is_listed" value="1" ${v.is_listed ? 'checked' : ''}><span class="slider"></span></span>
+        Listed in "Need Help?" <span class="text-xs font-normal text-slate-400">(the organization's own switch — off hides the whole profile)</span>
+      </label>
+      <p class="text-xs text-slate-500 dark:text-slate-400">Ticked = shown on the public profile. The name is always public; the EIN and search keywords never are.</p>
+      <div class="grid grid-cols-2 md:grid-cols-4 gap-2">
+        ${DEFAULT_PUBLIC.map(k => `<label class="inline-flex items-center gap-2 text-sm"><input type="checkbox" class="h-4 w-4" name="pf" value="${k}" ${pf.has(k) ? 'checked' : ''}> ${escapeHtml(PUBLIC_FIELD_LABELS[k] || k)}</label>`).join('')}
+      </div>
+    </section>
+    <div class="flex items-center justify-end gap-2">
+      <a class="btn-secondary" href="${backHref}">Cancel</a>
+      <button type="submit" class="btn-primary">Save profile</button>
+    </div>
+  </form>`;
+}
+
+// ── Create ──────────────────────────────────────────────────────────────
+function readNew(b) {
+  const f = {
+    login_name: String(b.login_name || '').trim(),
+    email: String(b.email || '').trim().toLowerCase(),
+    first_name: String(b.first_name || '').trim(),
+    last_name: String(b.last_name || '').trim(),
+    phone_number: String(b.phone_number || '').trim() || null,
+    org_name: String(b.org_name || '').trim(),
+    ein: String(b.ein || '').trim(),
+    password: String(b.password || ''),
+    email_verified: kit.yes(b.email_verified),
+    org_verified: kit.yes(b.org_verified)
+  };
+  if (!f.org_name || !f.login_name || !f.first_name || !f.last_name || !f.email || !f.password) return { fields: f, error: 'All required fields must be filled' };
+  if (f.org_name.length < 2 || f.org_name.length > 200 || /[<>]/.test(f.org_name)) return { fields: f, error: "Please enter the organization's name (2–200 characters)" };
+  if (f.ein) {
+    const ein = fmt.normalizeEin(f.ein);
+    if (!ein) return { fields: f, error: 'EIN must be 9 digits (for example 12-3456789)' };
+    f.ein = ein;
+  }
+  if (!LOGIN_NAME_RE.test(f.login_name)) return { fields: f, error: 'Login name must be 3–30 characters using letters, numbers, and . _ - only' };
+  if (!NAME_RE.test(f.first_name) || !NAME_RE.test(f.last_name)) return { fields: f, error: "Names may only contain letters, spaces, and . , ' -" };
+  if (f.phone_number && !PHONE_RE.test(f.phone_number)) return { fields: f, error: 'Please enter a valid phone number' };
+  if (!EMAIL_STRICT_RE.test(f.email)) return { fields: f, error: 'Please enter a valid email address' };
+  if (f.password.length > 128) return { fields: f, error: 'Password must be 128 characters or less' };
+  return { fields: f };
+}
+
+function newForm(v, minLen) {
+  const val = (k) => escapeHtml(v[k] || '');
+  return `<form method="POST" action="/nonprofits" class="space-y-6" autocomplete="off">
+    <section class="card surface-target card-pad space-y-4">
+      <h2 class="text-sm font-semibold uppercase tracking-wider text-slate-500 dark:text-slate-400">Organization</h2>
+      <div class="grid sm:grid-cols-2 gap-4">
+        <div><label class="label" for="nn-org">Organization name *</label><input id="nn-org" class="input" type="text" name="org_name" required maxlength="200" value="${val('org_name')}"></div>
+        <div><label class="label" for="nn-ein">EIN <span class="text-xs font-normal text-slate-400">(optional here; sign-up requires it)</span></label><input id="nn-ein" class="input font-mono" type="text" inputmode="numeric" name="ein" maxlength="20" placeholder="12-3456789" value="${val('ein')}"></div>
+      </div>
+    </section>
+    <section class="card surface-target card-pad space-y-4">
+      <h2 class="text-sm font-semibold uppercase tracking-wider text-slate-500 dark:text-slate-400">Login account</h2>
+      <p class="text-xs text-slate-500 dark:text-slate-400">The same rules as the website's sign-up. First / last name are the organization's primary contact person.</p>
+      <div class="grid sm:grid-cols-2 gap-4">
+        <div><label class="label" for="nn-login">Login name *</label><input id="nn-login" class="input" type="text" name="login_name" required minlength="3" maxlength="30" pattern="[A-Za-z0-9._\\-]{3,30}" value="${val('login_name')}">
+          <p class="mt-1 text-xs text-slate-500 dark:text-slate-400">3–30 characters: letters, numbers, . _ -</p></div>
+        <div><label class="label" for="nn-email">Email *</label><input id="nn-email" class="input" type="email" name="email" required maxlength="255" value="${val('email')}"></div>
+        <div><label class="label" for="nn-first">First name *</label><input id="nn-first" class="input" type="text" name="first_name" required maxlength="100" value="${val('first_name')}"></div>
+        <div><label class="label" for="nn-last">Last name *</label><input id="nn-last" class="input" type="text" name="last_name" required maxlength="100" value="${val('last_name')}"></div>
+        <div><label class="label" for="nn-phone">Phone number</label><input id="nn-phone" class="input" type="tel" name="phone_number" maxlength="32" value="${val('phone_number')}"></div>
+        <div x-data="{ pw: '', show: true,
+              gen() { const u = 'ABCDEFGHJKLMNPQRSTUVWXYZ', l = 'abcdefghijkmnpqrstuvwxyz', d = '23456789', s = '!@#$%&*?', all = u + l + d + s;
+                const pick = (set) => set[crypto.getRandomValues(new Uint32Array(1))[0] % set.length];
+                const a = [pick(u), pick(l), pick(d), pick(s)]; while (a.length < 14) a.push(pick(all));
+                for (let i = a.length - 1; i > 0; i--) { const j = crypto.getRandomValues(new Uint32Array(1))[0] % (i + 1); [a[i], a[j]] = [a[j], a[i]]; }
+                this.pw = a.join(''); this.show = true; } }">
+          <label class="label" for="nn-pw">Temporary password *</label>
+          <div class="flex items-stretch gap-2">
+            <input id="nn-pw" class="input flex-1 font-mono" :type="show ? 'text' : 'password'" name="password" required minlength="${minLen}" maxlength="128" autocomplete="new-password" x-model="pw">
+            <button type="button" class="btn-secondary text-xs px-3" x-on:click="gen()">Generate</button>
+            <button type="button" class="btn-secondary text-xs px-3" x-on:click="show = !show" x-text="show ? 'Hide' : 'Show'"></button>
+          </div>
+          <p class="mt-1 text-xs text-slate-500 dark:text-slate-400">At least ${minLen} characters (the console's password rules). It is shown once more on the next page — pass it to the organization; they can change it after signing in.</p>
+        </div>
+      </div>
+    </section>
+    <section class="card surface-target card-pad space-y-3">
+      <h2 class="text-sm font-semibold uppercase tracking-wider text-slate-500 dark:text-slate-400">Verification</h2>
+      <label class="flex items-start gap-2 text-sm"><input type="checkbox" class="h-4 w-4 mt-0.5" name="email_verified" value="1" ${v.email_verified ? 'checked' : ''}>
+        <span>Mark the email address as verified <span class="block text-xs text-slate-500 dark:text-slate-400">Otherwise the login is refused until the organization verifies it (use "Resend email" on the site, or Mark email verified here later).</span></span></label>
+      <label class="flex items-start gap-2 text-sm"><input type="checkbox" class="h-4 w-4 mt-0.5" name="org_verified" value="1" ${v.org_verified ? 'checked' : ''}>
+        <span>Mark the organization as verified (skips the Verify step) <span class="block text-xs text-slate-500 dark:text-slate-400">It appears in the public "Need Help?" directory right away, listed, with every field public. Otherwise it starts Pending verification.</span></span></label>
+    </section>
+    <div class="flex items-center justify-end gap-2">
+      <a class="btn-secondary" href="/nonprofits">Cancel</a>
+      <button type="submit" class="btn-primary">Create nonprofit</button>
+    </div>
+  </form>`;
+}
+
 module.exports = function (db, appConfig) {
   const router = express.Router();
   const audit = require('../helpers/audit')(db);
@@ -192,7 +591,7 @@ module.exports = function (db, appConfig) {
     const user = req.session.user;
     const { rows, err } = await kit.safeAll(db, `
       SELECT u.user_id, u.login_name, u.email, u.first_name, u.last_name, u.is_active, u.email_verified_at,
-             u.created_at, u.last_login_at, o.org_id, o.name AS org_name, o.ein, o.city, o.verification_status, o.is_listed
+             u.created_at, u.last_login_at, o.org_id, o.name AS org_name, o.ein, o.city, o.verification_status, o.is_listed, o.admin_hidden
         FROM users u LEFT JOIN organizations o ON o.user_id = u.user_id
        ORDER BY u.created_at DESC, u.user_id DESC`, []);
     const list = rows.map(r => {
@@ -200,7 +599,7 @@ module.exports = function (db, appConfig) {
       const status = r.org_id ? (r.verification_status || 'unverified') : 'no-org';
       return {
         id: r.user_id, name: r.org_name || '', ein: r.ein || '', contact, email: r.email || '',
-        status, listed: r.org_id ? !!Number(r.is_listed) : false, active: !!Number(r.is_active),
+        status, listed: r.org_id ? !!Number(r.is_listed) : false, adminHidden: r.org_id ? !!Number(r.admin_hidden) : false, active: !!Number(r.is_active),
         emailVerified: !!r.email_verified_at, city: r.city || '',
         created: r.created_at ? String(r.created_at) : '',
         search: [r.org_name, r.ein, contact, r.email, r.login_name, r.city].filter(Boolean).join(' ').toLowerCase()
@@ -218,6 +617,7 @@ module.exports = function (db, appConfig) {
                if (this.status) a = a.filter(r => r.status === this.status);
                if (this.listing === 'listed') a = a.filter(r => r.listed);
                if (this.listing === 'hidden') a = a.filter(r => !r.listed);
+               if (this.listing === 'admin-hidden') a = a.filter(r => r.adminHidden);
                if (this.account === 'inactive') a = a.filter(r => !r.active);
                if (this.account === 'email-unverified') a = a.filter(r => !r.emailVerified);
                const d = this.sortDir === 'asc' ? 1 : -1, k = this.sortKey;
@@ -226,7 +626,8 @@ module.exports = function (db, appConfig) {
              },
              sortBy(k) { if (this.sortKey === k) this.sortDir = this.sortDir === 'asc' ? 'desc' : 'asc'; else { this.sortKey = k; this.sortDir = 'asc'; } },
              icon(k) { return this.sortKey !== k ? '' : (this.sortDir === 'asc' ? '▲' : '▼'); } }">
-        ${kit.pageHeader('Nonprofits', 'Organizations with a login on the website. Verify them here before they appear in the public "Need Help?" directory.')}
+        ${kit.pageHeader('Nonprofits', 'Organizations with a login on the website. Verify them here before they appear in the public "Need Help?" directory.',
+          '<a class="btn-primary" href="/nonprofits/new">New nonprofit</a>')}
         ${flash('error', req.query.error)}
         ${flash('success', req.query.msg)}
         ${kit.dbBanner(err)}
@@ -243,6 +644,7 @@ module.exports = function (db, appConfig) {
             <option value="">Listed or hidden</option>
             <option value="listed">Listed by the org</option>
             <option value="hidden">Hidden by the org</option>
+            <option value="admin-hidden">Hidden by MMoA</option>
           </select>
           <select class="input max-w-[13rem]" x-model="account" aria-label="Account">
             <option value="">Any account state</option>
@@ -275,6 +677,7 @@ module.exports = function (db, appConfig) {
                     <span x-show="r.status === 'rejected'" class="pill-failed">Rejected</span>
                     <span x-show="r.status === 'no-org'" class="pill-terminated">No profile</span>
                     <span x-show="r.status !== 'no-org' && !r.listed" class="pill-terminated">Hidden</span>
+                    <span x-show="r.adminHidden" class="pill-failed">Hidden by MMoA</span>
                     <span x-show="!r.active" class="pill-failed">Inactive</span>
                     <span x-show="!r.emailVerified" class="pill-pending">Email unverified</span>
                   </td>
@@ -287,6 +690,62 @@ module.exports = function (db, appConfig) {
         </div>
       </div>`;
     res.send(page({ title: 'Nonprofits', body, appConfig, user, activeNav: 'nonprofits' }));
+  });
+
+  // ── Create (before /nonprofits/:id — "new" is not an id) ────────────
+  function renderNew(req, res, v, error) {
+    const minLen = getPasswordRules(appConfig).minLength;
+    const body = `
+      <div class="mb-4"><a class="text-sm text-brand-600 hover:underline" href="/nonprofits">← Back to nonprofits</a></div>
+      ${kit.pageHeader('New nonprofit', 'Create a login and its organization profile from the console — for an organization that is not signing itself up on the website.')}
+      ${flash('error', error)}
+      ${newForm(v || {}, minLen)}`;
+    res.status(error ? 400 : 200).send(page({ title: 'New nonprofit', body, appConfig, user: req.session.user, activeNav: 'nonprofits' }));
+  }
+  router.get('/nonprofits/new', requireAdmin, (req, res) => renderNew(req, res, null, null));
+
+  // Same rules and the same rows as the website's sign-up (routes/api.js),
+  // minus the verification email: the admin passes the temporary password
+  // on and ticks what to pre-verify. Uniqueness is checked BEFORE the
+  // transaction (remote SQLite: no reads inside one); the organization's
+  // user_id comes from a sub-select because a remote transaction can't
+  // return the new user's id.
+  router.post('/nonprofits', requireAdmin, async (req, res) => {
+    const { fields: f, error } = readNew(req.body || {});
+    if (error) return renderNew(req, res, f, error);
+    const pwErr = validatePassword(f.password, getPasswordRules(appConfig));
+    if (pwErr) return renderNew(req, res, f, pwErr);
+    const by = req.session.user.username;
+    try {
+      const existing = await db.getAsync('SELECT user_id, email, login_name FROM users WHERE LOWER(email) = LOWER(?) OR LOWER(login_name) = LOWER(?)', [f.email, f.login_name]);
+      if (existing) {
+        return renderNew(req, res, f, String(existing.email || '').toLowerCase() === f.email
+          ? 'An account with that email already exists' : 'That login name is already taken');
+      }
+      const hash = await hashPassword(f.password);
+      const now = kit.sqlTime();
+      await db.transaction(async (tx) => {
+        await tx.runAsync(
+          `INSERT INTO users (login_name, email, first_name, last_name, phone_number, password_hash, is_active, email_verified_at, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?)`,
+          [f.login_name, f.email, f.first_name, f.last_name, f.phone_number, hash, f.email_verified ? now : null, now]);
+        await tx.runAsync(
+          `INSERT INTO organizations (user_id, name, ein, state, is_listed, verification_status, verified_at, verified_by, created_at, updated_at)
+           VALUES ((SELECT user_id FROM users WHERE email = ?), ?, ?, 'TX', 1, ?, ?, ?, ?, ?)`,
+          [f.email, f.org_name, f.ein || null, f.org_verified ? 'verified' : 'unverified', f.org_verified ? now : null, f.org_verified ? by : null, now, now]);
+      });
+      const u = await db.getAsync('SELECT user_id FROM users WHERE email = ?', [f.email]);
+      const newId = u && u.user_id;
+      console.log(`[nonprofits] ${by} created user #${newId} (${f.org_name}); email verified: ${f.email_verified ? 'yes' : 'no'}, organization verified: ${f.org_verified ? 'yes' : 'no'}`);
+      await audit(req, 'nonprofit.create', { kind: 'nonprofit', id: newId, label: f.org_name,
+        summary: `email verified: ${f.email_verified ? 'yes' : 'no'}, organization verified: ${f.org_verified ? 'yes' : 'no'}` });
+      if (!newId) return res.redirect('/nonprofits?msg=' + encodeURIComponent(`"${f.org_name}" created.`));
+      req.session.npTempPassword = { id: newId, password: f.password };
+      res.redirect(`/nonprofits/${newId}`);
+    } catch (err) {
+      console.error('[nonprofits] create failed:', err);
+      renderNew(req, res, f, uniqueMessage(err) || ('Create failed: ' + (err.message || err)));
+    }
   });
 
   // ── Detail ──────────────────────────────────────────────────────────
@@ -325,7 +784,19 @@ module.exports = function (db, appConfig) {
     const contactName = [m.first_name, m.last_name].filter(Boolean).join(' ');
     const title = (o && o.name) || contactName || m.login_name || ('#' + id);
     const status = o ? (o.verification_status || 'unverified') : null;
+    const adminHidden = !!(o && Number(o.admin_hidden));
     const pub = new Set(o ? parsePublicFields(o.public_fields) : []);
+    // The Preview pop-up frames the Web App's page (events do the same).
+    const base = o ? await kit.webAppPublicUrl(appConfig) : '';
+    if (base) preview.allowFramingOf(res, base);
+    // Create's one-time flash: the temporary password, shown on this render
+    // only (cookie-session — deleting it here rewrites the cookie).
+    let tempPassword = null;
+    if (req.session.npTempPassword) {
+      const t = req.session.npTempPassword;
+      if (String(t.id) === String(id)) tempPassword = t.password;
+      delete req.session.npTempPassword;
+    }
     const isPub = (k) => pub.has(k);
     const minLen = getPasswordRules(appConfig).minLength;
 
@@ -357,7 +828,10 @@ module.exports = function (db, appConfig) {
       profile = `<section class="card surface-target card-pad space-y-5">
         <div class="flex items-center justify-between gap-2 flex-wrap">
           <h2 class="text-sm font-semibold uppercase tracking-wider text-slate-500 dark:text-slate-400">Organization profile</h2>
-          <span class="text-xs text-slate-500">${Number(o.is_listed) ? '<span class="pill-running">Listed</span> the org wants to appear in the directory' : '<span class="pill-terminated">Hidden</span> the org has hidden its whole profile'}</span>
+          <div class="flex items-center gap-3 flex-wrap">
+            <span class="text-xs text-slate-500">${Number(o.is_listed) ? '<span class="pill-running">Listed</span> the org wants to appear in the directory' : '<span class="pill-terminated">Hidden</span> the org has hidden its whole profile'}${adminHidden ? ' · <span class="pill-failed">Hidden by MMoA</span>' : ''}</span>
+            <a class="btn-secondary text-xs px-3 py-1" href="/nonprofits/${id}/profile">Edit profile</a>
+          </div>
         </div>
         <div class="grid sm:grid-cols-2 gap-4">
           ${field('Name', textOr(o.name), true)}
@@ -380,7 +854,7 @@ module.exports = function (db, appConfig) {
         <div>${field('Search keywords — only used by the "Need Help?" keyword search', chips(String(o.search_tags || '').split(',').map(t => t.trim()).filter(Boolean).map(name => ({ name, is_active: 1 }))), false)}</div>
         <div>${field('Contacts', contactsHtml, isPub('contacts'))}</div>
         <div>${field(`Photos (${images.rows.length} of 5)`, imagesHtml, isPub('images'))}</div>
-        <p class="text-xs text-slate-500 dark:text-slate-400">The organization edits this profile itself from the website's portal. Raw rows: <a class="text-brand-600 hover:underline" href="/data/organizations/row?key=${encodeURIComponent(JSON.stringify({ org_id: Number(o.org_id) }))}">Data Browser → organizations</a>.</p>
+        <p class="text-xs text-slate-500 dark:text-slate-400">The organization edits this profile itself from the website's portal; <a class="text-brand-600 hover:underline" href="/nonprofits/${id}/profile">Edit profile</a> changes it from here with the same rules. Raw rows: <a class="text-brand-600 hover:underline" href="/data/organizations/row?key=${encodeURIComponent(JSON.stringify({ org_id: Number(o.org_id) }))}">Data Browser → organizations</a>.</p>
       </section>`;
     }
 
@@ -461,6 +935,13 @@ module.exports = function (db, appConfig) {
           </form>
           <button type="button" class="btn-secondary text-sm" x-on:click="openReset = true">Reset password</button>
           <button type="button" class="btn-secondary text-sm" x-on:click="openModify = true">Edit account</button>
+          ${o ? `<form method="POST" action="/nonprofits/${id}/hidden" class="m-0"
+                x-on:submit.prevent="window.uiConfirmSubmit($event.target, ${jsAttrStr(adminHidden
+                  ? 'Show ' + title + ' in the Need Help directory again? It appears there only if it is verified and the organization has not hidden its own profile.'
+                  : 'Hide ' + title + ' from the Need Help directory? It is not shown there whatever the organization\'s own listing switch says, until MMoA shows it again. The organization sees in its portal that MMoA hid it.')}, { title: 'Directory', confirmLabel: ${adminHidden ? "'Show'" : "'Hide'"}, danger: ${adminHidden ? 'false' : 'true'} })">
+            <input type="hidden" name="state" value="${adminHidden ? '0' : '1'}">
+            <button type="submit" class="${adminHidden ? 'btn-secondary' : 'btn-danger'} text-sm">${adminHidden ? 'Show in directory' : 'Hide from directory'}</button>
+          </form>` : ''}
         </div>
       </section>`;
 
@@ -469,14 +950,19 @@ module.exports = function (db, appConfig) {
         <div class="mb-4"><a class="text-sm text-brand-600 hover:underline" href="/nonprofits">← Back to nonprofits</a></div>
         ${kit.pageHeader(title, `${contactName ? contactName + ' · ' : ''}${m.email || ''}`,
           `${status ? `<span class="${STATUS_PILL[status] || 'pill'}">${escapeHtml(STATUS_LABEL[status] || status)}</span>` : '<span class="pill-terminated">No profile</span>'}
+           ${o && !Number(o.is_listed) ? '<span class="pill-terminated">Hidden</span>' : ''}
+           ${adminHidden ? '<span class="pill-failed">Hidden by MMoA</span>' : ''}
+           ${o ? preview.previewButton({ endpoint: `/nonprofits/${id}/preview`, noun: 'profile', base }) : ''}
            <form method="POST" action="/nonprofits/${id}/delete" class="m-0"
                  x-on:submit.prevent="window.uiConfirmSubmit($event.target, ${jsAttrStr('Delete ' + title + '? The login account, the organization profile, its contacts, categories, cities and photo files are all removed. Events / raffles that named it as a beneficiary keep the name without the link. This cannot be undone.')}, { title: 'Delete nonprofit', confirmLabel: 'Delete' })">
              <button type="submit" class="btn-danger text-sm">Delete</button>
            </form>`)}
+        ${tempPassword ? `<div class="flash-ok mb-4 text-sm"><strong class="font-semibold">Nonprofit created.</strong> Temporary password — shown this once, pass it to the organization: <code class="font-mono select-all rounded bg-white/70 dark:bg-black/30 px-1.5 py-0.5">${escapeHtml(tempPassword)}</code>. They sign in with their login name or email and can change it in their portal.</div>` : ''}
         ${flash('error', req.query.error)}
         ${flash('success', req.query.msg)}
         ${kit.dbBanner(firstErr)}
         ${o && Number(m.is_active) && status === 'verified' && !Number(o.is_listed) ? '<div class="flash-info mb-4 text-sm">Verified, but the organization has hidden its profile — it is not in the public directory.</div>' : ''}
+        ${o && status === 'verified' && adminHidden ? '<div class="flash-warn mb-4 text-sm">Verified, but MMoA has hidden this profile — it is not in the public directory whatever the organization\'s own listing switch says. "Show in directory" (under Login account) lifts that.</div>' : ''}
         <div class="grid xl:grid-cols-3 gap-6">
           <div class="xl:col-span-2 space-y-6">${profile}</div>
           <div class="space-y-6">${verification}${lookup}${account}</div>
@@ -683,6 +1169,146 @@ module.exports = function (db, appConfig) {
       console.error('[nonprofits] delete failed:', err);
       res.redirect(`/nonprofits/${id}?error=` + encodeURIComponent('Delete failed: ' + (err.message || err)));
     }
+  });
+
+  // ── Hide / show in the directory (MMoA's override) ─────────────────
+  router.post('/nonprofits/:id/hidden', requireAdmin, async (req, res) => {
+    const id = kit.idParam(req.params.id);
+    if (!id) return res.redirect('/nonprofits?error=Invalid+id');
+    const hide = (req.body && req.body.state) === '1';
+    try {
+      const r = await db.runAsync('UPDATE organizations SET admin_hidden = ?, updated_at = ? WHERE user_id = ?', [hide ? 1 : 0, kit.sqlTime(), id]);
+      if (!r.changes) return res.redirect(`/nonprofits/${id}?error=` + encodeURIComponent('This account has no organization profile to hide.'));
+      console.log(`[nonprofits] ${req.session.user.username} ${hide ? 'hid' : 'showed'} user #${id} organization ${hide ? 'from' : 'in'} the directory`);
+      await audit(req, hide ? 'nonprofit.hide' : 'nonprofit.unhide', { kind: 'nonprofit', id, label: await orgLabel(id),
+        summary: hide ? 'Hidden from the Need Help directory by MMoA' : 'Shown in the Need Help directory again (MMoA override lifted)' });
+      res.redirect(`/nonprofits/${id}?msg=` + encodeURIComponent(hide
+        ? 'Hidden from the Need Help directory. The website picks it up within 20 seconds.'
+        : 'MMoA override lifted — it is in the Need Help directory again if verified and listed by the organization (within 20 seconds).'));
+    } catch (err) {
+      res.redirect(`/nonprofits/${id}?error=` + encodeURIComponent('Update failed: ' + (err.message || err)));
+    }
+  });
+
+  // ── Edit profile ────────────────────────────────────────────────────
+  async function loadProfilePickers() {
+    const cats = await kit.safeAll(db, 'SELECT category_id, slug, name FROM categories WHERE is_active = 1 ORDER BY sort, name', []);
+    const cities = await kit.safeAll(db, 'SELECT city_id, name FROM cities WHERE is_active = 1 ORDER BY sort, name', []);
+    return { categories: cats.rows, cities: cities.rows, err: cats.err || cities.err };
+  }
+  async function loadOrgChildren(orgId) {
+    const contacts = await db.allAsync('SELECT * FROM org_contacts WHERE org_id = ? ORDER BY sort, contact_id', [orgId]);
+    const cats = await db.allAsync('SELECT c.category_id, c.slug FROM org_categories oc JOIN categories c ON c.category_id = oc.category_id WHERE oc.org_id = ? ORDER BY c.category_id', [orgId]);
+    const cities = await db.allAsync('SELECT city_id FROM org_cities WHERE org_id = ? ORDER BY city_id', [orgId]);
+    return { contacts, catSlugs: cats.map(c => c.slug), catIds: cats.map(c => Number(c.category_id)), cityIds: cities.map(c => Number(c.city_id)) };
+  }
+  async function renderProfile(req, res, id, values, error) {
+    const user = req.session.user;
+    const { value: o, err } = await kit.safeGet(db, 'SELECT o.*, u.login_name FROM organizations o JOIN users u ON u.user_id = o.user_id WHERE o.user_id = ?', [id], null);
+    if (err || !o) {
+      return res.status(err ? 200 : 404).send(page({ title: 'Edit profile', appConfig, user, activeNav: 'nonprofits',
+        body: `${kit.pageHeader(err ? 'Edit profile' : 'No organization profile')}${kit.dbBanner(err)}
+               ${err ? '' : `<p class="text-slate-500">This account has no organization profile to edit.</p>`}
+               <p class="mt-4"><a class="text-brand-600 hover:underline" href="/nonprofits/${id}">← Back</a></p>` }));
+    }
+    const pickers = await loadProfilePickers();
+    let v = values;
+    if (!v) {
+      try { const ch = await loadOrgChildren(o.org_id); v = profileValues(o, ch.contacts, ch.catSlugs, ch.cityIds); }
+      catch (e) { return res.send(page({ title: 'Edit profile', appConfig, user, activeNav: 'nonprofits', body: `${kit.pageHeader('Edit profile')}${kit.dbBanner(e)}` })); }
+    }
+    const status = o.verification_status || 'unverified';
+    const body = `
+      <div class="mb-4"><a class="text-sm text-brand-600 hover:underline" href="/nonprofits/${id}">← Back to ${escapeHtml(o.name || o.login_name)}</a></div>
+      ${kit.pageHeader('Edit profile — ' + (o.name || o.login_name), 'Every field the organization can edit in its portal, with the same rules. The website shows the change within 20 seconds.',
+        `<span class="${STATUS_PILL[status] || 'pill'}">${escapeHtml(STATUS_LABEL[status] || status)}</span>`)}
+      ${flash('error', error)}
+      ${kit.dbBanner(pickers.err)}
+      ${profileForm(`/nonprofits/${id}/profile`, `/nonprofits/${id}`, v, pickers, status)}`;
+    res.status(error ? 400 : 200).send(page({ title: 'Edit profile', body, appConfig, user, activeNav: 'nonprofits' }));
+  }
+  router.get('/nonprofits/:id/profile', requireAdmin, async (req, res) => {
+    const id = kit.idParam(req.params.id);
+    if (!id) return res.redirect('/nonprofits?error=Invalid+id');
+    await renderProfile(req, res, id, null, null);
+  });
+
+  // Validated exactly like the portal (readProfile), then organizations is
+  // updated and contacts / categories / cities replaced in one transaction.
+  // Lookups (category ids by slug, city ids, the before-state for the audit
+  // row) happen before it.
+  router.post('/nonprofits/:id/profile', requireAdmin, async (req, res) => {
+    const id = kit.idParam(req.params.id);
+    if (!id) return res.redirect('/nonprofits?error=Invalid+id');
+    const v = valuesFromBody(req.body || {});
+    let o;
+    try { o = await db.getAsync('SELECT * FROM organizations WHERE user_id = ?', [id]); }
+    catch (e) { return renderProfile(req, res, id, v, 'Database unavailable: ' + (e.message || e)); }
+    if (!o) return res.redirect(`/nonprofits/${id}?error=` + encodeURIComponent('This account has no organization profile to edit.'));
+    let r;
+    try { r = readProfile(v, o); }
+    catch (e) {
+      if (e instanceof BadInput) return renderProfile(req, res, id, v, e.message);
+      throw e;
+    }
+    try {
+      const before = await loadOrgChildren(o.org_id);
+      const catRows = await db.allAsync('SELECT category_id, slug FROM categories WHERE is_active = 1', []);
+      const wantedSlugs = new Set(r.categorySlugs);
+      const categoryIds = catRows.filter(c => wantedSlugs.has(String(c.slug))).map(c => Number(c.category_id));
+      const cityRows = await db.allAsync('SELECT city_id FROM cities WHERE is_active = 1', []);
+      const wantedCities = new Set(r.cityIds);
+      const cityIds = cityRows.filter(c => wantedCities.has(Number(c.city_id))).map(c => Number(c.city_id));
+      const set = { ...r.set, updated_at: kit.sqlTime() };
+      await db.transaction(async (tx) => {
+        const cols = Object.keys(set); // fixed allowlist from readProfile — never client keys
+        await tx.runAsync(`UPDATE organizations SET ${cols.map(c => `${c} = ?`).join(', ')} WHERE org_id = ?`, [...cols.map(c => set[c]), o.org_id]);
+        await tx.runAsync('DELETE FROM org_contacts WHERE org_id = ?', [o.org_id]);
+        let i = 0;
+        for (const c of r.contacts) {
+          await tx.runAsync('INSERT INTO org_contacts (org_id, name, role, email, phone, phone_ext, is_public, sort) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+            [o.org_id, c.name, c.role, c.email, c.phone, c.phone_ext, c.is_public, i++]);
+        }
+        await tx.runAsync('DELETE FROM org_categories WHERE org_id = ?', [o.org_id]);
+        for (const cid of categoryIds) await tx.runAsync('INSERT INTO org_categories (org_id, category_id) VALUES (?, ?)', [o.org_id, cid]);
+        await tx.runAsync('DELETE FROM org_cities WHERE org_id = ?', [o.org_id]);
+        for (const cid of cityIds) await tx.runAsync('INSERT INTO org_cities (org_id, city_id) VALUES (?, ?)', [o.org_id, cid]);
+      });
+      // Which fields changed — names only, never values.
+      const norm = (x) => (x == null ? '' : String(x));
+      const changed = [];
+      for (const k of Object.keys(r.set)) {
+        if (k === 'public_fields') { if (JSON.stringify(parsePublicFields(o.public_fields)) !== r.set.public_fields) changed.push(k); }
+        else if (k === 'is_listed') { if (Number(o.is_listed) !== r.set.is_listed) changed.push(k); }
+        else if (norm(o[k]) !== norm(r.set[k])) changed.push(k);
+      }
+      const sortedNums = (a) => a.map(Number).sort((x, y) => x - y).join(',');
+      if (contactsJson(before.contacts) !== contactsJson(r.contacts)) changed.push('contacts');
+      if (sortedNums(before.catIds) !== sortedNums(categoryIds)) changed.push('categories');
+      if (sortedNums(before.cityIds) !== sortedNums(cityIds)) changed.push('cities');
+      console.log(`[nonprofits] ${req.session.user.username} edited the profile of user #${id}: ${changed.join(', ') || 'no field changed'}`);
+      await audit(req, 'nonprofit.profile_edit', { kind: 'nonprofit', id, label: r.set.name,
+        summary: changed.length ? `Profile fields changed: ${changed.join(', ')}` : 'Profile saved (no field changed)' });
+      res.redirect(`/nonprofits/${id}?msg=` + encodeURIComponent('Profile saved. The website picks the change up within 20 seconds.'));
+    } catch (err) {
+      console.error('[nonprofits] profile save failed:', err);
+      renderProfile(req, res, id, v, 'Save failed: ' + (err.message || err));
+    }
+  });
+
+  // ── Preview link (the Preview pop-up; by org id, no slug) ──────────
+  router.post('/nonprofits/:id/preview', requireAdmin, async (req, res) => {
+    const id = kit.idParam(req.params.id);
+    if (!id) return res.status(400).json({ error: 'Invalid id' });
+    let o;
+    try { o = await db.getAsync('SELECT org_id, name FROM organizations WHERE user_id = ?', [id]); }
+    catch (e) { return res.status(500).json({ error: 'Database unavailable: ' + (e.message || e) }); }
+    if (!o) return res.status(404).json({ error: 'This account has no organization profile to preview.' });
+    const r = await preview.makePreviewLink(db, appConfig, { table: 'organizations', idCol: 'org_id', id: o.org_id, path: '/need-help/preview', byId: true });
+    if (r.status === 200) {
+      await audit(req, 'nonprofit.preview', { kind: 'nonprofit', id, label: o.name, summary: `Preview link made (valid ${preview.PREVIEW_MINUTES} min)` });
+    }
+    res.status(r.status).json(r.body);
   });
 
   return router;

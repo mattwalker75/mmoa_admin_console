@@ -2,7 +2,8 @@
 // and Raffles: it shows the REAL website page for an item (even a draft)
 // through a short-lived preview link the Web App honours
 // (/<kind>/<slug>?preview=<token>; token stored on the row as preview_token /
-// preview_expires_at, newest only).
+// preview_expires_at, newest only). Nonprofits use it too, by id instead of
+// slug (/need-help/preview/<org_id>?preview=<token>).
 //
 //   previewButton({ endpoint, noun, base })  → the button + <dialog> HTML
 //   allowFramingOf(res, base)                → let THIS page frame the Web App
@@ -94,14 +95,16 @@ function previewButton({ endpoint, noun, base }) {
 
 // Make a fresh preview link for one row (replacing any earlier one), after
 // checking the Web App is up (the pop-up frames its page). opts: { table,
-// idCol, id, path } — path is the public page prefix, e.g. '/raffles'.
-async function makePreviewLink(db, appConfig, { table, idCol, id, path }) {
+// idCol, id, path, byId } — path is the public page prefix, e.g. '/raffles';
+// the URL ends in the row's slug, or in its id when byId is set (a table
+// with no slug column, e.g. organizations → /need-help/preview/<org_id>).
+async function makePreviewLink(db, appConfig, { table, idCol, id, path, byId }) {
   const base = await kit.webAppPublicUrl(appConfig);
   if (!base) return { status: 400, body: { error: "The Web App's public URL isn't set (Web App Settings → General → Public base URL)." } };
   const up = await kit.webAppReachable(base);
   if (!up.ok) return { status: 503, body: { error: up.message, reason: up.reason } };
   try {
-    const row = await db.getAsync(`SELECT slug FROM ${table} WHERE ${idCol} = ?`, [id]);
+    const row = await db.getAsync(`SELECT ${byId ? idCol + ' AS slug' : 'slug'} FROM ${table} WHERE ${idCol} = ?`, [id]);
     if (!row) return { status: 404, body: { error: 'Not found' } };
     const token = crypto.randomBytes(24).toString('hex');
     await db.runAsync(`UPDATE ${table} SET preview_token = ?, preview_expires_at = ? WHERE ${idCol} = ?`,

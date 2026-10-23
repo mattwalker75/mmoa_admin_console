@@ -45,6 +45,8 @@ Summaries are written to be safe to read over anyone's shoulder:
 - **Never the winning ticket number** — a raffle drawn says *winner
   recorded*.
 - **Never a verification note's text** — only its length.
+- **Never a temporary password** — creating a nonprofit records only
+  whether the email / organization were marked verified.
 - **Never Data Browser cell values** — only the table, the row key and the
   column names.
 
@@ -69,6 +71,10 @@ Summaries are written to be safe to read over anyone's shoulder:
 | `nonprofit.email_verified` | Email marked verified / unverified | organization name |
 | `nonprofit.password_reset` | An admin set the account's password | organization name |
 | `nonprofit.edit` | Account fields saved | organization name; which fields changed |
+| `nonprofit.create` | A login + organization created from the console (New nonprofit) | organization name; *email verified: yes/no, organization verified: yes/no* — never the temporary password |
+| `nonprofit.profile_edit` | Edit profile saved | organization name; the names of the profile fields that changed (`contacts`, `categories`, `cities` count as fields) — never the values |
+| `nonprofit.hide` / `nonprofit.unhide` | Hidden from / shown in the Need Help directory by MMoA (the override) | organization name |
+| `nonprofit.preview` | A preview link was made | organization name |
 | `nonprofit.photo_remove` | A profile photo removed | organization name |
 | `nonprofit.delete` | The account (and its organization profile) deleted | organization name |
 | `category.add` / `.rename` / `.move` / `.active` / `.delete` | Categories & Cities — categories | the name |

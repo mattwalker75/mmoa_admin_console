@@ -150,7 +150,17 @@ New sign-ups start **Pending verification** and are not in the public
 directory until a board member verifies them.
 
 - **Search / filter** by verification status, whether the organization
-  listed or hid its profile, and account state.
+  listed or hid its profile (or MMoA hid it), and account state.
+- **New nonprofit** creates a login and its organization profile from the
+  console, for an organization that is not signing itself up on the
+  website: the same rules as sign-up (login name, email, contact person,
+  organization name, optional EIN) plus a temporary password (**Generate**
+  makes a random one). Two boxes, both off by default: *Mark the email
+  address as verified* (otherwise the login is refused until the
+  organization verifies it) and *Mark the organization as verified* (it
+  goes straight into the directory, listed, with every field public). The
+  temporary password is shown **once**, on the page you land on — pass it
+  to the organization; it is not kept anywhere, including the audit log.
 - The detail page shows the **whole profile**, including fields the
   organization marked hidden (each field is tagged public / hidden), its
   contacts, categories, cities and photos (**Remove** takes down an
@@ -165,6 +175,25 @@ directory until a board member verifies them.
   "not found" (new organizations can take months to appear; use the IRS
   Tax Exempt Organization Search link).
 - **Verify / Mark rejected / Reset to unverified**, with a private note.
+- **Preview** (next to the status) opens the organization's real page on
+  the website in a pop-up — desktop or phone width — through a link that
+  works for 30 minutes and isn't public, whatever the verification status
+  or listing (like event / raffle previews). Only shown when the account
+  has an organization profile and the Web App's public URL is set.
+- **Edit profile** changes every field the organization can edit in its
+  portal — name, EIN, address, phone, public email, links, description,
+  hours, what to bring, search keywords, services, cities served, contacts,
+  which fields are public, and the organization's own "Listed in Need
+  Help?" switch — with exactly the portal's rules (same normalizing of
+  phone numbers, Facebook / Instagram links and EINs, same limits, same
+  error messages). The EIN can be changed here at any status (the
+  organization itself can't once reviewed); leaving it blank keeps the
+  stored one. The website shows the change within 20 seconds.
+- **Hide from directory / Show in directory** (under *Login account*) is
+  MMoA's override: a hidden organization is not in the public "Need Help?"
+  directory whatever its own listing switch says, and its portal tells it
+  MMoA hid it. The page and the list show **Hidden by MMoA**, distinct from
+  the organization's own **Hidden** (its listing switch off).
 - Account actions: activate / deactivate the login, mark the email
   verified, reset password, edit account, and **Delete** (removes the
   account, the profile, its contacts / categories / cities / photo files;

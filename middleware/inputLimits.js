@@ -35,8 +35,13 @@ const FIELD_CAPS = {
   beneficiaries_text: 2000,
   how_to_buy: 4000,
   claim_requirements: 4000,
-  // Nonprofits: verification note.
-  note: 2000
+  // Nonprofits: verification note; Edit profile (the portal's limits —
+  // routes/nonprofits.js readProfile) and Create (org_name).
+  note: 2000,
+  org_name: 200,
+  what_to_bring: 2000,
+  search_tags: 4000,
+  contacts_json: 20000
 };
 
 // Data Browser edit / insert forms post one value per column as v__<n>

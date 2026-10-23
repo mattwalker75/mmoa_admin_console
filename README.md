@@ -111,7 +111,7 @@ password is replaced by re-running the command above with the same username.
 | **Admins**           | Add / replace / remove local-file console admins. |
 | **Events**           | List filtered by a Show drop-down (All / Draft / Published / Archived); create, edit, Draft / Published / Archived switch, Preview pop-up, flyer + cover, beneficiaries, delete, View on site. |
 | **Raffles**          | Same pattern (Draft / Published / Archived, Preview) + a separate stage (open → closed → drawn, with winning ticket), claim presets, prize photos (≤ 8, reorder). |
-| **Nonprofits**       | Accounts + directory profiles; ProPublica lookup; Verify / Reject / Reset; account actions. (`/members` redirects here.) |
+| **Nonprofits**       | Accounts + directory profiles; ProPublica lookup; Verify / Reject / Reset; New nonprofit (temporary password shown once); Edit profile (the portal's rules); Hide from / Show in directory (MMoA override); Preview pop-up; account actions. (`/members` redirects here.) |
 | **Categories & Cities** | The directory's service categories and cities — add, rename, reorder, activate / deactivate, delete when unused (never the built-in **Other**). |
 | **Board**            | Board roles, person names, photos, order. |
 | **Data Browser**     | Generic table browser / editor for the whole web-app database. |
