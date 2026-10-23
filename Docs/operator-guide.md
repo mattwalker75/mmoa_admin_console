@@ -151,6 +151,8 @@ directory until a board member verifies them.
 
 - **Search / filter** by verification status, whether the organization
   listed or hid its profile (or MMoA hid it), and account state.
+- The list shows each organization's **login name** (sortable column),
+  and the nonprofit page repeats it under the title and in *Login account*.
 - **New nonprofit** creates a login and its organization profile from the
   console, for an organization that is not signing itself up on the
   website: the same rules as sign-up (login name, email, contact person,

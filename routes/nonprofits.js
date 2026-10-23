@@ -610,7 +610,7 @@ module.exports = function (db, appConfig) {
       const contact = [r.first_name, r.last_name].filter(Boolean).join(' ');
       const status = r.org_id ? (r.verification_status || 'unverified') : 'no-org';
       return {
-        id: r.user_id, name: r.org_name || '', ein: r.ein || '', contact, email: r.email || '',
+        id: r.user_id, name: r.org_name || '', ein: r.ein || '', contact, login: r.login_name || '', email: r.email || '',
         status, listed: r.org_id ? !!Number(r.is_listed) : false, adminHidden: r.org_id ? !!Number(r.admin_hidden) : false, active: !!Number(r.is_active),
         emailVerified: !!r.email_verified_at, city: r.city || '',
         created: r.created_at ? String(r.created_at) : '',
@@ -671,6 +671,7 @@ module.exports = function (db, appConfig) {
               <th class="cursor-pointer select-none" x-on:click="sortBy('name')">Name <span class="text-xs text-slate-400" x-text="icon('name')"></span></th>
               <th class="cursor-pointer select-none" x-on:click="sortBy('ein')">EIN <span class="text-xs text-slate-400" x-text="icon('ein')"></span></th>
               <th class="cursor-pointer select-none" x-on:click="sortBy('contact')">Contact <span class="text-xs text-slate-400" x-text="icon('contact')"></span></th>
+              <th class="cursor-pointer select-none" x-on:click="sortBy('login')">Login <span class="text-xs text-slate-400" x-text="icon('login')"></span></th>
               <th class="cursor-pointer select-none" x-on:click="sortBy('email')">Email <span class="text-xs text-slate-400" x-text="icon('email')"></span></th>
               <th class="cursor-pointer select-none" x-on:click="sortBy('status')">Status <span class="text-xs text-slate-400" x-text="icon('status')"></span></th>
               <th class="cursor-pointer select-none" x-on:click="sortBy('created')">Created <span class="text-xs text-slate-400" x-text="icon('created')"></span></th>
@@ -682,6 +683,7 @@ module.exports = function (db, appConfig) {
                     <div class="text-xs text-slate-400" x-text="r.city"></div></td>
                   <td class="font-mono text-xs" x-text="r.ein || '—'"></td>
                   <td x-text="r.contact || '—'"></td>
+                  <td class="font-mono text-xs" x-text="r.login || '—'"></td>
                   <td class="text-xs" x-text="r.email"></td>
                   <td class="space-x-1 whitespace-nowrap">
                     <span x-show="r.status === 'verified'" class="pill-running">Verified</span>
@@ -696,7 +698,7 @@ module.exports = function (db, appConfig) {
                   <td class="text-slate-500 text-xs whitespace-nowrap" x-text="r.created || '—'"></td>
                 </tr>
               </template>
-              <tr x-show="!visible.length"><td colspan="6" class="text-center py-8 text-slate-400">${err ? 'Unavailable.' : 'No matching nonprofits.'}</td></tr>
+              <tr x-show="!visible.length"><td colspan="7" class="text-center py-8 text-slate-400">${err ? 'Unavailable.' : 'No matching nonprofits.'}</td></tr>
             </tbody>
           </table>
         </div>
@@ -960,7 +962,7 @@ module.exports = function (db, appConfig) {
     const body = `
       <div x-data="{ openReset: false, openModify: false }">
         <div class="mb-4"><a class="text-sm text-brand-600 hover:underline" href="/nonprofits">← Back to nonprofits</a></div>
-        ${kit.pageHeader(title, `${contactName ? contactName + ' · ' : ''}${m.email || ''}`,
+        ${kit.pageHeader(title, `Login: ${m.login_name || '—'}${contactName ? ' · ' + contactName : ''}${m.email ? ' · ' + m.email : ''}`,
           `${status ? `<span class="${STATUS_PILL[status] || 'pill'}">${escapeHtml(STATUS_LABEL[status] || status)}</span>` : '<span class="pill-terminated">No profile</span>'}
            ${o && !Number(o.is_listed) ? '<span class="pill-terminated">Hidden</span>' : ''}
            ${adminHidden ? '<span class="pill-failed">Hidden by MMoA</span>' : ''}
