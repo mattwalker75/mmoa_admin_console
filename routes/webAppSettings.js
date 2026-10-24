@@ -51,9 +51,9 @@ function tabLabel(key) {
 //              security.session.secure, where null means "follow server.ssl".
 const FIELDS = {
   general: [
-    { path: 'appTitle', label: 'App title', type: 'text' },
+    { path: 'appTitle', label: 'App title', type: 'text', tokens: ['appTitle'] },
     { path: 'appSubtitle', label: 'App subtitle', type: 'text' },
-    { path: 'orgName', label: 'Organization name', type: 'text', hint: 'Legal name shown in the footer and emails, e.g. Mission Men of Anna Inc. Fills the {{orgName}} website token.' },
+    { path: 'orgName', label: 'Organization name', type: 'text', hint: 'Legal name shown in the footer and emails, e.g. Mission Men of Anna Inc.', tokens: ['orgName'] },
     { path: 'publicBaseUrl', label: 'Public base URL', type: 'text', hint: 'Used in verification / password-reset links, e.g. https://missionmenofanna.org' },
     { path: 'port', label: 'Port', type: 'number', min: 1, max: 65535, def: 3004 },
     { path: 'sessionKeyMode', label: 'Session key mode', type: 'select', options: [['auto-generate', 'auto-generate'], ['fixed', 'fixed']] },
@@ -61,14 +61,14 @@ const FIELDS = {
     { path: 'passwordResetTokenTtlHours', label: 'Password reset token TTL (hours)', type: 'number', min: 1, max: 720, def: 2 },
     { path: 'allowMemberRegistration', label: 'Allow new nonprofit sign-ups', type: 'toggle', def: true, hint: 'Off hides the website\'s nonprofit sign-up; existing logins keep working.' },
     { path: 'maintenanceCommand', label: 'Maintenance Command', type: 'text', hint: 'Command run on the Web App server (from its install directory) to put it into / take it out of maintenance. Default ./scripts/maintenance.sh' },
-    { type: 'heading', label: 'Public site info', hint: 'Shown in the website header / footer (GET /api/site).' },
-    { path: 'site.phone', label: 'Phone', type: 'text', hint: 'e.g. (214) 763-5546' },
-    { path: 'site.ein', label: 'EIN', type: 'text', hint: 'e.g. 33-4035685' },
-    { path: 'site.facebookUrl', label: 'Facebook page URL', type: 'text', hint: 'e.g. https://www.facebook.com/missionmenofanna' },
+    { type: 'heading', label: 'Public site info', hint: 'Shown in the website header / footer (GET /api/site). Each value marked with a token can also be placed in any Web App Website section as {{token}} — the website fills it in.' },
+    { path: 'site.phone', label: 'Phone', type: 'text', hint: 'e.g. (214) 763-5546', tokens: ['phone', 'phoneTel'], tokenNote: '{{phoneTel}} is the digits-only form for tel: links.' },
+    { path: 'site.ein', label: 'EIN', type: 'text', hint: 'e.g. 33-4035685', tokens: ['ein'] },
+    { path: 'site.facebookUrl', label: 'Facebook page URL', type: 'text', hint: 'e.g. https://www.facebook.com/missionmenofanna', tokens: ['facebookUrl'] },
     { path: 'site.donationEnabled', label: 'Show the "Donate" button', type: 'toggle', def: false, controller: true,
       hint: 'Adds a "Donate" button to the website header that opens the donation link below in a new tab. Needs a valid link to turn on.',
       guard: { js: () => donationUrlErrorJs("c['site.donationUrl']"), server: json => donationUrlError(waConfig.getPath(json, 'site.donationUrl')) } },
-    { path: 'site.donationUrl', label: 'Donation link', type: 'text', controller: true, hint: 'A payment link for donations, e.g. a Stripe Payment Link (https://donate.stripe.com/…). Also the {{donationUrl}} website token.' },
+    { path: 'site.donationUrl', label: 'Donation link', type: 'text', controller: true, hint: 'A payment link for donations, e.g. a Stripe Payment Link (https://donate.stripe.com/…).', tokens: ['donationUrl'], tokenNote: 'Empty on the website while the Donate button is off.' },
     { path: 'uploads.maxMb', label: 'Max image upload (MB)', type: 'number', min: 1, max: 8, def: 8, hint: 'Server-side cap for nonprofit portal photo uploads (browsers shrink photos before sending). The console always allows up to 8 MB.' }
   ],
   email: [
@@ -150,6 +150,16 @@ function donationUrlErrorJs(arg) {
     + `return /^https?:$/.test(u.protocol) && /\\.[a-z]{2,}$/i.test(u.hostname) ? '' : ${m}; } catch (e) { return ${m}; } })(${arg})`;
 }
 
+// "Website token" line under a field whose value the website also exposes
+// as a {{token}} in the Web App Website sections (routes/public.js
+// contentTokens on the web app side — keep the two in step).
+function tokenHtml(d) {
+  if (!d.tokens || !d.tokens.length) return '';
+  const codes = d.tokens.map(t => `<code class="font-mono rounded bg-emerald-50 dark:bg-emerald-950/50 border border-emerald-200 dark:border-emerald-900 px-1.5 py-0.5 text-emerald-800 dark:text-emerald-200 select-all">{{${escapeHtml(t)}}}</code>`).join(' ');
+  return `<p class="mt-1.5 text-xs text-slate-600 dark:text-slate-300"><span class="font-semibold text-emerald-700 dark:text-emerald-300">Website token:</span> ${codes}
+    <span class="text-slate-500 dark:text-slate-400">— paste it into any <a class="text-brand-600 hover:underline" href="/web-app-website">Web App Website</a> section.${d.tokenNote ? ' ' + escapeHtml(d.tokenNote) : ''}</span></p>`;
+}
+
 function fieldHtml(d, json) {
   if (d.type === 'heading') {
     return `<div class="pt-2 border-t border-slate-200 dark:border-slate-800 first:border-0 first:pt-0">
@@ -160,7 +170,7 @@ function fieldHtml(d, json) {
 
   const name = d.name || d.path;
   const raw = waConfig.getPath(json, d.path);
-  const hintHtml = d.hint ? `<p class="mt-1 text-xs text-slate-500 dark:text-slate-400">${escapeHtml(d.hint)}</p>` : '';
+  const hintHtml = (d.hint ? `<p class="mt-1 text-xs text-slate-500 dark:text-slate-400">${escapeHtml(d.hint)}</p>` : '') + tokenHtml(d);
   // A "controller" field binds its live value into the form's Alpine `c` map
   // (keyed by path) so dependent groups can x-show off it as the operator edits.
   const model = d.controller ? `x-model="c['${d.path}']"` : '';
@@ -191,6 +201,7 @@ function fieldHtml(d, json) {
         <div>
           <div class="text-sm text-slate-900 dark:text-slate-100">${escapeHtml(d.label)}</div>
           ${d.hint ? `<div class="text-xs text-slate-500 dark:text-slate-400">${escapeHtml(d.hint)}</div>` : ''}
+          ${tokenHtml(d)}
         </div>
       </div>
       ${d.guard ? `<p class="mt-2 flash-error text-sm" role="alert" x-show="errs['${d.path}']" x-text="errs['${d.path}']" x-cloak></p>` : ''}

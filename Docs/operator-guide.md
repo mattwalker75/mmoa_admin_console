@@ -272,8 +272,12 @@ the board and the directory come from the database (their own pages).
 - Each card holds that section's HTML. Saves are live on the next page
   load — no restart. **Preview** shows the unsaved HTML on the site's dark
   palette.
-- Keep the `{{tokens}}` (`{{appTitle}}`, `{{orgName}}`, `{{year}}`) — the
-  website fills them in.
+- Keep the `{{tokens}}` — the website fills them in: `{{appTitle}}`,
+  `{{orgName}}`, `{{phone}}`, `{{phoneTel}}` (digits only, for `tel:` links),
+  `{{ein}}`, `{{facebookUrl}}`, `{{donationUrl}}` (empty while the Donate
+  button is off), `{{year}}` and `{{eventCount}}`. The values come from Web
+  App Settings → General, where each field that feeds a token says so
+  ("Website token: …").
 - **Website** — the site's public address (`publicBaseUrl` from Web App
   Settings → General) with an **Open website** button that opens it in a
   new browser window.
