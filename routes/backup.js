@@ -553,10 +553,10 @@ function notConfiguredCard() {
 function databaseRestoreForm(action, engine) {
   return `<form method="POST" action="${action}" enctype="multipart/form-data" class="mt-5 space-y-4"
     x-data="{
-      fileName: '', parseError: '', ok: false, meta: null, confirmText: '',
+      fileName: '', parseError: '', ok: false, meta: null, confirmText: '', fit: [],
       get canSubmit() { return this.ok && this.confirmText.trim() === 'RESTORE'; },
       onFile(e) {
-        this.fileName = ''; this.parseError = ''; this.ok = false; this.meta = null; this.confirmText = '';
+        this.fileName = ''; this.parseError = ''; this.ok = false; this.meta = null; this.confirmText = ''; this.fit = [];
         const f = e.target.files && e.target.files[0]; if (!f) return;
         this.fileName = f.name;
         const r = new FileReader();
@@ -564,9 +564,25 @@ function databaseRestoreForm(action, engine) {
           let p; try { p = JSON.parse(r.result); } catch (err) { this.parseError = 'Not valid JSON: ' + err.message; return; }
           if (!p || typeof p !== 'object' || Array.isArray(p)) { this.parseError = 'Backup must be a JSON object.'; return; }
           const t = p._meta && p._meta.type;
-          if (t && t !== 'web-app-database') { this.parseError = 'This is not a Web App database backup.'; return; }
+          if (t !== 'web-app-database') { this.parseError = 'This is not a Web App database backup.'; return; }
           if (!p.tables || typeof p.tables !== 'object' || Array.isArray(p.tables)) { this.parseError = 'No database tables found in that file.'; return; }
           this.meta = p._meta || {}; this.ok = true;
+          fetch('/backup-restore/database/schema', { headers: { Accept: 'application/json' } }).then(x => x.json()).then(d => {
+            if (!d.ok) return;
+            const live = d.tables, file = p.tables, out = [];
+            const emptied = Object.keys(live).filter(k => !(k in file));
+            const skipped = Object.keys(file).filter(k => !(k in live));
+            if (emptied.length) out.push('Will be left EMPTY (not in the file): ' + emptied.join(', '));
+            if (skipped.length) out.push('Not in this database, skipped: ' + skipped.join(', '));
+            for (const k of Object.keys(live)) {
+              const rows = Array.isArray(file[k]) ? file[k] : null; if (!rows || !rows.length) continue;
+              const seen = new Set(); rows.forEach(r => r && typeof r === 'object' && Object.keys(r).forEach(c => seen.add(c)));
+              const absent = live[k].filter(c => !seen.has(c)), extra = [...seen].filter(c => !live[k].includes(c));
+              if (absent.length) out.push(k + ': older backup, no ' + absent.join(', ') + ' (defaults until the Web App restarts)');
+              if (extra.length) out.push(k + ': newer backup, column(s) dropped: ' + extra.join(', '));
+            }
+            this.fit = out;
+          }).catch(() => {});
         };
         r.onerror = () => { this.parseError = 'Could not read the file.'; };
         r.readAsText(f);
@@ -577,6 +593,7 @@ function databaseRestoreForm(action, engine) {
       <label class="label">Database backup file (.json)</label>
       <input class="${FILE_INPUT_CLS}" type="file" name="backup" accept="application/json,.json" required x-on:change="onFile(\$event)">
       <p class="mt-2 text-xs text-slate-500" x-show="fileName" x-cloak>Selected: <span class="font-mono" x-text="fileName"></span></p>
+      <ul class="mt-2 text-xs text-amber-700 dark:text-amber-300 list-disc pl-5 space-y-0.5" x-show="ok && fit.length" x-cloak><template x-for="w in fit"><li x-text="w"></li></template></ul>
       <p class="mt-2 text-xs text-slate-500" x-show="ok && meta" x-cloak>Backup engine: <span class="font-mono" x-text="(meta && meta.engine) || 'unknown'"></span> · <span x-text="(meta && meta.tableCount) ?? '?'"></span> tables · <span x-text="(meta && meta.rowCount) ?? '?'"></span> rows</p>
       <p class="mt-2 text-xs text-red-600 dark:text-red-400" x-show="parseError" x-cloak x-text="parseError"></p>
     </div>
@@ -800,6 +817,22 @@ module.exports = function (db, appConfig, appConfigModule) {
     try { fs.mkdirSync(BUNDLE_DIR, { recursive: true, mode: 0o700 }); fs.writeFileSync(OP_FILE, JSON.stringify(opStatus), { mode: 0o600 }); }
     catch (e) { /* status display only */ }
   }
+  // Temp files from a crash, a timed-out piece or a failed clean-up (one can
+  // be a full SQL copy of the database, password hashes included). Only ones
+  // older than a minute, so a console save in flight right now isn't touched.
+  // Run before every restore and every database backup. Returns the count.
+  async function sweepTempFiles(accessor) {
+    try {
+      if (!accessor || !accessor.appPath) return 0;
+      const ap = accessor.appPath;
+      const dirs = [ap, waConfig.joinPath(ap, 'HTML'), waConfig.joinPath(ap, IMAGES_REL_DIR), ...uploadsHelper.KINDS.map(k => waConfig.joinPath(ap, UPLOADS_REL_DIR + '/' + k))];
+      const pat = `\\( -name '*.console-tx.*' -o -name '*.console-out.*' -o -name '*.wa-tmp.*' -o -name '.wa-ls.*' -o -name '.wa-restore-probe' \\)`;
+      const cmd = dirs.map(d => `[ -d ${shq(d)} ] && find ${shq(d)} -maxdepth 1 -type f ${pat} -mmin +1 -print -exec rm -f {} \\;`).join('; ') + '; true';
+      const sw = await accessor.runCommand(cmd, { timeoutMs: 60000, comment: 'remove stale temp files' });
+      return String(sw.stdout || '').split('\n').filter(Boolean).length;
+    } catch (e) { return 0; }
+  }
+
   // backups/.restore-log.jsonl — one line per database-replacing restore,
   // on the console's own disk: the admin_audit table lives IN the database a
   // restore replaces, so its history is whatever the file carried.
@@ -817,7 +850,7 @@ module.exports = function (db, appConfig, appConfigModule) {
       if (saved.running) {
         const at = (saved.steps || []).find(st => st.state === 'in_progress');
         opStatus = { ...saved, running: false, ok: false, interrupted: true, finishedAt: null,
-          error: `INTERRUPTED — the console stopped while this ${saved.kind} was running${at ? ` (during "${at.step}")` : ''}. ${saved.kind === 'restore' ? 'Run the restore again to finish it.' : 'Run the backup again.'}` };
+          error: `INTERRUPTED — the console stopped while this ${saved.kind} was running${at ? ` (during "${at.step}")` : ''}. ${/restore/.test(saved.kind) ? 'Run the restore again to finish it.' : 'Run the backup again.'}` };
         for (const st of opStatus.steps || []) if (st.state === 'in_progress') st.state = 'failed';
         saveOp();
       }
@@ -1261,18 +1294,8 @@ module.exports = function (db, appConfig, appConfigModule) {
     const done = (step, detail, state) => { steps.push({ step, ok: true, detail }); progress(step, state || 'ok', detail); };
 
     // ── 0. leftovers of an earlier failed / interrupted run ──
-    // Temp files from a crash, a timed-out piece or a failed clean-up (one
-    // can be a full SQL copy of the database). Only ones older than a minute,
-    // so a console save in flight right now isn't touched.
-    try {
-      const ap = accessor.appPath;
-      const dirs = [ap, waConfig.joinPath(ap, 'HTML'), waConfig.joinPath(ap, IMAGES_REL_DIR), ...uploadsHelper.KINDS.map(k => waConfig.joinPath(ap, UPLOADS_REL_DIR + '/' + k))];
-      const pat = `\\( -name '*.console-tx.*' -o -name '*.console-out.*' -o -name '*.wa-tmp.*' -o -name '.wa-ls.*' -o -name '.wa-restore-probe' \\)`;
-      const cmd = dirs.map(d => `[ -d ${shq(d)} ] && find ${shq(d)} -maxdepth 1 -type f ${pat} -mmin +1 -print -exec rm -f {} \\;`).join('; ') + '; true';
-      const sw = await accessor.runCommand(cmd, { timeoutMs: 60000, comment: 'bundle restore: remove stale temp files' });
-      const n = String(sw.stdout || '').split('\n').filter(Boolean).length;
-      if (n) progress('Clean-up', 'ok', `${n} leftover temp file(s) from an earlier run removed`);
-    } catch (e) { /* best effort */ }
+    const swept = await sweepTempFiles(accessor);
+    if (swept) progress('Clean-up', 'ok', `${swept} leftover temp file(s) from an earlier run removed`);
 
     // ── 1. database ──
     const tables = (bundle.database && bundle.database.tables && typeof bundle.database.tables === 'object') ? bundle.database.tables : null;
@@ -1532,7 +1555,7 @@ module.exports = function (db, appConfig, appConfigModule) {
         },
         opTitle() {
           const o = this.sw.op; if (!o) return 'Status';
-          const what = o.kind === 'restore' ? 'Restore' : o.kind === 'verify' ? 'Verify' : 'Backup';
+          const what = ({ restore: 'Restore', verify: 'Verify', backup: 'Backup', 'database restore': 'Database restore', 'image restore': 'Image restore', 'website restore': 'Website restore' })[o.kind] || 'Operation';
           if (o.kind === 'verify') return o.ok ? 'Bundle verified — complete' : 'Bundle verification FAILED';
           return o.running ? what + ' is still running…' : (o.ok ? what + ' finished' : what + ' FAILED');
         },
@@ -1824,7 +1847,7 @@ module.exports = function (db, appConfig, appConfigModule) {
     };
     const okMsg = okMap[req.query.ok] ? `<div class="flash-ok mb-4">${okMap[req.query.ok]}</div>` : '';
     const interruptedMsg = (opStatus && opStatus.interrupted)
-      ? `<div class="flash-error mb-4"><strong>${escapeHtml(opStatus.kind === 'restore' ? 'A Full Restore was interrupted.' : 'A Full Backup was interrupted.')}</strong> ${escapeHtml(opStatus.error || '')}${opStatus.name ? ` Bundle: <code class="font-mono">${escapeHtml(opStatus.name)}</code>.` : ''} Started ${escapeHtml(String(opStatus.startedAt || '').replace('T', ' ').slice(0, 19))} UTC.</div>`
+      ? `<div class="flash-error mb-4"><strong>${escapeHtml(({ restore: 'A Full Restore', backup: 'A Full Backup', 'database restore': 'A Database Restore', 'image restore': 'An Image Restore', 'website restore': 'A Website Restore' }[opStatus.kind] || 'An operation') + ' was interrupted.')}</strong> ${escapeHtml(opStatus.error || '')}${opStatus.name ? ` File: <code class="font-mono">${escapeHtml(opStatus.name)}</code>.` : ''} Started ${escapeHtml(String(opStatus.startedAt || '').replace('T', ' ').slice(0, 19))} UTC.</div>`
       : '';
 
     // ── Group 1: Console settings (local file) ──
@@ -2417,6 +2440,7 @@ module.exports = function (db, appConfig, appConfigModule) {
       return res.redirect('/backup-restore?error=' + encodeURIComponent('Database is not available (Settings → Web App).'));
     }
     try {
+      try { if (webAppAccess.isConfigured(appConfig)) await sweepTempFiles(webAppAccess.createAccessorFromConfig(appConfig)); } catch (e) { /* best effort */ }
       const backup = await buildDatabaseBackup();
       res.set('Content-Type', 'application/json; charset=utf-8');
       res.set('Content-Disposition', `attachment; filename="web_app_database_${dateStamp()}.json"`);
@@ -2451,11 +2475,38 @@ module.exports = function (db, appConfig, appConfigModule) {
     const count = async (sql, p) => { try { const r = await db.getAsync(sql, p || []); return r ? Number(r.c) : null; } catch (e) { return null; } };
     const now = Date.now();
     const usersBefore = await count('SELECT COUNT(*) AS c FROM users');
+    let accessor = null;
+    try { if (webAppAccess.isConfigured(appConfig)) accessor = webAppAccess.createAccessorFromConfig(appConfig); } catch (e) { /* DB-only setups */ }
+    await sweepTempFiles(accessor);
+    let tables, warnings;
     try {
       mark('Database', 'in_progress', 'replacing every table in one transaction');
-      const { tables, warnings } = await restoreDatabase(backupTables);
+      ({ tables, warnings } = await restoreDatabase(backupTables));
       mark('Database', warnings.length ? 'warn' : 'ok', `${tables} tables replaced`);
       finishOp(true);
+    } catch (err) {
+      finishOp(false, err.message || String(err));
+      console.error('[backup] database import failed:', err);
+      restoreLog(req, { kind: 'database restore', file: req.file && req.file.originalname, ok: false, error: err.message || String(err) });
+      await audit(req, 'backup.database_restore', { kind: 'backup', label: req.file && req.file.originalname, summary: `FAILED (nothing was changed): ${err.message || err}` });
+      return back('Database restore failed: ' + (err.message || err));
+    }
+    // The database IS replaced from here on — nothing below may report otherwise.
+    try {
+      // Rows that point at photos which aren't on the host any more (deleted
+      // together with their row after the backup): the files are only in an
+      // Image Backup or a Full bundle.
+      if (accessor) {
+        const refs = dbImagePaths(backupTables);
+        if (refs.length) {
+          const dirs = uploadsHelper.KINDS.map(k => waConfig.joinPath(accessor.appPath, UPLOADS_REL_DIR + '/' + k));
+          const listing = await accessor.readBundle({ files: [], dirs });
+          const have = new Set();
+          uploadsHelper.KINDS.forEach((k, i) => { for (const n of ((listing.dirs[dirs[i]] || {}).names || [])) have.add(`${k}/${n}`); });
+          const missing = refs.filter(r => !have.has(r));
+          if (missing.length) warnings.push(`${missing.length} photo(s) the restored data points at are not on the Web App host (deleted after the backup?) — restore them with Image Restore or a Full Backup bundle: ${missing.slice(0, 5).join(', ')}${missing.length > 5 ? '…' : ''}`);
+        }
+      }
       const usersAfter = await count('SELECT COUNT(*) AS c FROM users');
       const lockedAfter = await count("SELECT COUNT(DISTINCT scope_key) AS c FROM login_lockouts WHERE scope <> 'ip' AND locked_until_ms > ?", [now]);
       const impact = `nonprofit accounts ${usersBefore ?? '?'} → ${usersAfter ?? '?'}${lockedAfter ? `; ${lockedAfter} login(s) are locked` : ''}`;
@@ -2466,14 +2517,23 @@ module.exports = function (db, appConfig, appConfigModule) {
       restoreLog(req, { kind: 'database restore', file: req.file && req.file.originalname, ok: true, tables, impact, warnings });
       waConfig.markWebAppWritten(appConfig); appConfigModule.save();
       res.redirect('/backup-restore?ok=database&restored=1&n=' + tables + '&warn=' + encodeURIComponent([
-        `Restart the Web App now — it still holds data from before the restore in memory. ${impact}.`, ...warnings].join(' ')));
+        `Restart the Web App now — it still holds data from before the restore in memory. ${impact}. Passwords and sign-ins are as they were in the backup (a password changed since then is back to the old one).`, ...warnings].join(' ')));
     } catch (err) {
-      finishOp(false, err.message || String(err));
-      console.error('[backup] database import failed:', err);
-      restoreLog(req, { kind: 'database restore', file: req.file && req.file.originalname, ok: false, error: err.message || String(err) });
-      await audit(req, 'backup.database_restore', { kind: 'backup', label: req.file && req.file.originalname, summary: `FAILED (nothing was changed): ${err.message || err}` });
-      back('Database restore failed: ' + (err.message || err));
+      console.error('[backup] database restore follow-up failed:', err);
+      res.redirect('/backup-restore?ok=database&restored=1&n=' + tables + '&warn=' + encodeURIComponent(`The database WAS replaced, but a follow-up step failed (${err.message || err}). Restart the Web App.`));
     }
+  });
+
+  // The live tables and their columns, so the restore form can say BEFORE
+  // the operator types RESTORE what the file would empty, skip or default.
+  router.get('/backup-restore/database/schema', requireAdmin, async (req, res) => {
+    try {
+      const live = await dbListTables();
+      const described = await dbSchema.describeTables(db, live);
+      const out = {};
+      for (const [t, cols] of described) out[t] = cols.map(c => c.name);
+      res.json({ ok: true, tables: out });
+    } catch (e) { res.json({ ok: false, error: e.message || String(e) }); }
   });
 
   // ── Web App rebuild: bundle endpoints (JSON, driven by rebuildCard) ──

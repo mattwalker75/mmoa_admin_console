@@ -524,7 +524,14 @@ snapshot), or on the host `sqlite3 mmoa_web_app.db ".backup backup.db"`.
   before → after and locked logins, and offers the Web App restart it
   needs. Audited — and because the audit log lives in the database a
   restore replaces, every database-replacing restore is also written to
-  `backups/.restore-log.jsonl` on the console's own disk. **Every live table is emptied**, then
+  `backups/.restore-log.jsonl` on the console's own disk. Choosing a file
+  shows, before you type RESTORE, which tables it would leave empty or skip
+  and which columns an older / newer backup lacks or adds. Afterwards it
+  warns about photos the restored rows point at that aren't on the host
+  (restore those with Image Restore or a Full bundle). Passwords and
+  sign-ins go back to the backup's — a password changed since is the old
+  one again. Best practice: stop the Web App (or turn Maintenance Mode on)
+  first, then restart it after. **Every live table is emptied**, then
   the tables the backup has are reloaded — a live table the backup lacks
   ends up empty, a backup table the live schema lacks is skipped, and
   both cases are reported on the result banner. Stop the web app or
