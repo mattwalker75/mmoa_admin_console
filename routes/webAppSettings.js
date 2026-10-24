@@ -22,6 +22,7 @@
 const express = require('express');
 const { page, flash, waRestartPrompt } = require('../views/layout');
 const { escapeHtml } = require('../views/escapeHtml');
+const { websiteLinkCard } = require('../helpers/websiteCard');
 const { requireAdmin } = require('../middleware/auth');
 const webAppAccess = require('../helpers/webAppAccess');
 const waConfig = require('../helpers/webAppConfig');
@@ -405,6 +406,7 @@ function renderBody({ tab, json, readErr, notConfigured, accessDesc, query, cmds
   return `
     ${pageHeader('Web App Settings', 'Configure the Web App application by editing its config.json — no need to log into it.')}
     ${powerBar(cmds, restartPending)}
+    ${json ? `<div class="mb-6 max-w-3xl">${websiteLinkCard(json.publicBaseUrl)}</div>` : ''}
     ${flash('error', query.error)}
     ${saved}
     ${waRestartPrompt(!!query.wa)}

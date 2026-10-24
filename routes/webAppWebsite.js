@@ -27,6 +27,7 @@ const path = require('path');
 const multer = require('multer');
 const { page, flash } = require('../views/layout');
 const { escapeHtml } = require('../views/escapeHtml');
+const { websiteLinkCard } = require('../helpers/websiteCard');
 const { requireAdmin } = require('../middleware/auth');
 const webAppAccess = require('../helpers/webAppAccess');
 const waConfig = require('../helpers/webAppConfig');
@@ -129,23 +130,6 @@ function imageRow(name) {
         <button type="submit" class="btn-danger text-xs">Delete</button>
       </form>
     </div>`;
-}
-
-// The Website card: the public address of the Web App (publicBaseUrl in
-// its config.json) with a button that opens it in a new browser window.
-function websiteLinkCard(publicBaseUrl) {
-  const url = String(publicBaseUrl || '').trim();
-  const body = url
-    ? `<div class="mt-3 flex flex-wrap items-center gap-3">
-        <a href="${escapeHtml(url)}" target="_blank" rel="noopener" class="font-mono text-sm font-semibold text-emerald-700 dark:text-emerald-300 hover:underline break-all">${escapeHtml(url)}</a>
-        <a href="${escapeHtml(url)}" target="_blank" rel="noopener" class="inline-flex items-center gap-1.5 rounded-lg bg-emerald-600 px-4 py-2 text-sm font-semibold text-white shadow-sm hover:bg-emerald-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500">Open website <span aria-hidden="true">↗</span></a>
-      </div>`
-    : `<div class="mt-3 flash-error text-sm">No public address is configured yet. Set <code class="font-mono">publicBaseUrl</code> under <a class="underline" href="/web-app-settings/general">Web App Settings → General</a>.</div>`;
-  return `<div class="card surface-target card-pad border-2 border-emerald-500 dark:border-emerald-600">
-    <h2 class="text-base font-semibold text-emerald-800 dark:text-emerald-200">Website</h2>
-    <p class="mt-0.5 text-xs text-slate-500 dark:text-slate-400">The live site as visitors see it. Opens in a new browser window.</p>
-    ${body}
-  </div>`;
 }
 
 // The Maintenance Mode card: Title + Message inputs and Enable / Disable /
