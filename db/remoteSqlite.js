@@ -302,7 +302,7 @@ function init(appConfig, sqliteCfg) {
         const redir = i === 0 ? '>' : '>>';
         // umask 077: the staged SQL holds the whole database (password hashes).
         const r = await a.runCommand(`umask 077; printf '%s' ${shq(pieces[i])} | base64 -d ${redir} ${shq(tmp)}`, { timeoutMs: 60000 });
-        if (r.code !== 0) throw new Error(`Could not stage transaction SQL on the host: ${(r.stderr || '').trim() || 'exit ' + r.code}`);
+        if (r.code !== 0) throw new Error(`Could not stage transaction SQL on the host (piece ${i + 1} of ${pieces.length}): ${r.timedOut ? 'timed out — it may still be running' : ((r.stderr || '').trim() || 'exit ' + r.code)}. Nothing was changed in the database.`);
       }
       // The exit code also goes to a marker file: over SSM the console can
       // stop waiting while the command keeps running on the host, and a
@@ -313,6 +313,14 @@ function init(appConfig, sqliteCfg) {
         { timeoutMs: 600000 }
       );
       let code = r.code;
+      if (!r.timedOut && code !== 0) {
+        // The command may have run (and committed) even though SSM reported
+        // a failure — the marker file says what sqlite3 really returned.
+        const m = await a.runCommand(`cat ${shq(mk)} 2>/dev/null || echo __NONE__`, { timeoutMs: 30000 }).catch(() => null);
+        const t = m && String(m.stdout || '').trim();
+        if (t && /^\d+$/.test(t)) code = Number(t);
+        else if (t === '__NONE__' && r.code == null) throw new Error('Remote SQLite transaction: no result from the host — the database may or may not have been replaced; check it, then run the restore again (it is safe to repeat).');
+      }
       if (r.timedOut) {
         code = null;
         const deadline = Date.now() + 60 * 60 * 1000;

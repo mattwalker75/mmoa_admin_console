@@ -115,6 +115,9 @@ const SSM_OUTPUT_CAP_CHARS = 23000;
 // Raw bytes per piece for readFileChunked on EC2: 15,000 bytes → 20,000
 // base64 chars, comfortably under the output cap.
 const SSM_READ_CHUNK_BYTES = 15000;
+// Largest file readFile asks SSM for inline (base64 of 17,000 bytes ≈ 22,700
+// chars, under SSM_OUTPUT_CAP_CHARS); bigger ones go straight to pieces.
+const SSM_INLINE_READ_MAX = 17000;
 
 // A per-call temp name next to the target: <path>.wa-tmp.<8 hex>.
 function tmpNameFor(remotePath) {
@@ -599,9 +602,22 @@ function ec2Accessor(cfg) {
 
   // Pull a file back in pieces: one `dd | base64` command per
   // SSM_READ_CHUNK_BYTES, then verify the total against the file's size.
+  // Reads are idempotent: retry a failed / throttled one a few times before
+  // giving up (one bad piece of ~230 used to abort a whole backup).
+  async function ssmRead(cmd, opts) {
+    let last;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      if (attempt) await new Promise(res => setTimeout(res, 500 * attempt * attempt));
+      try { last = await ssmRun(cmd, opts); } catch (e) { last = { status: 'Failed', stderr: e.message || String(e) }; continue; }
+      if (last.status === 'Success') return last;
+      if (/No such file/.test(last.stderr || '')) return last; // not transient
+    }
+    return last;
+  }
+
   async function readChunked(remotePath, opts) {
     const q = shQuote(remotePath);
-    let r = await ssmRun(
+    let r = await ssmRead(
       `if [ -f ${q} ]; then sz=$(stat -c %s ${q} 2>/dev/null || wc -c < ${q}); echo "__WA_SIZE__ $(echo $sz | tr -d ' ')"; ` +
       `else echo ${shQuote('No such file: ' + remotePath)} >&2; exit 2; fi`,
       { timeoutMs: (opts && opts.timeoutMs) || 60000, comment: 'Admin console chunked read (size)' });
@@ -611,7 +627,7 @@ function ec2Accessor(cfg) {
     const size = Number(m[1]);
     const parts = [];
     for (let k = 0; k * SSM_READ_CHUNK_BYTES < size; k++) {
-      const p = await ssmRun(`dd if=${q} bs=${SSM_READ_CHUNK_BYTES} skip=${k} count=1 2>/dev/null | base64 | tr -d '\\n'`,
+      const p = await ssmRead(`dd if=${q} bs=${SSM_READ_CHUNK_BYTES} skip=${k} count=1 2>/dev/null | base64 | tr -d '\\n'`,
         { timeoutMs: (opts && opts.timeoutMs) || 60000, comment: `Admin console chunked read (${k + 1})` });
       if (p.status !== 'Success') throw new Error(`Could not read ${remotePath} via SSM (piece ${k + 1}): ${p.stderr || p.status}`);
       const raw = (p.stdout || '').replace(/\s+/g, '');
@@ -638,7 +654,12 @@ function ec2Accessor(cfg) {
       // base64 over SSM is binary-safe. NOTE: SSM truncates command output
       // at ~24,000 chars (~18 KB of file after base64) — only suitable for
       // small text files (config/scripts), NOT the SQLite database.
-      const r = await ssmRun(`base64 ${shQuote(remotePath)}`, opts);
+      // One command: small files come back inline; a file too big for SSM's
+      // output cap answers with its size only and is read in pieces (instead
+      // of a full base64 that would be cut off and thrown away).
+      const q0 = shQuote(remotePath);
+      const r = await ssmRead(`if [ -f ${q0} ]; then sz=$(stat -c %s ${q0} 2>/dev/null || wc -c < ${q0}); sz=$(echo $sz | tr -d ' '); if [ "$sz" -gt ${SSM_INLINE_READ_MAX} ]; then echo "__WA_BIG__ $sz"; else base64 ${q0}; fi; else base64 ${q0}; fi`, opts);
+      if (r.status === 'Success' && /^__WA_BIG__ \d+/.test((r.stdout || '').trim())) return readChunked(remotePath, opts);
       if (r.status !== 'Success') {
         throw new Error(`Could not read ${remotePath} via SSM: ${r.stderr || r.status}`);
       }

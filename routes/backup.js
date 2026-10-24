@@ -1138,9 +1138,9 @@ module.exports = function (db, appConfig, appConfigModule) {
     try {
       await accessor.writeFile(probe, 'restore probe ' + new Date().toISOString() + '\n');
       const there = await accessor.exists(probe);
-      await accessor.runCommand(`rm -f -- ${shq(probe)}`, { timeoutMs: 20000 }).catch(() => {});
       add('Write a file in the install directory', there, there ? probe : 'written, but not found afterwards');
     } catch (e) { add('Write a file in the install directory', false, e.message || String(e)); }
+    finally { await accessor.runCommand(`rm -f -- ${shq(probe)}`, { timeoutMs: 20000 }).catch(() => {}); }
     try {
       const dir = waConfig.joinPath(accessor.appPath, IMAGES_REL_DIR);
       const r = await accessor.runCommand(`mkdir -p -- ${shq(dir)} && test -w ${shq(dir)} && echo __WA_W__`, { timeoutMs: 20000 });
@@ -1183,6 +1183,20 @@ module.exports = function (db, appConfig, appConfigModule) {
     const steps = [];
     const restored = [], skipped = [];
     const done = (step, detail, state) => { steps.push({ step, ok: true, detail }); progress(step, state || 'ok', detail); };
+
+    // ── 0. leftovers of an earlier failed / interrupted run ──
+    // Temp files from a crash, a timed-out piece or a failed clean-up (one
+    // can be a full SQL copy of the database). Only ones older than a minute,
+    // so a console save in flight right now isn't touched.
+    try {
+      const ap = accessor.appPath;
+      const dirs = [ap, waConfig.joinPath(ap, 'HTML'), waConfig.joinPath(ap, IMAGES_REL_DIR), ...uploadsHelper.KINDS.map(k => waConfig.joinPath(ap, UPLOADS_REL_DIR + '/' + k))];
+      const pat = `\\( -name '*.console-tx.*' -o -name '*.console-out.*' -o -name '*.wa-tmp.*' -o -name '.wa-ls.*' -o -name '.wa-restore-probe' \\)`;
+      const cmd = dirs.map(d => `[ -d ${shq(d)} ] && find ${shq(d)} -maxdepth 1 -type f ${pat} -mmin +1 -print -exec rm -f {} \\;`).join('; ') + '; true';
+      const sw = await accessor.runCommand(cmd, { timeoutMs: 60000, comment: 'bundle restore: remove stale temp files' });
+      const n = String(sw.stdout || '').split('\n').filter(Boolean).length;
+      if (n) progress('Clean-up', 'ok', `${n} leftover temp file(s) from an earlier run removed`);
+    } catch (e) { /* best effort */ }
 
     // ── 1. database ──
     const tables = (bundle.database && bundle.database.tables && typeof bundle.database.tables === 'object') ? bundle.database.tables : null;
@@ -1243,10 +1257,12 @@ module.exports = function (db, appConfig, appConfigModule) {
     const secrets = (bundle.localSecrets && typeof bundle.localSecrets === 'object' && !Array.isArray(bundle.localSecrets)) ? bundle.localSecrets : null;
     if (secrets) {
       const sp = waConfig.joinPath(accessor.appPath, SECRETS_FILE);
+      // Create it private first (a fresh host has none) so the write keeps 0600.
+      await accessor.runCommand(`( umask 077; [ -e ${shq(sp)} ] || : > ${shq(sp)} )`, { timeoutMs: 20000 }).catch(() => {});
       await accessor.writeFile(sp, jsonFileText(secrets));
-      await accessor.runCommand(`chmod 600 -- ${shq(sp)}`, { timeoutMs: 20000 }).catch(() => {});
+      const cm = await accessor.runCommand(`chmod 600 ${shq(sp)}`, { timeoutMs: 20000 }).catch(e => ({ code: 1, stderr: e.message }));
       restored.push(SECRETS_FILE);
-      cfgNotes.push(`${SECRETS_FILE} written (members stay signed in)`);
+      cfgNotes.push(`${SECRETS_FILE} written (members stay signed in)${cm && cm.code === 0 ? '' : ' — WARNING: could not make it private (chmod 600): ' + ((cm && cm.stderr) || 'failed').trim()}`);
     } else {
       skipped.push(SECRETS_FILE + ' (not in the bundle)');
       cfgNotes.push(`${SECRETS_FILE} not in the bundle — this server's own session keys are kept`);

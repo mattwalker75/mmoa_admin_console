@@ -441,7 +441,8 @@ the order is what makes a failed restore safe:
 
 If the console itself stops in the middle (crash, restart), the next page
 view shows a red **interrupted** banner saying which step it reached; run
-the restore again.
+the restore again. Each restore first removes temp files an earlier failed or interrupted
+run left behind (older than a minute).
 
 
 then it prompts for the Web App restart the new config needs. A
