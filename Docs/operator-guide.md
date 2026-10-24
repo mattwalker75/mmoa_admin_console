@@ -385,36 +385,52 @@ value and public / portal API response matched the original, and a
 nonprofit signed in before the backup stayed signed in. The same bundle
 restored onto a brand-new install (repo checkout, empty database, EC2-style
 config) matched as well, apart from that server's own AWS credential
-source and maintenance command, which a restore keeps on purpose. Not yet
-exercised for real: SSH / EC2 (SSM) transports and MySQL.
+source and maintenance command, which a restore keeps on purpose.
 
-**Full Restore** walks through: test access → optional Maintenance Mode →
-verify the bundle → restore, with the status window showing each step:
+**Deep testing (2026-10-24)** added: MySQL / MariaDB backup → damage →
+restore and SQLite ↔ MySQL in both directions (identical, after pinning
+the console's MySQL sessions to UTC), awkward data (emoji, 100 KB text,
+NULL vs '', quotes, large images), 23 kinds of tampered bundle, schema
+skew, failures mid-restore (now leave nothing half-done), concurrent
+backups / restores under heavy write load (consistent snapshots; the
+one-at-a-time lock holds) and the browser flow. Bundles use about 9× their
+size in console memory while being made, verified or restored — mind that
+on a small instance once the photo library grows.
 
-1. configuration — `config.json` (only the keys Web App Settings edits;
-   the bundle's `maintenanceCommand` is left as the host has it unless you
-   tick **Also restore the shell commands**) + `local-secrets.json`
-   (mode 600). **Keep this server's own machine settings** (on by default)
-   keeps the host's `port`, `server` (TLS / proxy), `database` connection
-   and `aws.runningInAws` instead of the bundle's — they describe the
-   machine, not the site, and the EC2 install script sets them for the
-   instance it builds. Turn it off only to copy those too.
-2. website — HTML sections, images
-3. uploads — every file in the bundle is written
-   - **Remove images not in the bundle** (on by default) deletes website
-     images and uploads added after the backup, so the files match the
-     backup exactly. A file the bundle lists as *skipped* is never removed,
-     and non-image files (`README.txt`, `.gitkeep`) are left alone.
-4. database — **every live table is emptied**, then the bundle's tables are
-   reloaded in one transaction (a live table the bundle lacks ends up
-   empty, a bundle table the live schema lacks is skipped — both are
-   reported)
-5. console templates — ticked by default; written into the Settings →
-   Templates folder, a template with the same id is replaced, others are
-   kept
-6. `maintenance.json` — last, so a bundle made with Maintenance Mode off
-   can't lift your maintenance screen mid-restore; if the bundle was made
-   with it ON, the page says so and offers to disable it
+**Full Restore** walks through: test access (read, write, run a command,
+every uploads folder) → optional Maintenance Mode → verify the bundle
+(including whether it fits *this* database) → restore → restart the Web
+App → turn Maintenance Mode off. The status window shows each step, and
+the order is what makes a failed restore safe:
+
+1. **database first** — the bundle is checked against the live schema,
+   then every live table is emptied and the bundle's tables reloaded in
+   ONE transaction. If anything fails here, **nothing at all has changed**
+   (the error names the table and row).
+2. configuration — `config.json` (only the keys Web App Settings edits;
+   the maintenance command stays as the host has it unless you tick **Also
+   restore the shell commands**) + `local-secrets.json` (mode 600). **Keep
+   this server's own machine settings** (on by default) keeps the host's
+   `port`, `server` (TLS / proxy), `database` connection and
+   `aws.runningInAws` — they describe the machine, not the site, and the
+   EC2 install script sets them per instance.
+3. website (HTML sections, images) and uploads — written, never removed
+   at this point, so a failure here leaves extra files, never missing ones;
+   running the restore again finishes the job.
+4. console templates — ticked by default; same-id templates replaced.
+5. **Remove images not in the bundle** (on by default) — website images and
+   uploads added after the backup are deleted, only after every write above
+   succeeded. A file the bundle lists as *skipped* is never removed, nor
+   are non-image files (`README.txt`, `.gitkeep`).
+6. `maintenance.json` — last. If you turned Maintenance Mode on for this
+   restore it **stays on**; the page then offers to restart the Web App
+   (it reads its config and session keys only at start-up) and only after
+   that to turn Maintenance Mode off.
+
+If the console itself stops in the middle (crash, restart), the next page
+view shows a red **interrupted** banner saying which step it reached; run
+the restore again.
+
 
 then it prompts for the Web App restart the new config needs. A
 `backup.restore` audit row lists what was restored and what was skipped

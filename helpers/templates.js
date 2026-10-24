@@ -19,6 +19,9 @@ const path = require('path');
 const ROOT = path.join(__dirname, '..');
 const DEFAULT_DIR = 'templates';
 const ID_RE = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
+// Own keys only: a bundle naming a kind like "constructor" or "__proto__"
+// must not reach Object.prototype.
+const isKind = (kind) => Object.prototype.hasOwnProperty.call(KINDS, kind);
 const MAX_NAME = 80, MAX_CONTENT = 4000;
 
 // Each kind belongs to a group (the section it's listed under in Settings →
@@ -66,7 +69,7 @@ function baseDir(appConfig) {
 }
 
 function kindDir(appConfig, kind) {
-  if (!KINDS[kind]) throw new TemplateError('Unknown template type.');
+  if (!isKind(kind)) throw new TemplateError('Unknown template type.');
   return path.join(baseDir(appConfig), kind);
 }
 
@@ -160,7 +163,7 @@ function importAll(appConfig, data) {
   const skipped = [];
   const src = (data && typeof data === 'object' && !Array.isArray(data)) ? data : {};
   for (const kind of Object.keys(src)) {
-    if (!KINDS[kind]) { skipped.push(`unknown template type "${kind}"`); continue; }
+    if (!isKind(kind)) { skipped.push(`unknown template type "${String(kind).slice(0, 40)}"`); continue; }
     const items = Array.isArray(src[kind]) ? src[kind] : [];
     for (const t of items) {
       const id = t && String(t.id || '');

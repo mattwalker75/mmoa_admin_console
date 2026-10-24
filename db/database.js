@@ -20,6 +20,7 @@
 //      itself is malformed.
 
 const fs = require('fs');
+const { AsyncLocalStorage } = require('async_hooks');
 const path = require('path');
 const webAppAccess = require('../helpers/webAppAccess');
 const remoteSqlite = require('./remoteSqlite');
@@ -109,68 +110,88 @@ function initSqlite(cfg) {
   // The console only reads and writes rows — the Data Browser discovers
   // whatever tables/columns actually exist at request time.
 
+  // Wait out short locks held by the web app (it uses the same 5 s).
+  try { sqliteDb.configure('busyTimeout', 5000); } catch (e) { /* older driver */ }
+
+  const rawGet = (sql, params) => new Promise((resolve, reject) => {
+    if (openErr) return reject(openErr);
+    sqliteDb.get(sql, params || [], (err, row) => err ? reject(err) : resolve(row));
+  });
+  const rawAll = (sql, params) => new Promise((resolve, reject) => {
+    if (openErr) return reject(openErr);
+    sqliteDb.all(sql, params || [], (err, rows) => err ? reject(err) : resolve(rows));
+  });
+  const rawRun = (sql, params) => new Promise((resolve, reject) => {
+    if (openErr) return reject(openErr);
+    sqliteDb.run(sql, params || [], function (err) {
+      if (err) reject(err); else resolve({ lastID: this.lastID, changes: this.changes });
+    });
+  });
+
+  // ── Transaction gate (mirrors the web app's db/database.js) ────────────
+  // ONE shared connection, so BEGIN/COMMIT are process-wide: a statement
+  // issued while a transaction is open would run INSIDE it (and vanish on
+  // ROLLBACK), and a second BEGIN fails with "cannot start a transaction
+  // within a transaction" — e.g. an Events save during a Full Restore. So:
+  //   - transactions are serialized through `txChain` (one at a time),
+  //   - every public statement waits for the open transaction to finish,
+  //     while the `tx` handed to the body uses the raw path,
+  //   - `inflight` public statements drain before BEGIN,
+  //   - `txStore` lets a stray db.* call made inside a body run raw instead
+  //     of deadlocking on its own transaction.
+  let txChain = Promise.resolve();
+  let inflight = 0;
+  let idleWaiters = [];
+  const txStore = new AsyncLocalStorage();
+  const tx = { engine: 'sqlite', getAsync: rawGet, allAsync: rawAll, runAsync: rawRun };
+
+  async function gated(rawFn, sql, params) {
+    if (txStore.getStore()) return rawFn(sql, params);
+    await txChain;
+    inflight++;
+    try { return await rawFn(sql, params); }
+    finally { if (--inflight === 0) { const w = idleWaiters; idleWaiters = []; w.forEach(r => r()); } }
+  }
+  const whenIdle = () => (inflight === 0 ? Promise.resolve() : new Promise((res) => idleWaiters.push(res)));
+  const withCb = (p, cb) => { p.then(v => cb && cb(null, v), e => cb && cb(e, null)); };
+
   return {
     engine: 'sqlite',
     raw: sqliteDb,
     available: true,
     statusMessage: 'SQLite OK',
 
-    get(sql, params, cb) {
-      if (typeof params === 'function') { cb = params; params = []; }
-      if (openErr) return cb && cb(openErr);
-      sqliteDb.get(sql, params, cb);
-    },
-    all(sql, params, cb) {
-      if (typeof params === 'function') { cb = params; params = []; }
-      if (openErr) return cb && cb(openErr);
-      sqliteDb.all(sql, params, cb);
-    },
-    run(sql, params, cb) {
-      if (typeof params === 'function') { cb = params; params = []; }
-      if (openErr) return cb && cb(openErr);
-      sqliteDb.run(sql, params, function (err) {
-        if (cb) cb(err, err ? null : { lastID: this.lastID, changes: this.changes });
-      });
-    },
+    get(sql, params, cb) { if (typeof params === 'function') { cb = params; params = []; } withCb(gated(rawGet, sql, params), cb); },
+    all(sql, params, cb) { if (typeof params === 'function') { cb = params; params = []; } withCb(gated(rawAll, sql, params), cb); },
+    run(sql, params, cb) { if (typeof params === 'function') { cb = params; params = []; } withCb(gated(rawRun, sql, params), cb); },
 
-    getAsync(sql, params) {
-      return new Promise((resolve, reject) => {
-        if (openErr) return reject(openErr);
-        sqliteDb.get(sql, params || [], (err, row) => err ? reject(err) : resolve(row));
-      });
-    },
-    allAsync(sql, params) {
-      return new Promise((resolve, reject) => {
-        if (openErr) return reject(openErr);
-        sqliteDb.all(sql, params || [], (err, rows) => err ? reject(err) : resolve(rows));
-      });
-    },
-    runAsync(sql, params) {
-      return new Promise((resolve, reject) => {
-        if (openErr) return reject(openErr);
-        sqliteDb.run(sql, params || [], function (err) {
-          if (err) reject(err);
-          else resolve({ lastID: this.lastID, changes: this.changes });
-        });
-      });
-    },
+    getAsync(sql, params) { return gated(rawGet, sql, params); },
+    allAsync(sql, params) { return gated(rawAll, sql, params); },
+    runAsync(sql, params) { return gated(rawRun, sql, params); },
 
     // opts.snapshot: a READ transaction for a point-in-time dump (Backup).
     // SQLite's BEGIN (deferred) takes its snapshot at the first SELECT and
     // holds it until COMMIT; with the web app's WAL journal that snapshot
-    // neither blocks the site's writes nor sees them. Same statement either
-    // way — the option exists so callers can state their intent and MySQL
-    // can honour it (see initMysql).
+    // neither blocks the site's writes nor sees them. fn(tx) must use
+    // tx.getAsync / tx.allAsync / tx.runAsync.
     async transaction(fn, opts) { // eslint-disable-line no-unused-vars
-      const tx = this;
-      await tx.runAsync('BEGIN');
+      const prev = txChain;
+      let release;
+      txChain = new Promise((res) => { release = res; });
       try {
-        const result = await fn(tx);
-        await tx.runAsync('COMMIT');
-        return result;
-      } catch (err) {
-        try { await tx.runAsync('ROLLBACK'); } catch (e) { /* ignore */ }
-        throw err;
+        await prev;
+        while (inflight) await whenIdle();
+        await rawRun('BEGIN');
+        try {
+          const result = await txStore.run(tx, () => fn(tx));
+          await rawRun('COMMIT');
+          return result;
+        } catch (err) {
+          try { await rawRun('ROLLBACK'); } catch (e) { /* ignore */ }
+          throw err;
+        }
+      } finally {
+        release();
       }
     }
   };
@@ -205,6 +226,16 @@ function initMysql(cfg) {
       // identical to the SQLite engine.
       timezone: 'Z',
       dateStrings: true
+    });
+    // timezone:'Z' / dateStrings only govern the DRIVER; the server still
+    // renders and parses TIMESTAMP columns in the SESSION time zone. Pin
+    // every pooled connection to UTC like the web app does, or on a server
+    // in local time every value the console reads, writes or restores
+    // shifts by hours (and a DST fall-back hour collides on restore).
+    pool.on('connection', (conn) => {
+      conn.query("SET time_zone = '+00:00'", (err) => {
+        if (err) console.warn('[db] could not set MySQL session time_zone to UTC:', err.message);
+      });
     });
   } catch (err) {
     console.warn('[db] MySQL pool creation failed:', err.message);

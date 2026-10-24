@@ -100,7 +100,7 @@ function dbImagePaths(tables) {
   }
   return [...out].sort();
 }
-const BUNDLE_NAME_RE = /^[A-Za-z0-9._-]+\.json$/;
+const BUNDLE_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9._-]*\.json$/; // not ".op-status.json"
 // Summary sidecar written next to each bundle (<bundle>.json.meta.json) so
 // the list page never re-parses a multi-MB bundle — see listBundles.
 const META_SUFFIX = '.meta.json';
@@ -566,6 +566,43 @@ module.exports = function (db, appConfig, appConfigModule) {
     return v;
   }
 
+  // Compare a bundle's tables with the LIVE schema before anything is
+  // written. errors = the load would fail (a required column with no value
+  // and no default), warnings = it would silently lose or blank something
+  // (a table the live DB lacks, a live table the bundle lacks, columns the
+  // live DB doesn't have).
+  async function schemaCheck(backupTables) {
+    const errors = [], warnings = [];
+    if (!backupTables || typeof backupTables !== 'object' || Array.isArray(backupTables)) return { errors: ['the bundle has no database tables'], warnings };
+    const live = await dbListTables();
+    const liveSet = new Set(live);
+    const has = (t) => Object.prototype.hasOwnProperty.call(backupTables, t);
+    const extra = Object.keys(backupTables).filter(t => !liveSet.has(t));
+    const missing = live.filter(t => !has(t));
+    if (extra.length) warnings.push(`${extra.length} table(s) in the bundle don't exist here and will be skipped: ${extra.join(', ')}`);
+    if (missing.length) warnings.push(`${missing.length} table(s) here are not in the bundle and will be left EMPTY: ${missing.join(', ')}`);
+    const described = await dbSchema.describeTables(db, live.filter(has));
+    for (const [t, cols] of described) {
+      const rows = backupTables[t];
+      if (!Array.isArray(rows)) { errors.push(`${t} is not a list of rows`); continue; }
+      const names = new Set(cols.map(c => c.name));
+      const unknown = new Set();
+      let nonObj = 0;
+      for (const r of rows) {
+        if (!r || typeof r !== 'object' || Array.isArray(r)) { nonObj++; continue; }
+        for (const k of Object.keys(r)) if (!names.has(k)) unknown.add(k);
+      }
+      if (nonObj) errors.push(`${t}: ${nonObj} row(s) are not records`);
+      if (unknown.size) warnings.push(`${t}: column(s) not in this database will be dropped: ${[...unknown].join(', ')}`);
+      for (const c of cols) {
+        if (!c.notnull || c.dflt != null || c.auto) continue;
+        const i = rows.findIndex(r => r && typeof r === 'object' && (r[c.name] === undefined || r[c.name] === null));
+        if (i !== -1) errors.push(`${t}: row ${i + 1} has no value for required column ${c.name}`);
+      }
+    }
+    return { errors, warnings };
+  }
+
   // The restore REPLACES the whole database, as the form promises: EVERY
   // live table is emptied (alphabetical order, FK checks off), then the
   // tables the backup also has are reloaded. A live table the backup lacks
@@ -581,6 +618,9 @@ module.exports = function (db, appConfig, appConfigModule) {
     const colsByTable = {};
     for (const t of targets) colsByTable[t] = new Set(await dbListColumns(t));
 
+    const sc = await schemaCheck(backupTables);
+    if (sc.errors.length) throw new Error('The bundle does not fit this database — nothing was changed: ' + sc.errors.join('; '));
+    let fkProblems = [];
     const doWork = async (tx) => {
       for (const t of liveTables) {
         await tx.runAsync(`DELETE FROM ${quoteIdent(t)}`, []);
@@ -591,8 +631,20 @@ module.exports = function (db, appConfig, appConfigModule) {
           const keys = Object.keys(row || {}).filter(k => cols.has(k));
           if (!keys.length) continue;
           const sql = `INSERT INTO ${quoteIdent(t)} (${keys.map(quoteIdent).join(', ')}) VALUES (${keys.map(() => '?').join(', ')})`;
-          await tx.runAsync(sql, keys.map(k => bindVal(row[k])));
+          try { await tx.runAsync(sql, keys.map(k => bindVal(row[k]))); }
+          catch (e) { throw new Error(`table ${t}, row ${rows.indexOf(row) + 1}: ${e.message || e}`); }
         }
+      }
+      // Local SQLite can list references to rows that don't exist (FKs are
+      // off for the load). Reported, not fatal: the remote driver doesn't
+      // enforce FKs at all, so a live site can legitimately have some.
+      if (db.engine === 'sqlite' && !db.remote) {
+        try {
+          const v = await tx.allAsync('PRAGMA foreign_key_check', []);
+          const by = {};
+          for (const r of v) by[r.table] = (by[r.table] || 0) + 1;
+          fkProblems = Object.keys(by).map(t => `${t} (${by[t]})`);
+        } catch (e) { /* informational only */ }
       }
     };
 
@@ -623,9 +675,10 @@ module.exports = function (db, appConfig, appConfigModule) {
         await db.runAsync('PRAGMA foreign_keys = ON', []).catch(() => {});
       }
     }
-    const warnings = [];
+    const warnings = sc.warnings.filter(w => !/will be (skipped|left EMPTY)/.test(w));
     if (clearedOnly.length) warnings.push(`${clearedOnly.length} live table(s) not in the backup were emptied: ${clearedOnly.join(', ')}`);
     if (notLive.length) warnings.push(`${notLive.length} table(s) in the backup don't exist in the live schema and were skipped: ${notLive.join(', ')}`);
+    if (fkProblems.length) warnings.push(`rows pointing at records that don't exist: ${fkProblems.join(', ')}`);
     return { tables: targets.length, cleared: clearedOnly, skipped: notLive, warnings };
   }
 
@@ -641,11 +694,33 @@ module.exports = function (db, appConfig, appConfigModule) {
   // operation is running — check and claim happen in one synchronous step,
   // so two requests can't both pass (there is no await in between).
   // Callers must call it BEFORE any await (the access test, the bundle read).
+  // The status is also written to backups/.op-status.json on every change,
+  // so a console that stopped mid-operation (crash, restart, kill) shows on
+  // its next start that the backup / restore was INTERRUPTED and where.
+  const OP_FILE = path.join(BUNDLE_DIR, '.op-status.json');
+  function saveOp() {
+    try { fs.mkdirSync(BUNDLE_DIR, { recursive: true, mode: 0o700 }); fs.writeFileSync(OP_FILE, JSON.stringify(opStatus), { mode: 0o600 }); }
+    catch (e) { /* status display only */ }
+  }
   let opStatus = null;
+  try {
+    const saved = JSON.parse(fs.readFileSync(OP_FILE, 'utf8'));
+    if (saved && typeof saved === 'object') {
+      opStatus = saved;
+      if (saved.running) {
+        const at = (saved.steps || []).find(st => st.state === 'in_progress');
+        opStatus = { ...saved, running: false, ok: false, interrupted: true, finishedAt: null,
+          error: `INTERRUPTED — the console stopped while this ${saved.kind} was running${at ? ` (during "${at.step}")` : ''}. ${saved.kind === 'restore' ? 'Run the restore again to finish it.' : 'Run the backup again.'}` };
+        for (const st of opStatus.steps || []) if (st.state === 'in_progress') st.state = 'failed';
+        saveOp();
+      }
+    }
+  } catch (e) { /* none yet */ }
   function startOp(kind, name) {
     if (opStatus && opStatus.running) return false;
     opStatus = { kind, name: name || null, running: true, ok: null, error: null,
                  startedAt: new Date().toISOString(), finishedAt: null, steps: [] };
+    saveOp();
     return true;
   }
   function busyError(res) {
@@ -657,6 +732,7 @@ module.exports = function (db, appConfig, appConfigModule) {
     const at = new Date().toISOString();
     if (s) { s.state = state; s.detail = detail || s.detail || ''; s.at = at; }
     else opStatus.steps.push({ step, state, detail: detail || '', at });
+    saveOp();
   }
   function finishOp(ok, error) {
     if (!opStatus) return;
@@ -664,6 +740,7 @@ module.exports = function (db, appConfig, appConfigModule) {
     if (!ok) for (const s of opStatus.steps) if (s.state === 'in_progress') { s.state = 'failed'; s.detail = error || s.detail; }
     opStatus.running = false; opStatus.ok = !!ok; opStatus.error = ok ? null : (error || 'failed');
     opStatus.finishedAt = new Date().toISOString();
+    saveOp();
   }
 
   // Structural check of a parsed bundle — the list's badge and the sidecar
@@ -751,6 +828,11 @@ module.exports = function (db, appConfig, appConfigModule) {
       }
       for (const t of Object.keys(tables)) if (!Object.prototype.hasOwnProperty.call(want, t)) bad.push(`${t}: in the dump but not in the manifest`);
       add('Row counts match the manifest', !bad.length, bad.length ? bad.join('; ') : `${Object.keys(want).length} tables checked`);
+      const th = meta.tableHashes;
+      if (th && typeof th === 'object') {
+        const changed = Object.keys(th).filter(t => !Array.isArray(tables[t]) || sha256(Buffer.from(JSON.stringify(tables[t]), 'utf8')) !== th[t]);
+        add('Table contents match the manifest', !changed.length, changed.length ? `${changed.length} table(s) changed since the bundle was made: ${changed.join(', ')}` : `${Object.keys(th).length} tables hashed`);
+      }
       // Files: sha256 of every manifest entry against the bundle's content.
       const files = meta.files || {};
       const web = (j && j.website) || {};
@@ -774,6 +856,15 @@ module.exports = function (db, appConfig, appConfigModule) {
       if (mismatched.length) fileProblems.push(`${mismatched.length} with a different sha256: ${mismatched.slice(0, 10).join(', ')}${mismatched.length > 10 ? '…' : ''}`);
       add('File hashes match the manifest', !fileProblems.length, fileProblems.length ? fileProblems.join('; ') : `${checked} files, ${fmtBytes(Number(meta.totalBytes) || 0)}`);
     }
+    // Every table is a list of row objects (a v1 bundle has no manifest to
+    // catch a damaged table, and a non-list would silently restore as empty).
+    const shapeBad = [];
+    for (const t of Object.keys(tables)) {
+      if (!Array.isArray(tables[t])) { shapeBad.push(`${t} is not a list of rows`); continue; }
+      const nonObj = tables[t].filter(r => !r || typeof r !== 'object' || Array.isArray(r)).length;
+      if (nonObj) shapeBad.push(`${t}: ${nonObj} row(s) are not records`);
+    }
+    add('Database tables are well formed', !shapeBad.length, shapeBad.length ? shapeBad.join('; ') : `${Object.keys(tables).length} tables`);
     // Every image path the database refers to has a file in the bundle.
     const refs = dbImagePaths(tables);
     const upFiles = (j && j.uploads && j.uploads.files && typeof j.uploads.files === 'object') ? j.uploads.files : {};
@@ -957,6 +1048,7 @@ module.exports = function (db, appConfig, appConfigModule) {
         via: accessor.describe(), engine: db.engine, warnings,
         window: { filesStartedAt, filesFinishedAt, dbStartedAt: database._meta.snapshot.startedAt, dbFinishedAt: database._meta.snapshot.finishedAt },
         tables: database._meta.tables, tableCount: database._meta.tableCount, rowCount: database._meta.rowCount,
+        tableHashes: Object.fromEntries(Object.keys(database.tables).map(t => [t, sha256(Buffer.from(JSON.stringify(database.tables[t]), 'utf8'))])),
         files, fileCount: Object.keys(files).length, totalBytes,
         templates: { count: tplTotal, kinds: tplCounts },
         secrets: { localSecrets: !!localSecrets },
@@ -1004,49 +1096,68 @@ module.exports = function (db, appConfig, appConfigModule) {
       add('Write to HTML/images', /__WA_W__/.test(r.stdout || ''), r.stderr || '');
     } catch (e) { add('Write to HTML/images', false, e.message || String(e)); }
     try {
-      const dir = waConfig.joinPath(accessor.appPath, UPLOADS_REL_DIR);
-      const r = await accessor.runCommand(`mkdir -p -- ${shq(dir)} && test -w ${shq(dir)} && echo __WA_W__`, { timeoutMs: 20000 });
-      add('Write to uploads/', /__WA_W__/.test(r.stdout || ''), r.stderr || '');
+      const dirs = [UPLOADS_REL_DIR, ...uploadsHelper.KINDS.map(k => UPLOADS_REL_DIR + '/' + k)].map(d => waConfig.joinPath(accessor.appPath, d));
+      const script = dirs.map(d => `mkdir -p -- ${shq(d)} && test -w ${shq(d)} || echo __WA_NO__${d}`).join('; ') + '; echo __WA_DONE__';
+      const r = await accessor.runCommand(script, { timeoutMs: 20000 });
+      const no = (r.stdout || '').split('\n').filter(l => l.startsWith('__WA_NO__')).map(l => l.slice(9));
+      add('Write to uploads/ and its folders', /__WA_DONE__/.test(r.stdout || '') && !no.length, no.length ? 'not writable: ' + no.join(', ') : (r.stderr || ''));
     } catch (e) { add('Write to uploads/', false, e.message || String(e)); }
     add('Database available', !!(db && db.available), db ? `${db.engine || ''}${db.statusMessage ? ' — ' + db.statusMessage : ''}`.trim() : 'no database handle');
     return { ok: checks.every(c => c.ok), checks };
   }
 
-  // Put back everything the bundle holds, in this order:
-  //   configuration (config.json + local-secrets.json) → website (HTML
-  //   sections, images) → uploads (+ optionally remove files not in the
-  //   bundle) → database (the same all-or-nothing routine the single
-  //   Database restore uses: every live table emptied, the bundle's tables
-  //   reloaded) → console templates → maintenance.json (last, so a bundle
-  //   made with Maintenance Mode off can't lift the operator's maintenance
-  //   screen mid-restore). Then the restart the web app needs is flagged.
+  // Put back everything the bundle holds. The ORDER is what makes a failed
+  // restore safe:
+  //   1. database — first, and all-or-nothing (restoreDatabase checks the
+  //      bundle against the live schema, then empties and reloads every
+  //      table in ONE transaction). If it fails, nothing at all has changed.
+  //   2. configuration (config.json + local-secrets.json)
+  //   3. website (HTML sections, images) and uploads — written, never yet
+  //      removed, so a failure part-way leaves extra files, never missing
+  //      ones (re-running the restore finishes the job)
+  //   4. console templates
+  //   5. removal of website images / uploads the bundle doesn't have
+  //      (opts.pruneFiles) — only after every write above succeeded, and
+  //      never a file the bundle lists as skipped
+  //   6. maintenance.json — last; kept ON when the operator turned
+  //      Maintenance Mode on for this restore (opts.keepMaintenanceOn), so
+  //      visitors don't see the site before the Web App restarts.
   // Only known web-app config keys are written (WA_CONFIG_KEYS); the
   // maintenance command is kept as the host has it unless
-  // opts.restoreCommands — see WA_COMMAND_KEYS.
-  //   opts.pruneFiles       — delete website images + uploads the bundle lacks
-//   opts.keepHostSettings — keep the host's port / server / database / aws.runningInAws (default true)
-  //   opts.restoreTemplates — write the console templates (default true)
-  // Returns { steps, restored, skipped } (restored / skipped for the audit row).
+  // opts.restoreCommands; the host's machine settings (WA_HOST_KEYS +
+  // aws.runningInAws) are kept unless opts.keepHostSettings === false.
+  // Returns { steps, restored, skipped, maintenanceEnabled }.
   async function restoreBundle(bundle, progress = () => {}, opts = {}) {
     const accessor = webAppAccess.createAccessorFromConfig(appConfig);
     const steps = [];
     const restored = [], skipped = [];
     const done = (step, detail, state) => { steps.push({ step, ok: true, detail }); progress(step, state || 'ok', detail); };
 
+    // ── 1. database ──
+    const tables = (bundle.database && bundle.database.tables && typeof bundle.database.tables === 'object') ? bundle.database.tables : null;
+    if (!tables) throw new Error('The bundle has no database tables.');
+    progress('Database', 'in_progress', `replacing ${Object.keys(tables).length} tables in one transaction — this is the long step`);
+    const r = await restoreDatabase(tables);
+    restored.push(`database (${r.tables} tables)`);
+    done('Database', `${r.tables} tables replaced${r.warnings.length ? ' — ' + r.warnings.join('; ') : ''}`, r.warnings.length ? 'warn' : 'ok');
+
+    // ── 2. configuration ──
     progress('Configuration', 'in_progress', 'writing config.json');
     const { json } = await waConfig.readRemoteConfig(accessor);
     const cfg = (bundle.config && typeof bundle.config === 'object' && !Array.isArray(bundle.config)) ? bundle.config : {};
     let nKeys = 0;
-    const keptCommands = [], ignoredKeys = [];
+    const keptCommands = [], ignoredKeys = [], keptHost = [];
     const keepHost = opts.keepHostSettings !== false;
-    const keptHost = [];
     for (const k of Object.keys(cfg)) {
       if (k.startsWith('_')) continue; // the web app's own _comment keys — the host's copy stays
       if (!WA_CONFIG_KEYS.includes(k)) { ignoredKeys.push(k); continue; }
-      if (WA_COMMAND_KEYS.includes(k) && !opts.restoreCommands) { keptCommands.push(k); continue; }
+      if (WA_COMMAND_KEYS.includes(k) && !opts.restoreCommands) {
+        if (JSON.stringify(cfg[k]) !== JSON.stringify(json[k])) keptCommands.push(k);
+        continue;
+      }
       if (keepHost && WA_HOST_KEYS.includes(k) && json[k] !== undefined) { keptHost.push(k); continue; }
       if (keepHost && k === 'aws' && cfg.aws && typeof cfg.aws === 'object' && json.aws && typeof json.aws === 'object' && 'runningInAws' in json.aws) {
-        // Take the bundle's AWS settings but keep how THIS machine gets credentials.
+        // The bundle's AWS settings, but THIS machine's way of getting credentials.
         json.aws = { ...cfg.aws, runningInAws: json.aws.runningInAws };
         keptHost.push('aws.runningInAws'); nKeys++; continue;
       }
@@ -1055,10 +1166,9 @@ module.exports = function (db, appConfig, appConfigModule) {
     await waConfig.writeRemoteConfig(accessor, json);
     restored.push(`config.json (${nKeys} keys)`);
     const cfgNotes = [];
-    if (keptCommands.length) { cfgNotes.push(`${keptCommands.join(', ')} left as on the host (tick "also restore commands" to take it from the bundle)`); skipped.push(keptCommands.join(', ')); }
-    if (ignoredKeys.length) cfgNotes.push(`${ignoredKeys.length} unknown key(s) ignored: ${ignoredKeys.join(', ')}`);
+    if (keptCommands.length) { cfgNotes.push(`${keptCommands.join(', ')} differs from the bundle and was left as on the host (tick "also restore commands" to take it from the bundle)`); skipped.push(keptCommands.join(', ')); }
     if (keptHost.length) cfgNotes.push(`this server's own ${keptHost.join(', ')} kept`);
-    // local-secrets.json — session signing keys, 0600 like the web app writes it.
+    if (ignoredKeys.length) cfgNotes.push(`${ignoredKeys.length} unknown key(s) ignored: ${ignoredKeys.join(', ')}`);
     const secrets = (bundle.localSecrets && typeof bundle.localSecrets === 'object' && !Array.isArray(bundle.localSecrets)) ? bundle.localSecrets : null;
     if (secrets) {
       const sp = waConfig.joinPath(accessor.appPath, SECRETS_FILE);
@@ -1070,10 +1180,10 @@ module.exports = function (db, appConfig, appConfigModule) {
       skipped.push(SECRETS_FILE + ' (not in the bundle)');
       cfgNotes.push(`${SECRETS_FILE} not in the bundle — the Web App generates new session keys on its next start; members sign in again`);
     }
-    const cfgDetail = `${nKeys} top-level keys written to config.json${cfgNotes.length ? ' — ' + cfgNotes.join('; ') : ''}`;
-    done('Configuration', cfgDetail, (keptCommands.length || !secrets) ? 'warn' : 'ok');
-    progress('Website', 'in_progress', 'HTML sections, images');
+    done('Configuration', `${nKeys} top-level keys written to config.json${cfgNotes.length ? ' — ' + cfgNotes.join('; ') : ''}`, (keptCommands.length || !secrets) ? 'warn' : 'ok');
 
+    // ── 3. website + uploads (writes only) ──
+    progress('Website', 'in_progress', 'HTML sections, images');
     const web = bundle.website || {};
     const secs = (web.sections && typeof web.sections === 'object') ? web.sections : {};
     let nSec = 0;
@@ -1092,27 +1202,8 @@ module.exports = function (db, appConfig, appConfigModule) {
       nImg++;
     }
     restored.push(`${nSec} HTML sections`, `${nImg} website images`);
-    let webDetail = `${nSec} HTML sections, ${nImg} images`;
-    if (opts.pruneFiles) {
-      // Images in HTML/images/ the bundle doesn't have (added after the
-      // backup) are removed. Never one the bundle lists as skipped (it
-      // couldn't be read when the bundle was made — the live copy is the
-      // only one), and only image files (README.txt / .gitkeep stay).
-      const keep = new Set([...imgNames, ...(Array.isArray(web.skippedImages) ? web.skippedImages : [])]);
-      const listing = await accessor.readBundle({ files: [], dirs: [imgDir] });
-      const extra = ((listing.dirs[imgDir] || {}).names || []).filter(n => IMAGE_EXT.test(n) && /^[A-Za-z0-9._-]+$/.test(n) && !keep.has(n));
-      if (extra.length) {
-        const r = await accessor.runCommand(`rm -f -- ${extra.map(n => shq(waConfig.joinPath(imgDir, n))).join(' ')}`, { timeoutMs: 60000, comment: 'bundle restore: remove website images not in the bundle' });
-        if (r.code !== 0) throw new Error(`Could not remove website images not in the bundle: ${(r.stderr || '').trim() || 'exit ' + r.code}`);
-      }
-      restored.push(`${extra.length} website images not in the bundle removed`);
-      webDetail += `; ${extra.length} image(s) not in the bundle removed`;
-    } else {
-      skipped.push('website images not in the bundle (kept)');
-    }
-    done('Website', webDetail);
+    done('Website', `${nSec} HTML sections, ${nImg} images`);
 
-    // uploads/** — same chunked transport; only contract-shaped paths.
     const up = (bundle.uploads && bundle.uploads.files && typeof bundle.uploads.files === 'object') ? bundle.uploads.files : {};
     const upRels = Object.keys(up).filter(uploadsHelper.isValidRel);
     progress('Uploads', 'in_progress', `${upRels.length} files`);
@@ -1122,44 +1213,9 @@ module.exports = function (db, appConfig, appConfigModule) {
       nUp++;
     }
     restored.push(`${nUp} uploads`);
-    let upDetail = `${nUp} files written to uploads/`;
-    if (opts.pruneFiles) {
-      // Files in uploads/<kind>/ that the bundle doesn't have (an image
-      // uploaded after the backup, or an orphan) — except ones the bundle
-      // lists as skipped (unreadable when it was made; the live copy is the
-      // only one).
-      const upDirs = uploadsHelper.KINDS.map(k => waConfig.joinPath(accessor.appPath, UPLOADS_REL_DIR + '/' + k));
-      const listing = await accessor.readBundle({ files: [], dirs: upDirs });
-      const have = new Set([...upRels, ...((bundle.uploads && Array.isArray(bundle.uploads.skipped)) ? bundle.uploads.skipped : [])]);
-      const extra = [];
-      uploadsHelper.KINDS.forEach((k, i) => {
-        for (const n of ((listing.dirs[upDirs[i]] || {}).names || [])) {
-          const rel = `${k}/${n}`;
-          if (uploadsHelper.isValidRel(rel) && !have.has(rel)) extra.push(rel);
-        }
-      });
-      if (extra.length) {
-        const args = extra.map(rel => shq(uploadsHelper.absPath(accessor, rel))).join(' ');
-        const r = await accessor.runCommand(`rm -f -- ${args}`, { timeoutMs: 60000, comment: 'bundle restore: remove uploads not in the bundle' });
-        if (r.code !== 0) throw new Error(`Could not remove uploads not in the bundle: ${(r.stderr || '').trim() || 'exit ' + r.code}`);
-      }
-      restored.push(`${extra.length} uploads not in the bundle removed`);
-      upDetail += `; ${extra.length} file(s) not in the bundle removed`;
-    } else {
-      skipped.push('uploads not in the bundle (kept)');
-    }
-    done('Uploads', upDetail);
+    done('Uploads', `${nUp} files written to uploads/`);
 
-    const tables = (bundle.database && bundle.database.tables && typeof bundle.database.tables === 'object') ? bundle.database.tables : null;
-    if (!tables) throw new Error('The bundle has no database tables.');
-    progress('Database', 'in_progress', `replacing ${Object.keys(tables).length} tables — this is the long step`);
-    const r = await restoreDatabase(tables);
-    const dbDetail = `${r.tables} tables replaced${r.warnings.length ? ' — ' + r.warnings.join('; ') : ''}`;
-    restored.push(`database (${r.tables} tables)`);
-    done('Database', dbDetail, r.warnings.length ? 'warn' : 'ok');
-
-    // This console's raffle text templates — files on THIS machine
-    // (Settings → Templates folder); same-id files replaced, others kept.
+    // ── 4. console templates ──
     const tplData = (bundle.templates && typeof bundle.templates === 'object' && !Array.isArray(bundle.templates)) ? bundle.templates : null;
     progress('Templates', 'in_progress', 'console raffle text templates');
     if (opts.restoreTemplates === false) {
@@ -1174,13 +1230,46 @@ module.exports = function (db, appConfig, appConfigModule) {
       done('Templates', `${t.written} written to ${tpl.baseDir(appConfig)} (same-id files replaced, others kept)${t.skipped.length ? ' — skipped: ' + t.skipped.join('; ') : ''}`, t.skipped.length ? 'warn' : 'ok');
     }
 
-    // maintenance.json — last (see above). The web app re-reads it on the
-    // next request, so a bundle made with Maintenance Mode ON brings the
-    // maintenance screen back; the page says so.
+    // ── 5. remove files the bundle doesn't have ──
+    if (opts.pruneFiles) {
+      progress('Remove extra files', 'in_progress', 'website images and uploads added after the backup');
+      // Never a file the bundle lists as skipped (unreadable when it was
+      // made — the live copy is the only one); images only (README.txt /
+      // .gitkeep stay); upload names must match the uploads contract.
+      const keepImg = new Set([...imgNames, ...(Array.isArray(web.skippedImages) ? web.skippedImages : [])]);
+      const keepUp = new Set([...upRels, ...((bundle.uploads && Array.isArray(bundle.uploads.skipped)) ? bundle.uploads.skipped : [])]);
+      const upDirs = uploadsHelper.KINDS.map(k => waConfig.joinPath(accessor.appPath, UPLOADS_REL_DIR + '/' + k));
+      const listing = await accessor.readBundle({ files: [], dirs: [imgDir, ...upDirs] });
+      const extraImg = ((listing.dirs[imgDir] || {}).names || []).filter(n => IMAGE_EXT.test(n) && /^[A-Za-z0-9._-]+$/.test(n) && !keepImg.has(n));
+      const extraUp = [];
+      uploadsHelper.KINDS.forEach((k, i) => {
+        for (const n of ((listing.dirs[upDirs[i]] || {}).names || [])) {
+          const rel = `${k}/${n}`;
+          if (uploadsHelper.isValidRel(rel) && !keepUp.has(rel)) extraUp.push(rel);
+        }
+      });
+      const paths = [...extraImg.map(n => waConfig.joinPath(imgDir, n)), ...extraUp.map(rel => uploadsHelper.absPath(accessor, rel))];
+      for (let i = 0; i < paths.length; i += 200) {
+        const rr = await accessor.runCommand(`rm -f -- ${paths.slice(i, i + 200).map(shq).join(' ')}`, { timeoutMs: 60000, comment: 'bundle restore: remove files not in the bundle' });
+        if (rr.code !== 0) throw new Error(`Could not remove files not in the bundle: ${(rr.stderr || '').trim() || 'exit ' + rr.code}`);
+      }
+      restored.push(`${extraImg.length} website images + ${extraUp.length} uploads not in the bundle removed`);
+      done('Remove extra files', `${extraImg.length} website image(s), ${extraUp.length} upload(s) not in the bundle removed`);
+    } else {
+      skipped.push('files not in the bundle (kept)');
+    }
+
+    // ── 6. maintenance.json ──
     progress('Maintenance file', 'in_progress', MAINT_FILE);
     const maint = (bundle.maintenance && typeof bundle.maintenance === 'object' && !Array.isArray(bundle.maintenance)) ? bundle.maintenance : null;
     let maintenanceEnabled = null;
-    if (maint) {
+    if (opts.keepMaintenanceOn) {
+      // The operator turned Maintenance Mode on for this restore: leave it
+      // on until they've restarted the Web App (the page offers both).
+      maintenanceEnabled = true;
+      skipped.push(`${MAINT_FILE} (kept ON for this restore)`);
+      done('Maintenance file', `left ON (you enabled it for this restore) — the bundle's was ${maint ? (maint.enabled === true ? 'on' : 'off') : 'not included'}. Restart the Web App, then turn Maintenance Mode off.`, 'warn');
+    } else if (maint) {
       await accessor.writeFile(waConfig.joinPath(accessor.appPath, MAINT_FILE), jsonFileText(maint));
       maintenanceEnabled = maint.enabled === true;
       restored.push(`${MAINT_FILE} (enabled: ${maintenanceEnabled})`);
@@ -1358,15 +1447,26 @@ module.exports = function (db, appConfig, appConfigModule) {
             this.say('ok', 'Bundle verified.');
             const go = await window.uiConfirm('Restore ' + this.selected + ' now? This REPLACES the Web App configuration' + (this.keepHostSettings ? ' (keeping the port, TLS, database connection and AWS credential source of this server)' : '') + ', session keys, website files, images and uploads' + (this.pruneFiles ? ' (removing images not in the bundle)' : '') + ', the ENTIRE database' + (this.restoreTemplates ? ' and the raffle text templates' : '') + '.', { title: 'Restore the Web App?', confirmLabel: 'Restore now', cancelLabel: 'Cancel' });
             if (!go) { this.say('info', 'Restore canceled.'); await this.offerDisableMaintenance('The restore was canceled.'); return; }
-            this.say('info', 'Step 4/4 — restoring (configuration + secrets → website → uploads → database → templates → maintenance file)…');
+            this.say('info', 'Step 4/4 — restoring (database → configuration + secrets → website → uploads → templates → removing extra files → maintenance file)…');
             this.sw.op = null; this.startWatch();
-            const r = await this.post('/backup-restore/bundle/restore', { name: this.selected, confirm: this.confirmText.trim(), restoreCommands: !!this.restoreCommands, pruneFiles: !!this.pruneFiles, keepHostSettings: !!this.keepHostSettings, restoreTemplates: !!this.restoreTemplates });
+            const r = await this.post('/backup-restore/bundle/restore', { name: this.selected, confirm: this.confirmText.trim(), restoreCommands: !!this.restoreCommands, pruneFiles: !!this.pruneFiles, keepHostSettings: !!this.keepHostSettings, restoreTemplates: !!this.restoreTemplates, keepMaintenanceOn: !!this.maintOn });
             this.stopWatch(); await this.pollOnce();
             (r.steps || []).forEach(s => this.say(s.ok ? 'ok' : 'err', s.step + ' — ' + s.detail));
-            if (!r.ok) { this.say('err', 'Restore failed: ' + (r.error || 'unknown error') + ' — the Web App may be partially restored; fix the cause and run the restore again.'); await this.offerDisableMaintenance('The restore FAILED — the Web App may be partially restored.'); return; }
+            if (!r.ok) {
+              const dbFirst = /does not fit this database|Database/.test(r.error || '') && !(r.steps || []).some(s => s.step === 'Database' && s.ok);
+              this.say('err', 'Restore failed: ' + (r.error || 'unknown error') + (dbFirst ? ' — nothing was changed (the database step runs first and was rolled back).' : ' — the database is restored but some files may not be; fix the cause and run the restore again.'));
+              await this.offerDisableMaintenance('The restore FAILED.'); return;
+            }
             this.say('ok', 'Restore complete.');
-            if (r.maintenanceEnabled) { this.say('warn', 'The bundle was made with Maintenance Mode ENABLED and its maintenance.json is back — disable it from Web App Website when ready.'); this.maintOn = true; }
-            await this.offerDisableMaintenance('The restore finished.');
+            this.maintOn = !!r.maintenanceEnabled;
+            // The Web App reads config.json and its session keys only at
+            // start-up: restart BEFORE anyone is let back in.
+            const rs = await window.uiConfirm('Restart the Web App now so it loads the restored configuration and session keys?' + (this.maintOn ? ' Maintenance Mode stays on until you turn it off.' : ''), { title: 'Restart the Web App', confirmLabel: 'Restart now', cancelLabel: 'Later', danger: false });
+            if (rs) {
+              const p = await this.post('/web-app-settings/power', { action: 'restart' });
+              this.say(p.ok ? 'ok' : 'err', 'Restart: ' + (p.ok ? 'done' : (p.error || p.stderr || 'failed — use Web App Settings → Restart')));
+            } else this.say('warn', 'Restart the Web App (Web App Settings) before letting visitors back in — it is still running the old configuration.');
+            await this.offerDisableMaintenance('The restore finished' + (rs ? ' and the Web App was restarted.' : '.'));
             window.location.href = '/backup-restore?ok=bundle&restored=1';
           } finally { this.busy = ''; }
         },
@@ -1379,7 +1479,7 @@ module.exports = function (db, appConfig, appConfigModule) {
       <div class="grid lg:grid-cols-2 gap-6">
         <section>
           <h3 class="text-base font-semibold text-slate-900 dark:text-slate-100">Web App Full Backup</h3>
-          <p class="mt-1 text-sm text-slate-500 dark:text-slate-400">One click captures everything needed to rebuild the Web App as it is right now: <code class="font-mono">config.json</code>, <code class="font-mono">local-secrets.json</code> (session keys — members stay signed in), <code class="font-mono">maintenance.json</code>, the website (HTML sections, images), every uploaded image (uploads/ — flyers, prize, nonprofit and board photos), the whole database as one point-in-time snapshot, plus this console's raffle text templates and settings — with a manifest (row counts, a sha256 per file) that Verify checks against. Over EC2 (SSM) files larger than ~18 KB can't be read and are listed as warnings — use SSH or Local access for a complete bundle.</p>
+          <p class="mt-1 text-sm text-slate-500 dark:text-slate-400">One click captures everything needed to rebuild the Web App as it is right now: <code class="font-mono">config.json</code>, <code class="font-mono">local-secrets.json</code> (session keys — members stay signed in), <code class="font-mono">maintenance.json</code>, the website (HTML sections, images), every uploaded image (uploads/ — flyers, prize, nonprofit and board photos), the whole database as one point-in-time snapshot, plus this console's raffle text templates and settings — with a manifest (row counts, a hash per table and per file) that Verify checks against. Over EC2 (SSM) every file is captured, in pieces, so a photo-heavy site takes a while — SSH or Local access is faster.</p>
           <div class="mt-3 text-xs text-amber-600 dark:text-amber-400"><strong>Sensitive:</strong> a bundle holds the Web App's secrets (SMTP / AWS credentials, session keys) and nonprofit password hashes. Treat it like the database.</div>
           <div class="mt-4">
             <button type="button" class="btn-primary" x-on:click="fullBackup()" :disabled="!!busy" :class="busy ? 'opacity-50 cursor-not-allowed' : ''">
@@ -1534,6 +1634,9 @@ module.exports = function (db, appConfig, appConfigModule) {
       database: `Web App database restored${req.query.n ? ' (' + (parseInt(req.query.n, 10) || 0) + ' tables)' : ''}.`
     };
     const okMsg = okMap[req.query.ok] ? `<div class="flash-ok mb-4">${okMap[req.query.ok]}</div>` : '';
+    const interruptedMsg = (opStatus && opStatus.interrupted)
+      ? `<div class="flash-error mb-4"><strong>${escapeHtml(opStatus.kind === 'restore' ? 'A Full Restore was interrupted.' : 'A Full Backup was interrupted.')}</strong> ${escapeHtml(opStatus.error || '')}${opStatus.name ? ` Bundle: <code class="font-mono">${escapeHtml(opStatus.name)}</code>.` : ''} Started ${escapeHtml(String(opStatus.startedAt || '').replace('T', ' ').slice(0, 19))} UTC.</div>`
+      : '';
 
     // ── Group 1: Console settings (local file) ──
     const consoleGroup = `
@@ -1664,6 +1767,7 @@ module.exports = function (db, appConfig, appConfigModule) {
       </header>
 
       ${flash('error', req.query.error)}
+      ${interruptedMsg}
       ${okMsg}
       ${flash('warn', req.query.warn)}
       ${waRestartPrompt(!!req.query.restored)}
@@ -2087,7 +2191,7 @@ module.exports = function (db, appConfig, appConfigModule) {
 
   router.post('/backup-restore/bundle/upload', requireAdmin, (req, res) => {
     bundleUpload.single('bundle')(req, res, (err) => {
-      if (err) return res.redirect('/backup-restore?error=' + encodeURIComponent(err.message || 'Upload failed'));
+      if (err) return res.redirect('/backup-restore?error=' + encodeURIComponent(err.code === 'LIMIT_FILE_SIZE' ? 'That bundle is larger than the 256 MB upload limit — copy it into the console\'s backups/ folder instead.' : (err.message || 'Upload failed')));
       if (!req.file || !req.file.buffer) return res.redirect('/backup-restore?error=' + encodeURIComponent('No file received.'));
       let parsed;
       try { parsed = JSON.parse(req.file.buffer.toString('utf8')); }
@@ -2095,7 +2199,9 @@ module.exports = function (db, appConfig, appConfigModule) {
       const s = summarizeBundle(parsed);
       if (!s.valid) return res.redirect('/backup-restore?error=' + encodeURIComponent('Not a usable bundle: ' + s.problems.join('; ')));
       const base = path.basename(req.file.originalname).replace(/[^A-Za-z0-9._-]/g, '_');
-      const name = safeBundleName(base) || `web_app_bundle_${bundleStamp()}.json`;
+      let name = safeBundleName(base) || `web_app_bundle_${bundleStamp()}.json`;
+      // Never overwrite a bundle already here (same name, other content).
+      if (fs.existsSync(path.join(BUNDLE_DIR, name))) name = uniqueBundleName(name.replace(/\.json$/i, ''));
       try {
         writeBundleFile(name, req.file.buffer);
         const st = fs.statSync(path.join(BUNDLE_DIR, name));
@@ -2119,6 +2225,14 @@ module.exports = function (db, appConfig, appConfigModule) {
     try {
       const { bundle } = readBundleFile(name);
       r = verifyBundle(bundle);
+      try {
+        const sc = await schemaCheck(bundle.database && bundle.database.tables);
+        r.checks.push({ name: 'Fits this database', ok: !sc.errors.length && !sc.warnings.length, level: sc.errors.length ? 'error' : 'warn',
+          detail: [...sc.errors, ...sc.warnings].join('; ') || 'every table and column matches' });
+        if (sc.errors.length) r.valid = false;
+      } catch (e) {
+        r.checks.push({ name: 'Fits this database', ok: false, level: 'warn', detail: 'could not read the live schema: ' + (e.message || e) });
+      }
     } catch (err) {
       if (!fs.existsSync(path.join(BUNDLE_DIR, name))) return res.status(404).json({ ok: false, error: `Bundle ${name} not found.` });
       r = { valid: false, checks: [{ name: 'JSON parses', ok: false, level: 'error', detail: err.message || String(err) }], summary: null };
@@ -2147,6 +2261,7 @@ module.exports = function (db, appConfig, appConfigModule) {
     const pruneFiles = !(req.body && (req.body.pruneFiles === false || req.body.pruneUploads === false));
     const keepHostSettings = !(req.body && req.body.keepHostSettings === false);
     const restoreTemplates = !(req.body && req.body.restoreTemplates === false);
+    const keepMaintenanceOn = !!(req.body && req.body.keepMaintenanceOn === true);
     // Claim the one-operation slot BEFORE the awaits below (the access test
     // takes seconds) — otherwise two restores could both pass the check.
     if (!startOp('restore', name)) return busyError(res);
@@ -2157,7 +2272,10 @@ module.exports = function (db, appConfig, appConfigModule) {
       const v = verifyBundle(loaded.bundle);
       if (!v.valid) throw new Error('Bundle failed verification: ' + v.checks.filter(c => !c.ok && c.level === 'error').map(c => `${c.name} — ${c.detail}`).join('; '));
       const warns = v.checks.filter(c => !c.ok && c.level !== 'error');
-      mark('Bundle', warns.length ? 'warn' : 'ok', `${name} verified${warns.length ? ' — ' + warns.map(c => c.name).join(', ') : ''}`);
+      // Fit against THIS database before anything is written.
+      const sc = await schemaCheck(loaded.bundle.database && loaded.bundle.database.tables);
+      if (sc.errors.length) throw new Error('The bundle does not fit this database — nothing was changed: ' + sc.errors.join('; '));
+      mark('Bundle', (warns.length || sc.warnings.length) ? 'warn' : 'ok', `${name} verified${warns.length ? ' — ' + warns.map(c => c.name).join(', ') : ''}${sc.warnings.length ? ' — ' + sc.warnings.join('; ') : ''}`);
     } catch (err) {
       finishOp(false, err.message || String(err));
       await audit(req, 'backup.restore', { kind: 'backup', id: name, label: name, summary: `Restore refused: ${err.message || err}` });
@@ -2166,7 +2284,9 @@ module.exports = function (db, appConfig, appConfigModule) {
     // Enforced here too, not just in the browser: the whole point is never
     // starting a restore the transport can't finish.
     mark('Access check', 'in_progress', 'testing read / write / command access');
-    const access = await testAccess();
+    let access;
+    try { access = await testAccess(); }
+    catch (e) { access = { ok: false, checks: [{ name: 'Access test', ok: false, detail: e.message || String(e) }] }; }
     if (!access.ok) {
       const failed = access.checks.filter(c => !c.ok).map(c => c.name).join(', ');
       finishOp(false, 'Access check failed: ' + failed);
@@ -2174,7 +2294,7 @@ module.exports = function (db, appConfig, appConfigModule) {
     }
     mark('Access check', 'ok', '');
     try {
-      const r = await restoreBundle(loaded.bundle, mark, { restoreCommands, pruneFiles, keepHostSettings, restoreTemplates });
+      const r = await restoreBundle(loaded.bundle, mark, { restoreCommands, pruneFiles, keepHostSettings, restoreTemplates, keepMaintenanceOn });
       finishOp(true);
       console.log(`[backup] bundle restored: ${loaded.name}`);
       // Written AFTER the database step, so it lands in the restored
@@ -2185,7 +2305,7 @@ module.exports = function (db, appConfig, appConfigModule) {
     } catch (err) {
       finishOp(false, err.message || String(err));
       console.error('[backup] bundle restore failed:', err);
-      await audit(req, 'backup.restore', { kind: 'backup', id: loaded.name, label: loaded.name, summary: `Restore FAILED (the Web App may be partially restored): ${err.message || err}` });
+      await audit(req, 'backup.restore', { kind: 'backup', id: loaded.name, label: loaded.name, summary: `Restore FAILED: ${err.message || err}` });
       res.status(500).json({ ok: false, error: err.message || String(err) });
     }
   });
