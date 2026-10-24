@@ -471,11 +471,19 @@ backup — it can be missing the latest writes or be torn mid-checkpoint.
 Use the console's bundle / database export (a read transaction, one
 snapshot), or on the host `sqlite3 mmoa_web_app.db ".backup backup.db"`.
 
-- **Console settings** — this console's config (excluding session keys
-  and admin passwords). The `webApp` section's Start / Stop / Restart
-  commands are kept as they are unless you tick **Also restore the shell
-  commands**; appearance values that aren't an uploaded `/images/…` file
-  or a plain color are dropped (the page says so).
+- **Console settings** — this console's config plus the Appearance
+  background images (excluding session keys, admin accounts and the raffle
+  templates themselves, which are in the Full Backup). The file must be a
+  console-settings backup. Every value is checked with the Settings pages'
+  own rules first — anything that would stop the console starting or lock
+  admins out (a busy or invalid port, TLS without usable key / certificate,
+  secure-only cookies over plain http, a session age of 0 …) is refused and
+  nothing is written. Each ticked section replaces that section (a stored
+  SSH key / AWS secret / MySQL password the file lacks is kept). **Web App
+  access** (connection: mode, folder, SSH / EC2 settings, and the Start /
+  Stop / Restart commands) is only taken from the file when you tick that
+  box. The result lists what needs a console restart. Exports and restores
+  are in the Audit log.
 - **Web App configuration / website** — selective restore by section.
   Only known config keys are offered; `maintenanceCommand` needs the
   commands box ticked.

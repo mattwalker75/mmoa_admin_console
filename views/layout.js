@@ -44,7 +44,8 @@ function themeCss(appConfig, isLoginPage) {
   let bg = '';
   const img = cssUrlSafe(cfg.backgroundImage);
   if (img) {
-    bg = `body { background-image: url('${img}'); background-size: cover; background-position: center; background-attachment: fixed; background-repeat: no-repeat; }`;
+    // The colour stays underneath, so a missing image still shows the chosen colour.
+    bg = `body { ${isSafeCssColor(cfg.backgroundColor) ? `background-color: ${cfg.backgroundColor}; ` : ''}background-image: url('${img}'); background-size: cover; background-position: center; background-attachment: fixed; background-repeat: no-repeat; }`;
   } else if (isSafeCssColor(cfg.backgroundColor)) {
     bg = `body { background-color: ${cfg.backgroundColor}; }`;
   }

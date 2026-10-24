@@ -572,8 +572,11 @@ function ec2Accessor(cfg) {
   // is shell-safe), no matter what the original command contained.
   function wrap(command) {
     if (!runAsUser) return command;
+    // Only a plain Linux user name ever reaches the shell (a restored or
+    // hand-edited config could carry anything), and it is quoted too.
+    if (!/^[a-z_][a-z0-9_-]*\$?$/.test(runAsUser)) throw configError(`Web App EC2 "run as user" is not a valid user name: ${JSON.stringify(runAsUser)}`);
     const b64 = Buffer.from(String(command), 'utf8').toString('base64');
-    return `su - ${runAsUser} -c ${shQuote(`echo ${b64} | base64 -d | sh`)}`;
+    return `su - ${shQuote(runAsUser)} -c ${shQuote(`echo ${b64} | base64 -d | sh`)}`;
   }
 
   function ssmRun(command, opts) {

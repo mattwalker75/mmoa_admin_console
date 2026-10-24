@@ -54,6 +54,7 @@ const { requireAdmin } = require('../middleware/auth');
 const webAppAccess = require('../helpers/webAppAccess');
 const waConfig = require('../helpers/webAppConfig');
 const dbSchema = require('../helpers/dbSchema');
+const csRestore = require('../helpers/consoleSettingsRestore');
 const tpl = require('../helpers/templates');
 const CONSOLE_VERSION = (() => { try { return require('../package.json').version || null; } catch (e) { return null; } })();
 
@@ -198,6 +199,12 @@ function sanitizeTheme(t) {
       if (isSafeCssColor(blk.backgroundColor)) blk.backgroundColor = blk.backgroundColor.trim();
       else { dropped.push(`theme.${k}.backgroundColor`); blk.backgroundColor = ''; }
     }
+    for (const ok of ['cardOpacity', 'surfaceOpacity']) {
+      if (blk[ok] === undefined) continue;
+      const n = Number(blk[ok]);
+      if (!Number.isFinite(n)) { dropped.push(`theme.${k}.${ok}`); delete blk[ok]; continue; }
+      blk[ok] = Math.min(1, Math.max(0.3, n));
+    }
     out[k] = blk;
   }
   return { theme: out, dropped };
@@ -223,7 +230,8 @@ const SETTINGS_LABELS = {
   port: 'Port', appTitle: 'App title', appSubtitle: 'App subtitle', publicBaseUrl: 'Public base URL',
   server: 'Server / TLS', sessionKeyMode: 'Session key mode', sessionMaxAgeHours: 'Session max age',
   passwordMinLength: 'Password min length', database: 'Database', security: 'Security',
-  theme: 'Appearance (theme)', webApp: 'Web App access', timeZone: 'Event time zone'
+  theme: 'Appearance (theme + its images)', webApp: 'Web App access (connection + commands)', timeZone: 'Event time zone',
+  templates: 'Templates folder'
 };
 const WA_CONFIG_LABELS = {
   port: 'Port', appTitle: 'App title', appSubtitle: 'App subtitle', orgName: 'Organization name',
@@ -275,7 +283,7 @@ function normalizeArray(v) {
 const BACKUP_KEYS = [
   'port', 'appTitle', 'appSubtitle', 'publicBaseUrl',
   'server', 'sessionKeyMode', 'sessionMaxAgeHours', 'passwordMinLength',
-  'database', 'security', 'theme', 'webApp', 'timeZone'
+  'database', 'security', 'theme', 'webApp', 'timeZone', 'templates'
 ];
 
 function stripForExport(value) {
@@ -296,11 +304,16 @@ function buildBackup(appConfig) {
     exportedAt: new Date().toISOString(),
     exportedFrom: os.hostname(),
     appTitle: appConfig.appTitle || '',
-    version: 1
+    version: 2
   }};
   for (const k of BACKUP_KEYS) {
     if (appConfig[k] !== undefined) out[k] = stripForExport(appConfig[k]);
   }
+  // restartPending describes the Web App's current state, not a setting.
+  if (out.webApp && typeof out.webApp === 'object') delete out.webApp.restartPending;
+  // The Appearance images themselves (files under public/images/), so a
+  // restored theme never points at a missing or since-replaced file.
+  out._images = csRestore.exportImages(appConfig.theme);
   return out;
 }
 
@@ -346,7 +359,12 @@ function parseUpload(req, res) {
   }
   let parsed;
   try {
-    parsed = JSON.parse(req.file.buffer.toString('utf8'));
+    // Accept what the browser accepts: a UTF-8 byte-order mark, or UTF-16.
+    const buf = req.file.buffer;
+    let text = (buf[0] === 0xff && buf[1] === 0xfe) ? buf.slice(2).toString('utf16le')
+      : (buf[0] === 0xfe && buf[1] === 0xff) ? Buffer.from(buf.slice(2)).swap16().toString('utf16le')
+      : buf.toString('utf8');
+    parsed = JSON.parse(text.replace(/^\uFEFF/, ''));
   } catch (err) {
     res.redirect('/backup-restore?error=' + encodeURIComponent('Not valid JSON: ' + err.message));
     return null;
@@ -397,7 +415,7 @@ function selectiveRestoreForm(kind, action, confirmText, headsHtml, validKeys, l
                     const f = e.target.files && e.target.files[0];
                     if (!f) return;
                     this.fileName = f.name;
-                    const ds = this.\$el.dataset;
+                    const ds = this.\$root.dataset;
                     const knd = ds.kind;
                     const valid = JSON.parse(ds.valid || 'null');
                     const labels = JSON.parse(ds.labels || '{}');
@@ -419,7 +437,7 @@ function selectiveRestoreForm(kind, action, confirmText, headsHtml, validKeys, l
                         keys = Object.keys(cfg).filter(k => !k.startsWith('_'));
                         if (valid) keys = keys.filter(k => valid.includes(k));
                       } else {
-                        if (metaType && metaType !== 'admin-console-settings') { this.parseError = 'This is not a console settings backup.'; return; }
+                        if (metaType !== 'admin-console-settings') { this.parseError = 'This is not a console settings backup (download one with Backup above).'; return; }
                         keys = Object.keys(parsed).filter(k => !k.startsWith('_'));
                         if (valid) keys = keys.filter(k => valid.includes(k));
                       }
@@ -461,7 +479,7 @@ function selectiveRestoreForm(kind, action, confirmText, headsHtml, validKeys, l
 
     ${commandsOpt ? `<label class="flex items-start gap-2 text-xs text-amber-700 dark:text-amber-300" x-show="sections.length" x-cloak>
       <input type="checkbox" name="restore_commands" value="1" class="mt-0.5">
-      <span>${escapeHtml(RESTORE_COMMANDS_LABEL)}</span>
+      <span>${escapeHtml(typeof commandsOpt === 'string' ? commandsOpt : RESTORE_COMMANDS_LABEL)}</span>
     </label>` : ''}
     <label class="flex items-start gap-2 text-sm text-slate-700 dark:text-slate-200" x-show="sections.length" x-cloak>
       <input type="checkbox" x-model="confirmed" class="mt-0.5">
@@ -1762,8 +1780,8 @@ module.exports = function (db, appConfig, appConfigModule) {
             <div class="font-semibold mb-1 text-slate-600 dark:text-slate-300">Included keys</div>
             <div class="flex flex-wrap gap-1.5">${keyList}</div>
             <div class="mt-3 text-slate-400">
-              <strong>Excluded:</strong> <code class="font-mono">sessionKeys</code> (per host) and
-              <code class="font-mono">local_admins.json</code> (separate file, password hashes).
+              <strong>Also included:</strong> the Appearance background images. <strong>Excluded:</strong> <code class="font-mono">sessionKeys</code> (per host),
+              <code class="font-mono">local_admins.json</code> (admin accounts — a new console asks you to create one) and the raffle text templates themselves (they are in the Web App Full Backup).
             </div>
             <div class="mt-3 text-amber-600 dark:text-amber-400">
               <strong>Sensitive:</strong> contains secrets in plain text — the Web App SSH private key / AWS keys and the MySQL password. Store securely.
@@ -1773,11 +1791,11 @@ module.exports = function (db, appConfig, appConfigModule) {
         </section>
         <section class="card surface-target card-pad">
           <h3 class="text-base font-semibold text-slate-900 dark:text-slate-100">Restore</h3>
-          <p class="mt-1 text-sm text-slate-500 dark:text-slate-400">Upload a console-settings backup, then pick which sections to restore. Selected sections are merged into <code class="font-mono">config.json</code>.</p>
+          <p class="mt-1 text-sm text-slate-500 dark:text-slate-400">Upload a console-settings backup, then pick which sections to restore. Each selected section REPLACES that section of <code class="font-mono">config.json</code> (a secret the file doesn't carry is kept). Every value is checked first; anything that would stop the console starting or lock you out is refused and nothing is written.</p>
           ${selectiveRestoreForm('settings', '/backup-restore/import',
             'I understand this will overwrite the selected console settings.',
-            `<div class="flash-error text-xs"><strong>Heads up:</strong> restoring the <code class="font-mono">database</code> section requires a restart. Other sections take effect on the next request. The Start / Stop / Restart commands inside <code class="font-mono">webApp</code> are kept as they are unless you tick the commands box below.</div>`,
-            BACKUP_KEYS, SETTINGS_LABELS, true)}
+            `<div class="flash-error text-xs"><strong>Heads up:</strong> port, server / TLS, public base URL, session and security settings and the database take effect after the console restarts — the result says which. Title, appearance, time zone and templates folder apply right away. <strong>Web App access</strong> (where and how this console reaches the Web App, and its Start / Stop / Restart commands) is only taken from the file if you tick the box below.</div>`,
+            BACKUP_KEYS, SETTINGS_LABELS, 'Also restore the Web App access: the connection (mode, folder, SSH / EC2 settings) and the Start / Stop / Restart commands. Leave this off unless you made the backup yourself — a different folder or host changes which scripts the power bar runs.')}
         </section>
       </div>`;
 
@@ -1901,6 +1919,7 @@ module.exports = function (db, appConfig, appConfigModule) {
     try {
       const backup = buildBackup(appConfig);
       const json = JSON.stringify(backup, null, 2);
+      audit(req, 'backup.settings_export', { kind: 'settings', label: 'Console settings', summary: `Console settings downloaded (${Object.keys(backup).filter(k => !k.startsWith('_')).length} sections, ${Object.keys(backup._images || {}).length} appearance image(s))` }).catch(() => {});
       res.set('Content-Type', 'application/json; charset=utf-8');
       res.set('Content-Disposition', `attachment; filename="admin_console_config_${dateStamp()}.json"`);
       res.send(json);
@@ -1910,44 +1929,50 @@ module.exports = function (db, appConfig, appConfigModule) {
     }
   });
 
-  router.post('/backup-restore/import', requireAdmin, uploadJson('/backup-restore'), (req, res) => {
+  router.post('/backup-restore/import', requireAdmin, uploadJson('/backup-restore'), async (req, res) => {
     const parsed = parseUpload(req, res);
     if (!parsed) return;
     const selected = normalizeArray(req.body.sections);
-    // Restore only sections that are selected AND present AND recognized.
-    const recognized = BACKUP_KEYS.filter(k => selected.includes(k) && Object.prototype.hasOwnProperty.call(parsed, k));
-    if (recognized.length === 0) {
-      return res.redirect('/backup-restore?error=' + encodeURIComponent('No sections selected to restore.'));
+    const sections = BACKUP_KEYS.filter(k => selected.includes(k) && Object.prototype.hasOwnProperty.call(parsed, k));
+    if (!sections.length) return res.redirect('/backup-restore?error=' + encodeURIComponent('No sections selected to restore.'));
+    const restoreConnection = req.body.restore_commands === '1';
+    let plan;
+    try { plan = await csRestore.planRestore(parsed, appConfig, { sections, restoreConnection }); }
+    catch (e) { return res.redirect('/backup-restore?error=' + encodeURIComponent('Restore failed: ' + (e.message || e))); }
+    if (plan.errors.length) {
+      await audit(req, 'backup.settings_restore', { kind: 'settings', label: req.file && req.file.originalname, summary: `Refused: ${plan.errors.join('; ')}` });
+      return res.redirect('/backup-restore?error=' + encodeURIComponent('Nothing was restored — ' + plan.errors.join('; ')));
     }
-    const restoreCommands = req.body.restore_commands === '1';
+    const warnings = plan.warnings.slice();
+    const updates = Object.assign({}, plan.updates);
+    if (sections.includes('theme')) {
+      const { theme, dropped } = sanitizeTheme(parsed.theme);
+      if (dropped.length) warnings.push(`unsafe appearance value(s) dropped: ${dropped.join(', ')}`);
+      updates.theme = theme;
+    }
+    // All-or-nothing: remember the live values, apply, save; on a failed
+    // save put every key back so memory and disk agree.
+    const before = {};
+    for (const k of Object.keys(updates)) before[k] = appConfig[k] === undefined ? undefined : JSON.parse(JSON.stringify(appConfig[k]));
     try {
-      const warnings = [];
-      for (const k of recognized) {
-        if (k === 'webApp') {
-          // The Start / Stop / Restart commands are run on the web app host
-          // by the power bar; keep the live ones unless explicitly asked.
-          const incoming = (parsed.webApp && typeof parsed.webApp === 'object' && !Array.isArray(parsed.webApp)) ? Object.assign({}, parsed.webApp) : {};
-          if (!restoreCommands) {
-            incoming.commands = (appConfig.webApp && appConfig.webApp.commands) || appConfigModule.defaults.webApp.commands;
-            warnings.push('webApp.commands (Start / Stop / Restart) kept as they were — tick the commands box to restore them from the file');
-          }
-          appConfig.webApp = incoming;
-        } else if (k === 'theme') {
-          const { theme, dropped } = sanitizeTheme(parsed.theme);
-          appConfig.theme = theme;
-          if (dropped.length) warnings.push(`unsafe appearance value(s) dropped: ${dropped.join(', ')}`);
-        } else {
-          appConfig[k] = parsed[k];
-        }
-      }
+      const nImg = plan.images.length ? csRestore.writeImages(plan.images) : 0;
+      for (const k of Object.keys(updates)) appConfig[k] = updates[k];
       appConfigModule.save();
-      // Re-load so defaults are back-filled into the imported data.
-      appConfigModule.load();
-      res.redirect('/backup-restore?ok=settings&n=' + recognized.length +
-        (warnings.length ? '&warn=' + encodeURIComponent(warnings.join('; ')) : ''));
+      appConfigModule.load(); // back-fill defaults into the restored sections
+      if (updates.theme) for (const blk of ['login', 'app']) {
+        const rel = updates.theme[blk] && updates.theme[blk].backgroundImage;
+        if (csRestore.imageMissing(rel)) warnings.push(`appearance image ${rel} is not on this console (the file has no copy of it) — set a new one under Settings → Appearance`);
+      }
+      const changed = Object.keys(updates).filter(k => JSON.stringify(before[k]) !== JSON.stringify(updates[k]));
+      await audit(req, 'backup.settings_restore', { kind: 'settings', label: req.file && req.file.originalname,
+        summary: `Restored: ${sections.join(', ')}${changed.length ? ` (changed: ${changed.join(', ')})` : ' (nothing changed)'}${nImg ? `; ${nImg} appearance image(s) written` : ''}${restoreConnection ? '; Web App access + commands taken from the file' : ''}` });
+      const restartMsg = plan.restart.length ? `RESTART THE CONSOLE to apply: ${[...new Set(plan.restart)].join(', ')}` : '';
+      res.redirect('/backup-restore?ok=settings&n=' + sections.length +
+        ((warnings.length || restartMsg) ? '&warn=' + encodeURIComponent([restartMsg, ...warnings].filter(Boolean).join('; ')) : ''));
     } catch (err) {
+      for (const k of Object.keys(before)) { if (before[k] === undefined) delete appConfig[k]; else appConfig[k] = before[k]; }
       console.error('[backup] import failed:', err);
-      res.redirect('/backup-restore?error=' + encodeURIComponent('Restore failed: ' + (err.message || 'unknown error')));
+      res.redirect('/backup-restore?error=' + encodeURIComponent('Restore failed, nothing was changed: ' + (err.message || 'unknown error')));
     }
   });
 
