@@ -419,13 +419,17 @@ the order is what makes a failed restore safe:
    the maintenance command stays as the host has it unless you tick **Also
    restore the shell commands**) + `local-secrets.json` (mode 600). **Keep
    this server's own machine settings** (on by default) keeps the host's
-   `port`, `server` (TLS / proxy), `database` connection and
-   `aws.runningInAws` — they describe the machine, not the site, and the
-   EC2 install script sets them per instance.
+   `port`, `server` (TLS / proxy), `database` connection,
+   `aws.runningInAws` and `aws.region`, and its `publicBaseUrl` when it has
+   one — they describe the machine and its address, not the site, and the
+   EC2 install script sets them per instance (a setting the host doesn't
+   have stays at its default). Site settings the bundle doesn't have go back
+   to their defaults. File permissions (e.g. a 0600 `config.json`) are kept.
 3. website (HTML sections, images) and uploads — written, never removed
    at this point, so a failure here leaves extra files, never missing ones;
    running the restore again finishes the job.
-4. console templates — ticked by default; same-id templates replaced.
+4. console templates — ticked by default; the set is made to match the
+   bundle exactly (templates added after the backup are removed).
 5. **Remove images not in the bundle** (on by default) — website images and
    uploads added after the backup are deleted, only after every write above
    succeeded. A file the bundle lists as *skipped* is never removed, nor
