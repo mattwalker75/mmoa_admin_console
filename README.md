@@ -219,10 +219,12 @@ chmod 0700 backups
   as-is from the reference console (plus atomic SSH writes). The v2 upload
   path was exercised against a local ssh2 test server and a mocked SSM
   executor; local mode and all three database engines end to end.
-- **EC2 (SSM) reads are capped at ~18 KB of file.** Thumbnails in ec2 mode
-  are fetched from the web app's public `/uploads` URL instead, and a
-  rebuild bundle made over SSM skips (and lists) any upload larger than
-  that. Use SSH or local access for a complete bundle.
+- **EC2 (SSM) is complete but slow for big files.** SSM returns ~23 KB of
+  output per command, so a file read falls back to pieces (~15 KB each, one
+  SSM command per piece) and a write goes up in ~40 KB commands. Nothing is
+  skipped, but a photo-heavy rebuild bundle or restore over SSM can take a
+  long time — SSH or local access is the fast path. Thumbnails in ec2 mode
+  are fetched from the web app's public `/uploads` URL when the site is up.
 - **Remote SQLite doesn't enforce foreign keys** (one `sqlite3` process
   per statement). Nonprofits / Events / Raffles → Delete remove child rows
   explicitly; a raw Data Browser delete of a parent row on a remote SQLite

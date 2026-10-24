@@ -341,8 +341,9 @@ this machine (`web_app_bundle_<stamp>.json`, downloadable):
 
 The files are read first, then the database, and the manifest records
 both windows (`_meta.window`) — on a quiet site they are milliseconds
-apart. Over EC2 (SSM) access, files larger than ~18 KB can't be read and
-are listed as warnings — use SSH / Local for a complete bundle. For the
+apart. Over EC2 (SSM) access every file is captured, but in ~15 KB pieces
+(one SSM command each), so a photo-heavy site takes a long time to bundle
+or restore — SSH / Local are much faster. For the
 demo data (31 nonprofits with photos, two events with flyer + cover, two
 raffles with photos) a bundle is about 12 MB.
 

@@ -68,8 +68,8 @@ resizes first ([public/js/image-upload.js](../public/js/image-upload.js):
 canvas, ≤ 1600 px long edge, JPEG 0.82). Thumbnails go through the
 console's `/wa-uploads/<kind>/<file>` proxy (CSP allows only same-origin
 images): local / SSH read the file; EC2 fetches the web app's public
-`<publicBaseUrl>/uploads/…` URL (SSM can only return ~18 KB of file),
-falling back to an SSM read for small files. Lifecycle and
+`<publicBaseUrl>/uploads/…` URL (one HTTP fetch instead of a pieced SSM
+read), falling back to an SSM read when the site is unreachable. Lifecycle and
 maintenance commands run **from** the web app directory (`cwd = appPath`).
 
 `helpers/webAppConfig.js` builds on it: `readRemoteConfig` refuses a
