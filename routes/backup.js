@@ -147,6 +147,9 @@ const FILE_PARALLEL = 4;
 // Largest HTML section a restore writes: the editor saves through a 64 KB
 // JSON request, so it could never save back anything bigger.
 const SECTION_MAX_BYTES = 60 * 1024;
+// Largest single image an Image Restore writes (the editor allows 8 MB, the
+// web app's portal up to its configured uploads.maxMb).
+const RESTORE_IMAGE_MAX = 32 * 1024 * 1024;
 // On the first failure no new item is started, and the call only rejects
 // once every transfer already in flight has settled — so a failed restore
 // is never reported (and its lock released) while files are still being
@@ -831,6 +834,19 @@ module.exports = function (db, appConfig, appConfigModule) {
       const sw = await accessor.runCommand(cmd, { timeoutMs: 60000, comment: 'remove stale temp files' });
       return String(sw.stdout || '').split('\n').filter(Boolean).length;
     } catch (e) { return 0; }
+  }
+
+  // Upload paths the LIVE database points at (only the tables that hold
+  // them) — files a clean-up must never remove.
+  async function liveImagePaths() {
+    const out = {};
+    try {
+      const live = new Set(await dbListTables());
+      for (const t of ['org_images', 'events', 'raffles', 'raffle_images', 'board_members']) {
+        if (live.has(t)) out[t] = await db.allAsync(`SELECT * FROM ${quoteIdent(t)}`, []);
+      }
+    } catch (e) { return null; }
+    return dbImagePaths(out);
   }
 
   // backups/.restore-log.jsonl — one line per database-replacing restore,
@@ -1948,6 +1964,9 @@ module.exports = function (db, appConfig, appConfigModule) {
                    class="block text-sm text-slate-600 dark:text-slate-300 file:mr-3 file:rounded-lg file:border-0 file:bg-brand-600 file:px-4 file:py-2 file:text-sm file:font-semibold file:text-white hover:file:bg-brand-700">
             <p x-show="typeErr" x-cloak class="text-xs text-red-600 dark:text-red-300" x-text="typeErr"></p>
             <div class="flash-error text-xs"><strong>Heads up:</strong> same-name images are overwritten and are live on the next page load (no restart). Over EC2 (SSM) access this can take several minutes — keep the page open until it finishes.</div>
+            <input type="hidden" name="prune_files" value="0">
+            <label class="flex items-start gap-2 text-xs text-slate-700 dark:text-slate-200"><input type="checkbox" name="prune_files" value="1" checked class="h-4 w-4 mt-0.5">
+              <span>Remove images added after the backup, so the site looks as it did (website images and uploads not in the file; photos the database uses are always kept).</span></label>
             <label class="flex items-start gap-2 text-sm"><input type="checkbox" class="h-4 w-4 mt-0.5" x-model="confirmed">
               <span>I understand this overwrites website images and uploads with the same names.</span></label>
             <button type="submit" class="btn-danger" :disabled="!fileName || !confirmed" :class="(!fileName || !confirmed) ? 'opacity-50 cursor-not-allowed' : ''">Restore images</button>
@@ -2221,8 +2240,9 @@ module.exports = function (db, appConfig, appConfigModule) {
         try { sections[key] = await accessor.readFile(p, { encoding: 'utf8' }); }
         catch (e) { /* skip a missing/unreadable fragment */ }
       }));
+      const missingSections = WA_SECTION_KEYS.filter(k => typeof sections[k] !== 'string');
       const envelope = {
-        _meta: { type: 'web-app-website', exportedAt: new Date().toISOString(), exportedFrom: os.hostname(), via: accessor.describe(), version: 1 },
+        _meta: { type: 'web-app-website', exportedAt: new Date().toISOString(), exportedFrom: os.hostname(), via: accessor.describe(), version: 1, missing: missingSections },
         sections
       };
       res.set('Content-Type', 'application/json; charset=utf-8');
@@ -2265,10 +2285,10 @@ module.exports = function (db, appConfig, appConfigModule) {
     if (!startOp('website restore', req.file && req.file.originalname)) return res.redirect('/backup-restore?error=' + encodeURIComponent(`A ${opStatus.kind} is running — wait for it to finish.`));
     try {
       const accessor = webAppAccess.createAccessorFromConfig(appConfig);
-      await Promise.all(recognized.map((key) => {
-        const p = waConfig.joinPath(accessor.appPath, 'HTML/' + key + '.html');
-        return accessor.writeFile(p, sections[key]);
-      }));
+      const written = [];
+      try {
+        for (const key of recognized) { await accessor.writeFile(waConfig.joinPath(accessor.appPath, 'HTML/' + key + '.html'), sections[key]); written.push(key); }
+      } catch (e) { throw new Error(`${e.message || e} — ${written.length ? 'already restored: ' + written.join(', ') : 'none restored'}; run the restore again`); }
       finishOp(true);
       await audit(req, 'backup.website_restore', { kind: 'backup', label: req.file && req.file.originalname, summary: `HTML sections restored: ${recognized.map(k => `${k} (${Buffer.byteLength(sections[k], 'utf8')} B)`).join(', ')}` });
       res.redirect('/backup-restore?ok=wawebsite&n=' + recognized.length);
@@ -2296,7 +2316,12 @@ module.exports = function (db, appConfig, appConfigModule) {
       const imgDir = waConfig.joinPath(accessor.appPath, IMAGES_REL_DIR);
       const upDirs = uploadsHelper.KINDS.map(k => waConfig.joinPath(accessor.appPath, UPLOADS_REL_DIR + '/' + k));
       const b = await accessor.readBundle({ files: [], dirs: [imgDir, ...upDirs] });
-      const names = ((b.dirs[imgDir] || {}).names || []).filter(n => IMAGE_EXT.test(n) && IMG_NAME_RE.test(n)).sort();
+      for (const d of [imgDir, ...upDirs]) { const e = b.dirs[d] && b.dirs[d].err; if (e) throw new Error(`Could not list ${d}: ${e}`); }
+      const allImg = (b.dirs[imgDir] || {}).names || [];
+      const names = allImg.filter(n => IMAGE_EXT.test(n) && IMG_NAME_RE.test(n) && !n.startsWith('.')).sort();
+      const problems = [];
+      const odd = allImg.filter(n => !names.includes(n) && !/^(README\.txt|\.gitkeep)$/.test(n) && !n.startsWith('.'));
+      if (odd.length) problems.push(`${odd.length} file(s) in HTML/images not backed up (only .png .jpg .gif .webp .svg with plain names): ${odd.join(', ')}`);
       const upRels = [];
       uploadsHelper.KINDS.forEach((k, i) => {
         for (const n of ((b.dirs[upDirs[i]] || {}).names || [])) if (uploadsHelper.isValidRel(`${k}/${n}`)) upRels.push(`${k}/${n}`);
@@ -2305,31 +2330,37 @@ module.exports = function (db, appConfig, appConfigModule) {
       const sha = (buf) => crypto.createHash('sha256').update(buf).digest('hex');
       const images = {}, files = {}, uploads = {}, uploadFiles = {}, skipped = [];
       let bytes = 0;
-      for (const n of names) {
+      // Same reader and parallelism as the Full Backup (small files in one
+      // command, 4 at a time).
+      await mapPool(names, FILE_PARALLEL, async (n) => {
         try {
-          const buf = Buffer.from(await accessor.readFileChunked(waConfig.joinPath(imgDir, n)));
+          const buf = Buffer.from(await accessor.readFile(waConfig.joinPath(imgDir, n)));
           images[n] = buf.toString('base64');
           files[n] = { size: buf.length, sha256: sha(buf) };
           bytes += buf.length;
         } catch (e) { skipped.push(`${IMAGES_REL_DIR}/${n}: ${e.message || e}`); }
-      }
-      for (const rel of upRels) {
+      });
+      await mapPool(upRels, FILE_PARALLEL, async (rel) => {
         try {
-          const buf = Buffer.from(await accessor.readFileChunked(waConfig.joinPath(accessor.appPath, UPLOADS_REL_DIR + '/' + rel)));
+          const buf = Buffer.from(await accessor.readFile(waConfig.joinPath(accessor.appPath, UPLOADS_REL_DIR + '/' + rel)));
           uploads[rel] = buf.toString('base64');
           uploadFiles[rel] = { size: buf.length, sha256: sha(buf) };
           bytes += buf.length;
         } catch (e) { skipped.push(`${UPLOADS_REL_DIR}/${rel}: ${e.message || e}`); }
-      }
+      });
+      if (skipped.length) problems.push(`${skipped.length} file(s) could not be read: ${skipped.slice(0, 5).join('; ')}`);
+      const refs = await liveImagePaths();
+      const notOnDisk = (refs || []).filter(r => !upRels.includes(r));
+      if (notOnDisk.length) problems.push(`${notOnDisk.length} photo(s) the database points at are not on the host, so not in this backup: ${notOnDisk.slice(0, 5).join(', ')}`);
       const nImg = Object.keys(images).length, nUp = Object.keys(uploads).length;
       const envelope = {
         _meta: { type: 'web-app-images', exportedAt: new Date().toISOString(), exportedFrom: os.hostname(), via: accessor.describe(), version: 2,
-          count: nImg, uploadCount: nUp, bytes, files, uploadFiles, skipped },
+          count: nImg, uploadCount: nUp, bytes, files, uploadFiles, skipped, warnings: problems },
         images,
         uploads
       };
       await audit(req, 'backup.images_export', { kind: 'backup', label: 'Images',
-        summary: `${nImg} website image(s) + ${nUp} upload(s), ${fmtBytes(bytes)}${skipped.length ? `, ${skipped.length} unreadable` : ''}` });
+        summary: `${nImg} website image(s) + ${nUp} upload(s), ${fmtBytes(bytes)}${problems.length ? ' — WARNINGS: ' + problems.join(' | ') : ''}` });
       res.set('Content-Type', 'application/json; charset=utf-8');
       res.set('Content-Disposition', `attachment; filename="web_app_images_${dateStamp()}.json"`);
       res.send(JSON.stringify(envelope));
@@ -2395,36 +2426,82 @@ module.exports = function (db, appConfig, appConfigModule) {
       const buf = Buffer.from(b64, 'base64');
       if (!buf.length) throw new Error(`"${label}" in the file is empty. Nothing was restored.`);
       if (m && m.sha256 && sha(buf) !== m.sha256) throw new Error(`"${label}" does not match its checksum — the file is damaged. Nothing was restored.`);
-      if (buf.length > uploadsHelper.MAX_BYTES) throw new Error(`"${label}" is larger than 8 MB (the editor's limit). Nothing was restored.`);
+      // A file that isn't the image its name says (or is huge) is SKIPPED
+      // with a warning — never written, but it doesn't block the others.
+      if (buf.length > RESTORE_IMAGE_MAX) return { skip: `"${label}" is larger than ${RESTORE_IMAGE_MAX / 1024 / 1024} MB` };
       const ext = (/\.([A-Za-z0-9]+)$/.exec(label) || [])[1].toLowerCase();
       const kind = isUpload ? uploadsHelper.sniffExt(buf) : (sniff(buf) || {}).kind;
       const same = kind && (kind === ext || (kind === 'jpg' && ext === 'jpeg'));
-      if (!same) throw new Error(`"${label}" is not a ${ext.toUpperCase()} image (its contents are ${kind ? kind.toUpperCase() : 'not an image'}). Nothing was restored.`);
-      return buf;
+      if (!same) return { skip: `"${label}" is not a ${ext.toUpperCase()} image (its contents are ${kind ? kind.toUpperCase() : 'not an image'})` };
+      return { buf };
     };
-    const imgBufs = {}, upBufs = {};
+    const imgBufs = {}, upBufs = {}, notWritten = [];
     try {
-      for (const n of names) imgBufs[n] = decode(n, images[n], manifest[n], false);
-      for (const r of rels) upBufs[r] = decode(`uploads/${r}`, uploads[r], upManifest[r], true);
+      for (const n of names) { const d = decode(n, images[n], manifest[n], false); if (d.skip) notWritten.push(d.skip); else imgBufs[n] = d.buf; }
+      for (const r of rels) { const d = decode(`uploads/${r}`, uploads[r], upManifest[r], true); if (d.skip) notWritten.push(d.skip); else upBufs[r] = d.buf; }
     } catch (e) { return refuse(e.message); }
+    const wNames = names.filter(n => imgBufs[n]), wRels = rels.filter(r => upBufs[r]);
+    if (!wNames.length && !wRels.length) return refuse('Nothing was restored — ' + notWritten.join('; '));
+    const pruneFiles = req.body.prune_files !== '0';
     if (!webAppAccess.isConfigured(appConfig)) return back('Web App access is not configured (Settings → Web App).');
-    let nImg = 0, nUp = 0;
-    const total = names.length + rels.length;
+    let nImg = 0, nUp = 0, same = 0, removed = 0;
+    const total = wNames.length + wRels.length;
     // One file operation at a time with the Full Backup / Restore (whose
     // clean-up step would otherwise delete what this writes).
     if (!startOp('image restore', req.file.originalname)) return back(`A ${opStatus.kind} is running — wait for it to finish.`);
     try {
       const accessor = webAppAccess.createAccessorFromConfig(appConfig);
+      await sweepTempFiles(accessor);
       const imgDir = waConfig.joinPath(accessor.appPath, IMAGES_REL_DIR);
+      // Over SSH / EC2 a file already identical on the host isn't sent
+      // again (one checksum command instead of many upload pieces) — a
+      // re-run after a failure only sends what's missing.
+      const remote = accessor.mode !== 'local';
+      const unchanged = async (abs, buf) => {
+        if (!remote) return false;
+        try {
+          const r = await accessor.runCommand(`(sha256sum ${shq(abs)} 2>/dev/null || shasum -a 256 ${shq(abs)} 2>/dev/null) | cut -c1-64`, { timeoutMs: 30000 });
+          return String(r.stdout || '').trim() === sha(buf);
+        } catch (e) { return false; }
+      };
+      const put = async (abs, buf) => { if (await unchanged(abs, buf)) { same++; return; } await accessor.writeFileChunked(abs, buf); };
       // mkdir -p + atomic write; ≤40 KB SSM pieces on EC2; 4 at a time.
       mark('Images', 'in_progress', `${total} files`);
-      await mapPool(names, FILE_PARALLEL, async (n) => { await accessor.writeFileChunked(waConfig.joinPath(imgDir, n), imgBufs[n]); nImg++; });
-      await mapPool(rels, FILE_PARALLEL, async (r) => { await accessor.writeFileChunked(waConfig.joinPath(accessor.appPath, UPLOADS_REL_DIR + '/' + r), upBufs[r]); nUp++; });
-      mark('Images', 'ok', `${nImg} website image(s), ${nUp} upload(s)`);
+      await mapPool(wNames, FILE_PARALLEL, async (n) => { await put(waConfig.joinPath(imgDir, n), imgBufs[n]); nImg++; });
+      await mapPool(wRels, FILE_PARALLEL, async (r) => { await put(waConfig.joinPath(accessor.appPath, UPLOADS_REL_DIR + '/' + r), upBufs[r]); nUp++; });
+      mark('Images', 'ok', `${nImg} website image(s), ${nUp} upload(s)${same ? ` (${same} already identical)` : ''}`);
+      if (pruneFiles) {
+        // Like the Full restore: files added after the backup go, so the
+        // site looks as it did — but never a file the backup lists as
+        // skipped / not written, nor an upload the live database points at.
+        const keepImg = new Set([...names, ...((parsed._meta && Array.isArray(parsed._meta.skipped)) ? parsed._meta.skipped.map(x => String(x).split(':')[0].replace(/^HTML\/images\//, '')) : [])]);
+        const refs = await liveImagePaths();
+        if (refs === null) throw new Error('could not read the database to protect the photos it uses — files not in the backup were NOT removed');
+        const keepUp = new Set([...rels, ...refs]);
+        const upDirs = uploadsHelper.KINDS.map(k => waConfig.joinPath(accessor.appPath, UPLOADS_REL_DIR + '/' + k));
+        const listing = await accessor.readBundle({ files: [], dirs: [imgDir, ...upDirs] });
+        for (const d of [imgDir, ...upDirs]) { const e = listing.dirs[d] && listing.dirs[d].err; if (e) throw new Error(`Could not list ${d} to remove files not in the backup: ${e}`); }
+        const hasImages = names.length > 0 || type === 'web-app-images';
+        const extra = [];
+        if (hasImages) for (const n of ((listing.dirs[imgDir] || {}).names || [])) if (IMAGE_EXT.test(n) && IMG_NAME_RE.test(n) && !keepImg.has(n)) extra.push(waConfig.joinPath(imgDir, n));
+        if (parsed.uploads || (parsed._meta && parsed._meta.uploadCount !== undefined)) uploadsHelper.KINDS.forEach((k, i) => {
+          for (const n of ((listing.dirs[upDirs[i]] || {}).names || [])) { const rel = `${k}/${n}`; if (uploadsHelper.isValidRel(rel) && !keepUp.has(rel)) extra.push(uploadsHelper.absPath(accessor, rel)); }
+        });
+        for (let i = 0; i < extra.length; i += 200) {
+          const rr = await accessor.runCommand(`rm -f -- ${extra.slice(i, i + 200).map(shq).join(' ')}`, { timeoutMs: 60000, comment: 'image restore: remove files not in the backup' });
+          if (rr.code !== 0) throw new Error(`Could not remove files not in the backup: ${(rr.stderr || '').trim() || 'exit ' + rr.code}`);
+        }
+        removed = extra.length;
+      }
       finishOp(true);
       await audit(req, 'backup.images_restore', { kind: 'backup', label: req.file.originalname,
-        summary: `${nImg} website image(s) + ${nUp} upload(s) restored from ${type === 'web-app-images' ? 'an Image Backup' : 'a full bundle'}${ignored.length ? `; ${ignored.length} with names that aren't allowed ignored` : ''}` });
-      res.redirect(`/backup-restore?ok=waimages&n=${nImg}&u=${nUp}` + (ignored.length ? '&warn=' + encodeURIComponent(`${ignored.length} entr${ignored.length === 1 ? 'y' : 'ies'} with names that aren't allowed were ignored: ${ignored.slice(0, 5).join(', ')}${ignored.length > 5 ? '…' : ''}`) : ''));
+        summary: `${nImg} website image(s) + ${nUp} upload(s) restored from ${type === 'web-app-images' ? 'an Image Backup' : 'a full bundle'}${removed ? `; ${removed} file(s) not in the backup removed` : ''}${notWritten.length ? `; NOT written: ${notWritten.join('; ')}` : ''}${ignored.length ? `; ${ignored.length} with names that aren't allowed ignored` : ''}` });
+      const warns = [];
+      if (removed) warns.push(`${removed} file(s) added after the backup were removed (photos the database uses are always kept).`);
+      if (notWritten.length) warns.push(`Not written: ${notWritten.slice(0, 5).join('; ')}${notWritten.length > 5 ? '…' : ''}.`);
+      if (ignored.length) warns.push(`${ignored.length} entr${ignored.length === 1 ? 'y' : 'ies'} with names that aren't allowed were ignored: ${ignored.slice(0, 5).join(', ')}${ignored.length > 5 ? '…' : ''}`);
+      if (parsed._meta && Array.isArray(parsed._meta.warnings) && parsed._meta.warnings.length) warns.push('When this backup was made: ' + parsed._meta.warnings.join(' | '));
+      res.redirect(`/backup-restore?ok=waimages&n=${nImg}&u=${nUp}` + (warns.length ? '&warn=' + encodeURIComponent(warns.join(' ')) : ''));
     } catch (err) {
       finishOp(false, err.message || String(err));
       console.error('[backup] web app images import failed:', err);

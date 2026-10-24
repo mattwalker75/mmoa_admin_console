@@ -711,11 +711,29 @@ function ec2Accessor(cfg) {
       let r = await ssmRun(`mkdir -p -- ${shQuote(dirOf(remotePath))} && : > ${shQuote(tmp)}`, { timeoutMs: 60000, comment: 'Admin console upload (start)' });
       if (r.status !== 'Success') await fail('mkdir', r);
       // 2) append each base64 piece (decoded on the host).
-      let chunks = 0;
+      // A failed piece is retried — after checking the temp file's size, so a
+      // piece that did land (SSM reported a failure anyway) is never
+      // appended twice. Pieces are whole base64 quads, so bytes are exact.
+      const sizeNow = async () => {
+        const q = await ssmRun(`stat -c %s ${shQuote(tmp)} 2>/dev/null || wc -c < ${shQuote(tmp)}`, { timeoutMs: 30000, comment: 'Admin console upload (size)' }).catch(() => null);
+        const n = q && q.status === 'Success' ? parseInt(String(q.stdout || '').trim(), 10) : NaN;
+        return Number.isFinite(n) ? n : null;
+      };
+      let chunks = 0, bytesSent = 0;
       for (let off = 0; off < b64.length; off += per) {
         const piece = b64.slice(off, off + per);
-        r = await ssmRun(`printf '%s' ${shQuote(piece)} | base64 -d >> ${shQuote(tmp)}`, { timeoutMs: 60000, comment: 'Admin console upload (chunk)' });
-        if (r.status !== 'Success') await fail(`chunk ${chunks + 1}`, r);
+        const pieceBytes = Buffer.from(piece, 'base64').length;
+        let ok = false;
+        for (let attempt = 0; attempt < 3 && !ok; attempt++) {
+          if (attempt) await new Promise(res => setTimeout(res, 500 * attempt * attempt));
+          r = await ssmRun(`printf '%s' ${shQuote(piece)} | base64 -d >> ${shQuote(tmp)}`, { timeoutMs: 60000, comment: 'Admin console upload (chunk)' }).catch(e => ({ status: 'Failed', stderr: e.message }));
+          if (r.status === 'Success') { ok = true; break; }
+          const have = await sizeNow();
+          if (have === bytesSent + pieceBytes) { ok = true; break; }   // it landed after all
+          if (have !== bytesSent) break;                               // half-written / unknown: give up
+        }
+        if (!ok) await fail(`chunk ${chunks + 1}`, r);
+        bytesSent += pieceBytes;
         chunks++;
       }
       // 3) verify the byte count, then move into place.

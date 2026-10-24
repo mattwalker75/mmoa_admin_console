@@ -507,15 +507,17 @@ snapshot), or on the host `sqlite3 mmoa_web_app.db ".backup backup.db"`.
 - **Images** — *Image Backup* downloads every image with a size and
   SHA-256 each: the website images in `HTML/images/` (Web App Website →
   Images) and the uploads in `uploads/` (event flyers and covers, raffle
-  photos, nonprofit photos, board photos). The HTML-sections backup does
-  not include them. *Image Restore* takes that file or a full bundle (its
-  images are used), checks every checksum (an Image Backup's or a bundle's own) and that each
-  file really is the image its name says (≤ 8 MB, uploads jpg / png / webp,
-  like the editor) before writing anything, then
-  writes each file back to its folder, replacing same-name files and
-  leaving the rest alone. An upload only shows on the site while the
-  database still points at it, so after losing database rows restore the
-  database (or the full bundle) as well.
+  photos, nonprofit photos, board photos). It records what it couldn't
+  include (oddly named files, unreadable files, photos the database points
+  at that are missing on the host) and the restore shows those notes.
+  *Image Restore* takes that file or a full bundle, checks every checksum
+  first (a damaged file refuses the restore), skips — with a warning —
+  any file that isn't the image its name says, writes the rest (4 at a time;
+  over SSH / EC2 a file already identical on the host isn't re-sent), and
+  by default removes website images and uploads added after the backup so
+  the site looks as it did — never a photo the database uses. One file
+  operation runs at a time. The HTML-sections backup does not include
+  images.
 - **Web App database** — full JSON snapshot; restore replaces *all* data
   and requires typing `RESTORE`. Files up to 256 MB; the file must be a
   database backup; checked against this database first (a NUL character
