@@ -178,4 +178,22 @@ function importAll(appConfig, data) {
   return { written, skipped };
 }
 
-module.exports = { KINDS, GROUP_HINTS, DEFAULT_DIR, TemplateError, baseDir, list, save, remove, slugify, exportAll, importAll };
+// After importAll for a FULL restore: remove every template whose id isn't
+// in the bundle, so the set matches the backup exactly (no later templates
+// left behind, no starter template re-seeded into a set that had deleted
+// it). Only kinds the bundle carries are touched. Returns the removed ids.
+function pruneAll(appConfig, data) {
+  const removed = [];
+  const src = (data && typeof data === 'object' && !Array.isArray(data)) ? data : {};
+  for (const kind of Object.keys(src)) {
+    if (!isKind(kind) || !Array.isArray(src[kind])) continue;
+    const keep = new Set(src[kind].map(t => String((t && t.id) || '')).filter(id => ID_RE.test(id)));
+    for (const t of list(appConfig, kind)) {
+      if (keep.has(t.id)) continue;
+      try { fs.unlinkSync(path.join(kindDir(appConfig, kind), t.id + '.json')); removed.push(`${kind}/${t.id}`); } catch (e) { /* gone already */ }
+    }
+  }
+  return removed;
+}
+
+module.exports = { KINDS, GROUP_HINTS, DEFAULT_DIR, TemplateError, baseDir, list, save, remove, slugify, exportAll, importAll, pruneAll };

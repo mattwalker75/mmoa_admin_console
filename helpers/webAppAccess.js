@@ -192,6 +192,14 @@ async function genericReadBundle(accessor, spec, opts) {
   return out;
 }
 
+// `mv -f tmp target` that keeps target's permission bits when it exists
+// (GNU `chmod --reference`, falling back to BSD stat), so an atomic rewrite
+// of a 0600 config.json doesn't come back 0644.
+function mvKeepMode(tmp, target) {
+  const t = shQuote(target), m = shQuote(tmp);
+  return `{ [ -e ${t} ] && { chmod --reference=${t} ${m} 2>/dev/null || chmod "$(stat -f %Lp ${t})" ${m} 2>/dev/null || true; }; mv -f ${m} ${t}; }`;
+}
+
 function getMode(appConfig) {
   const wa = (appConfig && appConfig.webApp) || {};
   return VALID_MODES.includes(wa.mode) ? wa.mode : 'local';
@@ -255,7 +263,12 @@ function localAccessor(cfg) {
       // so an interrupted write can't leave the remote config truncated/empty.
       const tmp = tmpNameFor(remotePath);
       try {
-        await fs.promises.writeFile(tmp, content);
+        // Keep the target's permissions (config.json is 0600 on the EC2
+        // host — it holds SMTP / AWS secrets); a new file gets the umask.
+        let mode = null;
+        try { mode = (await fs.promises.stat(remotePath)).mode & 0o7777; } catch (e) { /* new file */ }
+        await fs.promises.writeFile(tmp, content, mode != null ? { mode } : undefined);
+        if (mode != null) await fs.promises.chmod(tmp, mode);
         await fs.promises.rename(tmp, remotePath);
       } catch (e) {
         await fs.promises.rm(tmp, { force: true }).catch(() => {});
@@ -443,7 +456,7 @@ function sshAccessor(cfg) {
         await new Promise((resolve, reject) => {
           sftp.writeFile(tmp, content, (err) => err ? reject(err) : resolve());
         });
-        const r = await exec(conn, `mv -f ${shQuote(tmp)} ${shQuote(remotePath)}`, { timeoutMs: 30000 });
+        const r = await exec(conn, mvKeepMode(tmp, remotePath), { timeoutMs: 30000 });
         if (r.code !== 0) {
           await exec(conn, `rm -f -- ${shQuote(tmp)}`, { timeoutMs: 30000 }).catch(() => {});
           throw new Error(`Could not move ${tmp} into place: ${(r.stderr || '').trim() || 'exit ' + r.code}`);
@@ -463,7 +476,7 @@ function sshAccessor(cfg) {
         await new Promise((resolve, reject) => {
           sftp.writeFile(tmp, buf, (err) => err ? reject(err) : resolve());
         });
-        const r = await exec(conn, `mv -f ${shQuote(tmp)} ${shQuote(remotePath)}`, { timeoutMs: 30000 });
+        const r = await exec(conn, mvKeepMode(tmp, remotePath), { timeoutMs: 30000 });
         if (r.code !== 0) {
           await exec(conn, `rm -f -- ${shQuote(tmp)}`, { timeoutMs: 30000 }).catch(() => {});
           throw new Error(`Could not move ${tmp} into place: ${(r.stderr || '').trim() || 'exit ' + r.code}`);
@@ -656,7 +669,7 @@ function ec2Accessor(cfg) {
       // only the temp file is affected — the real remote config.json is never
       // left truncated/empty (which would break the web app's boot).
       const tmp = tmpNameFor(remotePath);
-      const r = await ssmRun(`printf '%s' ${shQuote(b64)} | base64 -d > ${shQuote(tmp)} && mv -f ${shQuote(tmp)} ${shQuote(remotePath)} || { rm -f -- ${shQuote(tmp)}; exit 1; }`);
+      const r = await ssmRun(`printf '%s' ${shQuote(b64)} | base64 -d > ${shQuote(tmp)} && ${mvKeepMode(tmp, remotePath)} || { rm -f -- ${shQuote(tmp)}; exit 1; }`);
       if (r.status !== 'Success') {
         throw new Error(`Could not write ${remotePath} via SSM: ${r.stderr || r.status}`);
       }
@@ -684,7 +697,7 @@ function ec2Accessor(cfg) {
       // 3) verify the byte count, then move into place.
       r = await ssmRun(
         `sz=$(stat -c %s ${shQuote(tmp)} 2>/dev/null || wc -c < ${shQuote(tmp)}); sz=$(echo $sz | tr -d ' '); ` +
-        `if [ "$sz" = "${buf.length}" ]; then mv -f ${shQuote(tmp)} ${shQuote(remotePath)} && echo __WA_UPLOAD_OK__; ` +
+        `if [ "$sz" = "${buf.length}" ]; then ${mvKeepMode(tmp, remotePath)} && echo __WA_UPLOAD_OK__; ` +
         `else echo "size mismatch: got $sz, expected ${buf.length}" >&2; rm -f -- ${shQuote(tmp)}; exit 3; fi`,
         { timeoutMs: 60000, comment: 'Admin console upload (finish)' });
       if (r.status !== 'Success' || !/__WA_UPLOAD_OK__/.test(r.stdout || '')) await fail('verify', r);
@@ -706,7 +719,7 @@ function ec2Accessor(cfg) {
       if (!files.length && !dirs.length) return { files: {}, dirs: {} };
       const script = [
         ...files.map((p, i) => `echo "__WAB F ${i}"; if [ -f ${shQuote(p)} ]; then base64 ${shQuote(p)} || echo __WAB_ERR; else echo __WAB_MISSING; fi`),
-        ...dirs.map((p, i) => `echo "__WAB D ${i}"; ls -1 -- ${shQuote(p)} 2>/dev/null`),
+        ...dirs.map((p, i) => `echo "__WAB D ${i}"; if [ -d ${shQuote(p)} ]; then ls -1 -- ${shQuote(p)} 2>/dev/null || echo __WAB_LSERR; fi`),
         'echo "__WAB END"'
       ].join('\n');
 
@@ -738,7 +751,10 @@ function ec2Accessor(cfg) {
             out.files[cur.path] = { content, missing: false, err: null };
           }
         } else {
-          out.dirs[cur.path] = { names: lines.map(s => s.trim()).filter(Boolean), err: null };
+          // An unreadable folder must never look empty (a backup would miss
+          // its files and a restore's clean-up would treat them as extra).
+          if (lines.length && lines[lines.length - 1] === '__WAB_LSERR') out.dirs[cur.path] = { names: [], err: 'Could not list this folder on the Web App host (permissions?).' };
+          else out.dirs[cur.path] = { names: lines.map(s => s.trim()).filter(Boolean), err: null };
         }
       };
       for (const line of stdout.split('\n')) {
