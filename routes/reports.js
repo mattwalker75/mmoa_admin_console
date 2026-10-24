@@ -14,6 +14,7 @@
 // time function.
 
 const express = require('express');
+const kit = require('../helpers/pageKit');
 const lockouts = require('../helpers/lockouts');
 const { page, flash } = require('../views/layout');
 const { escapeHtml } = require('../views/escapeHtml');
@@ -211,6 +212,73 @@ const REPORTS = {
         beneficiary: [(byRaffle.get(Number(r.raffle_id)) || []).join('; '), r.beneficiary_text].filter(Boolean).join(' — '),
         photos: n.get(Number(r.raffle_id)) || 0
       }));
+    }
+  },
+
+  'nonprofit-activity': {
+    label: 'Nonprofit activity',
+    description: 'How often each nonprofit appeared in Need Help searches, had its profile opened, and had its links used (call, directions, website, email, social) over the last 7 days, 30 days and 12 months. Anonymous totals recorded by the website (hourly; kept 5 years). Most viewed in the last 30 days first.',
+    needsDb: true,
+    columns: [
+      { key: 'user_id',        label: 'User ID' },
+      { key: 'login_name',     label: 'Login' },
+      { key: 'org_name',       label: 'Organization' },
+      { key: 'status',         label: 'Verification' },
+      { key: 'search_7',       label: 'In search (7d)' },
+      { key: 'view_7',         label: 'Profile opened (7d)' },
+      { key: 'clicks_7',       label: 'Links used (7d)' },
+      { key: 'search_30',      label: 'In search (30d)' },
+      { key: 'view_30',        label: 'Profile opened (30d)' },
+      { key: 'clicks_30',      label: 'Links used (30d)' },
+      { key: 'search_365',     label: 'In search (12mo)' },
+      { key: 'view_365',       label: 'Profile opened (12mo)' },
+      { key: 'clicks_365',     label: 'Links used (12mo)' },
+      { key: 'call_365',       label: 'Call (12mo)' },
+      { key: 'directions_365', label: 'Directions (12mo)' },
+      { key: 'website_365',    label: 'Website (12mo)' },
+      { key: 'email_365',      label: 'Email (12mo)' },
+      { key: 'facebook_365',   label: 'Facebook (12mo)' },
+      { key: 'instagram_365',  label: 'Instagram (12mo)' },
+      { key: 'other_link_365', label: 'Other link (12mo)' },
+      { key: 'first_seen',     label: 'Counting since' }
+    ],
+    async fetch({ db }) {
+      const orgs = await db.allAsync(`
+        SELECT o.org_id, o.name AS org_name, o.verification_status, u.user_id, u.login_name
+          FROM organizations o JOIN users u ON u.user_id = o.user_id`);
+      const LINKS = ['call', 'directions', 'website', 'email', 'facebook', 'instagram', 'other_link'];
+      const DAY = 86400 * 1000;
+      const since = (days) => kit.sqlTime(-days * DAY); // kit.sqlTime takes an offset from now
+      const windows = { 7: since(7), 30: since(30), 365: since(365) };
+      const by = {};
+      for (const o of orgs) {
+        by[o.org_id] = {
+          user_id: o.user_id, login_name: o.login_name || '', org_name: o.org_name || '',
+          status: o.verification_status || 'unverified', first_seen: ''
+        };
+        for (const w of Object.keys(windows)) {
+          by[o.org_id][`search_${w}`] = 0; by[o.org_id][`view_${w}`] = 0; by[o.org_id][`clicks_${w}`] = 0;
+        }
+        for (const k of LINKS) by[o.org_id][`${k}_365`] = 0;
+      }
+      for (const [w, cutoff] of Object.entries(windows)) {
+        const rows = await db.allAsync(
+          'SELECT org_id, kind, SUM(n) AS n FROM org_metrics WHERE bucket_start >= ? GROUP BY org_id, kind', [cutoff]);
+        for (const r of rows) {
+          const t = by[r.org_id];
+          if (!t) continue;
+          const n = Number(r.n || 0);
+          if (r.kind === 'search') t[`search_${w}`] += n;
+          else if (r.kind === 'view') t[`view_${w}`] += n;
+          else if (LINKS.includes(r.kind)) {
+            t[`clicks_${w}`] += n;
+            if (w === '365') t[`${r.kind}_365`] += n;
+          }
+        }
+      }
+      const firsts = await db.allAsync('SELECT org_id, MIN(bucket_start) AS s FROM org_metrics GROUP BY org_id');
+      for (const f of firsts) if (by[f.org_id] && f.s) by[f.org_id].first_seen = String(f.s).slice(0, 10);
+      return Object.values(by).sort((a, b) => (b.view_30 - a.view_30) || (b.search_30 - a.search_30) || a.org_name.localeCompare(b.org_name));
     }
   },
 

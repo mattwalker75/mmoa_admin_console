@@ -246,12 +246,22 @@ linked to the nonprofit's page); "Only show currently locked" hides lapsed rows.
 
 ## Reports
 
-All nonprofits, nonprofits pending verification, events, raffles, login
-lockouts and console admins. **View** opens the rows in-app; **Download CSV** saves them
+All nonprofits, nonprofits pending verification, events, raffles, nonprofit
+activity, login lockouts and console admins. **View** opens the rows in-app; **Download CSV** saves them
 (cells that look like spreadsheet formulas are neutralised). The nonprofit
 reports and the lockout report include each account's login name; a
 lockout row also shows the email and whether the lock is an admin lock
 ("locked by MMoA").
+
+**Nonprofit activity** is the website's anonymous usage count per
+nonprofit: how often it appeared in Need Help search results, how often
+its profile was opened, and how often each of its links was used (call,
+directions, website, email, Facebook, Instagram, other), over the last 7
+days, 30 days and 12 months. The website counts in memory and writes once
+an hour, so the current hour is not in the report yet; it keeps hourly
+detail for 7 days, daily for 4 weeks, weekly after that, and deletes
+anything older than 5 years. Nothing about the visitor is recorded. Each
+nonprofit sees its own numbers in its portal ("Your profile activity").
 
 ## Web App Website
 
