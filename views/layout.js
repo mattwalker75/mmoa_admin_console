@@ -221,6 +221,7 @@ ${body}
 </head>
 <body>
   ${sidebar(appConfig, user, activeNav)}
+  <script src="/js/sidebar-scroll.js?v=${assetVer('js/sidebar-scroll.js')}"></script>
   <main class="ml-64 min-h-screen px-8 py-8">
 ${body}
     <footer class="mt-12 pt-6 border-t border-slate-200 dark:border-slate-800 text-xs text-slate-500 dark:text-slate-400">
