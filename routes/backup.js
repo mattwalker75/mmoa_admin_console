@@ -1488,6 +1488,7 @@ module.exports = function (db, appConfig, appConfigModule) {
       settings: `Console settings restored${nTxt}.`,
       waconfig: `Web App config restored${nTxt} on the remote host.`,
       wawebsite: `Web App website restored${nTxt}.`,
+      waimages: `Website images restored${req.query.n ? ' (' + (parseInt(req.query.n, 10) || 0) + ' file(s))' : ''}.`,
       database: `Web App database restored${req.query.n ? ' (' + (parseInt(req.query.n, 10) || 0) + ' tables)' : ''}.`
     };
     const okMsg = okMap[req.query.ok] ? `<div class="flash-ok mb-4">${okMap[req.query.ok]}</div>` : '';
@@ -1550,7 +1551,7 @@ module.exports = function (db, appConfig, appConfigModule) {
       <div class="grid lg:grid-cols-2 gap-6">
         <section class="card surface-target card-pad">
           <h3 class="text-base font-semibold text-slate-900 dark:text-slate-100">Backup</h3>
-          <p class="mt-1 text-sm text-slate-500 dark:text-slate-400">Download all ${WA_SECTION_KEYS.length} website HTML sections in one JSON file. (Images are not included.)</p>
+          <p class="mt-1 text-sm text-slate-500 dark:text-slate-400">Download all ${WA_SECTION_KEYS.length} website HTML sections in one JSON file. (Images are not included. Images can be backed up below.)</p>
           ${downloadBtn('/backup-restore/web-app-website/export')}
         </section>
         <section class="card surface-target card-pad">
@@ -1560,6 +1561,28 @@ module.exports = function (db, appConfig, appConfigModule) {
             'I understand this overwrites the selected website HTML sections.',
             `<div class="flash-error text-xs"><strong>Heads up:</strong> overwrites the selected section files; changes are live on the next page load (no restart).</div>`,
             WA_SECTION_KEYS, WA_WEBSITE_LABELS)}
+        </section>
+      </div>
+      <div class="grid lg:grid-cols-2 gap-6 mt-6">
+        <section class="card surface-target card-pad">
+          <h3 class="text-base font-semibold text-slate-900 dark:text-slate-100">Image Backup</h3>
+          <p class="mt-1 text-sm text-slate-500 dark:text-slate-400">Download every website image (<code class="font-mono">HTML/images/</code> — the files on Web App Website → Images) in one JSON file, with a size and SHA-256 per file. Event, raffle, nonprofit and board photos are not included — those are in the Web App Full Backup.</p>
+          <div class="mt-3 text-xs text-slate-500 dark:text-slate-400">Over EC2 (SSM) access a large set of images can take several minutes.</div>
+          ${downloadBtn('/backup-restore/web-app-images/export')}
+        </section>
+        <section class="card surface-target card-pad">
+          <h3 class="text-base font-semibold text-slate-900 dark:text-slate-100">Image Restore</h3>
+          <p class="mt-1 text-sm text-slate-500 dark:text-slate-400">Upload an Image Backup (or a Web App Full Backup bundle — its website images are used). Each image is written to <code class="font-mono">HTML/images/</code>, replacing a file with the same name; images that are not in the backup are left alone.</p>
+          <form method="POST" action="/backup-restore/web-app-images/import" enctype="multipart/form-data" class="mt-5 space-y-4"
+                x-data="{ fileName: '', confirmed: false }">
+            <input type="file" name="backup" accept=".json,application/json" required
+                   x-on:change="fileName = $event.target.files[0] ? $event.target.files[0].name : ''"
+                   class="block text-sm text-slate-600 dark:text-slate-300 file:mr-3 file:rounded-lg file:border-0 file:bg-brand-600 file:px-4 file:py-2 file:text-sm file:font-semibold file:text-white hover:file:bg-brand-700">
+            <div class="flash-error text-xs"><strong>Heads up:</strong> same-name images are overwritten and are live on the next page load (no restart). Over EC2 (SSM) access this can take several minutes — keep the page open until it finishes.</div>
+            <label class="flex items-start gap-2 text-sm"><input type="checkbox" class="h-4 w-4 mt-0.5" x-model="confirmed">
+              <span>I understand this overwrites website images with the same names.</span></label>
+            <button type="submit" class="btn-danger" :disabled="!fileName || !confirmed" :class="(!fileName || !confirmed) ? 'opacity-50 cursor-not-allowed' : ''">Restore images</button>
+          </form>
         </section>
       </div>`}`;
 
@@ -1786,6 +1809,103 @@ module.exports = function (db, appConfig, appConfigModule) {
     } catch (err) {
       console.error('[backup] web app website import failed:', err);
       res.redirect('/backup-restore?error=' + encodeURIComponent('Web App website restore failed: ' + (err.message || err)));
+    }
+  });
+
+  // ── Web App website images: export / import (HTML/images/*) ──────────
+  // The files on Web App Website → Images, as { _meta, images: { name:
+  // base64 } } — the same shape a rebuild bundle carries under
+  // website.images, so Image Restore also accepts a full bundle. Names must
+  // be plain (letters, digits . _ -) with an image extension; a manifest
+  // sha256 is checked before anything is written.
+  const IMG_NAME_RE = /^[A-Za-z0-9._-]+$/;
+  router.get('/backup-restore/web-app-images/export', requireAdmin, async (req, res) => {
+    if (!webAppAccess.isConfigured(appConfig)) {
+      return res.redirect('/backup-restore?error=' + encodeURIComponent('Web App access is not configured (Settings → Web App).'));
+    }
+    try {
+      const accessor = webAppAccess.createAccessorFromConfig(appConfig);
+      const imgDir = waConfig.joinPath(accessor.appPath, IMAGES_REL_DIR);
+      const b = await accessor.readBundle({ files: [], dirs: [imgDir] });
+      const names = ((b.dirs[imgDir] || {}).names || []).filter(n => IMAGE_EXT.test(n) && IMG_NAME_RE.test(n)).sort();
+      const images = {}, files = {}, skipped = [];
+      let bytes = 0;
+      for (const n of names) {
+        try {
+          const buf = Buffer.from(await accessor.readFileChunked(waConfig.joinPath(imgDir, n)));
+          images[n] = buf.toString('base64');
+          files[n] = { size: buf.length, sha256: crypto.createHash('sha256').update(buf).digest('hex') };
+          bytes += buf.length;
+        } catch (e) { skipped.push(`${n}: ${e.message || e}`); }
+      }
+      const envelope = {
+        _meta: { type: 'web-app-images', exportedAt: new Date().toISOString(), exportedFrom: os.hostname(), via: accessor.describe(), version: 1,
+          count: Object.keys(images).length, bytes, files, skipped },
+        images
+      };
+      await audit(req, 'backup.images_export', { kind: 'backup', label: 'Website images',
+        summary: `${Object.keys(images).length} image(s), ${fmtBytes(bytes)}${skipped.length ? `, ${skipped.length} unreadable` : ''}` });
+      res.set('Content-Type', 'application/json; charset=utf-8');
+      res.set('Content-Disposition', `attachment; filename="web_app_images_${dateStamp()}.json"`);
+      res.send(JSON.stringify(envelope));
+    } catch (err) {
+      console.error('[backup] web app images export failed:', err);
+      res.redirect('/backup-restore?error=' + encodeURIComponent('Image backup failed: ' + (err.message || err)));
+    }
+  });
+
+  router.post('/backup-restore/web-app-images/import', requireAdmin, (req, res, next) => {
+    bundleUpload.single('backup')(req, res, (err) => {
+      if (err) return res.redirect('/backup-restore?error=' + encodeURIComponent(err.message || 'Upload failed'));
+      next();
+    });
+  }, async (req, res) => {
+    const back = (msg) => res.redirect('/backup-restore?error=' + encodeURIComponent(msg));
+    if (!req.file) return back('No file received.');
+    let parsed;
+    try { parsed = JSON.parse(req.file.buffer.toString('utf8')); } catch (e) { return back('That file is not valid JSON.'); }
+    const type = parsed && parsed._meta && parsed._meta.type;
+    let images = null, manifest = {};
+    if (type === 'web-app-images') {
+      images = parsed.images;
+      manifest = (parsed._meta && parsed._meta.files) || {};
+    } else if (type === BUNDLE_TYPE || (parsed && parsed.website && parsed.website.images)) {
+      images = parsed.website && parsed.website.images;
+    } else {
+      return back('That file is not an Image Backup or a Web App Full Backup bundle.');
+    }
+    if (!images || typeof images !== 'object' || Array.isArray(images)) return back('No images found in that file.');
+    const names = Object.keys(images).filter(n => IMAGE_EXT.test(n) && IMG_NAME_RE.test(n) && typeof images[n] === 'string');
+    if (!names.length) return back('No images found in that file.');
+    // Decode and check everything BEFORE writing anything.
+    const bufs = {};
+    for (const n of names) {
+      const buf = Buffer.from(images[n], 'base64');
+      if (!buf.length) return back(`Image "${n}" in the file is empty.`);
+      const m = manifest[n];
+      if (m && m.sha256 && crypto.createHash('sha256').update(buf).digest('hex') !== m.sha256) {
+        return back(`Image "${n}" does not match its checksum — the file is damaged. Nothing was restored.`);
+      }
+      bufs[n] = buf;
+    }
+    if (!webAppAccess.isConfigured(appConfig)) return back('Web App access is not configured (Settings → Web App).');
+    let written = 0;
+    try {
+      const accessor = webAppAccess.createAccessorFromConfig(appConfig);
+      const imgDir = waConfig.joinPath(accessor.appPath, IMAGES_REL_DIR);
+      for (const n of names) {
+        // mkdir -p + atomic write; ≤40 KB SSM pieces on EC2.
+        await accessor.writeFileChunked(waConfig.joinPath(imgDir, n), bufs[n]);
+        written++;
+      }
+      await audit(req, 'backup.images_restore', { kind: 'backup', label: req.file.originalname,
+        summary: `${written} website image(s) restored from ${type === 'web-app-images' ? 'an Image Backup' : 'a full bundle'}` });
+      res.redirect('/backup-restore?ok=waimages&n=' + written);
+    } catch (err) {
+      console.error('[backup] web app images import failed:', err);
+      await audit(req, 'backup.images_restore', { kind: 'backup', label: req.file.originalname,
+        summary: `Image restore FAILED after ${written} of ${names.length}: ${err.message || err}` });
+      back(`Image restore failed after ${written} of ${names.length} image(s): ${err.message || err}`);
     }
   });
 

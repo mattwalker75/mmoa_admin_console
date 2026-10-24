@@ -432,6 +432,13 @@ snapshot), or on the host `sqlite3 mmoa_web_app.db ".backup backup.db"`.
 - **Web App configuration / website** — selective restore by section.
   Only known config keys are offered; `maintenanceCommand` needs the
   commands box ticked.
+- **Website images** — *Image Backup* downloads every file in
+  `HTML/images/` (the Web App Website → Images files) with a size and
+  SHA-256 each; the HTML-sections backup does not include them. *Image
+  Restore* takes that file or a full bundle (its website images are used),
+  checks every checksum before writing anything, then writes each image,
+  replacing same-name files and leaving the rest alone. Event, raffle,
+  nonprofit and board photos are only in the full bundle.
 - **Web App database** — full JSON snapshot; restore replaces *all* data
   and requires typing `RESTORE`. **Every live table is emptied**, then
   the tables the backup has are reloaded — a live table the backup lacks
