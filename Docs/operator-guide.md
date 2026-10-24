@@ -376,17 +376,35 @@ could not check.
 
 ### Restore
 
+**Tested end to end (2026-10-23, local access, SQLite).** A full backup,
+then heavy damage to the site (deleted nonprofits, board and categories,
+edited users, deleted and added images and uploads, a defaced and a
+missing HTML section, changed config, new session keys, Maintenance Mode
+on), then a full restore with the defaults: every table, file, config
+value and public / portal API response matched the original, and a
+nonprofit signed in before the backup stayed signed in. The same bundle
+restored onto a brand-new install (repo checkout, empty database, EC2-style
+config) matched as well, apart from that server's own AWS credential
+source and maintenance command, which a restore keeps on purpose. Not yet
+exercised for real: SSH / EC2 (SSM) transports and MySQL.
+
 **Full Restore** walks through: test access → optional Maintenance Mode →
 verify the bundle → restore, with the status window showing each step:
 
 1. configuration — `config.json` (only the keys Web App Settings edits;
    the bundle's `maintenanceCommand` is left as the host has it unless you
    tick **Also restore the shell commands**) + `local-secrets.json`
-   (mode 600)
+   (mode 600). **Keep this server's own machine settings** (on by default)
+   keeps the host's `port`, `server` (TLS / proxy), `database` connection
+   and `aws.runningInAws` instead of the bundle's — they describe the
+   machine, not the site, and the EC2 install script sets them for the
+   instance it builds. Turn it off only to copy those too.
 2. website — HTML sections, images
-3. uploads — every file in the bundle is written; tick **Remove uploads
-   not in the bundle** (off by default) to also delete files under
-   `uploads/` the bundle doesn't have
+3. uploads — every file in the bundle is written
+   - **Remove images not in the bundle** (on by default) deletes website
+     images and uploads added after the backup, so the files match the
+     backup exactly. A file the bundle lists as *skipped* is never removed,
+     and non-image files (`README.txt`, `.gitkeep`) are left alone.
 4. database — **every live table is emptied**, then the bundle's tables are
    reloaded in one transaction (a live table the bundle lacks ends up
    empty, a bundle table the live schema lacks is skipped — both are

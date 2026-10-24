@@ -224,6 +224,14 @@ const WA_CONFIG_KEYS = Object.keys(WA_CONFIG_LABELS);
 //   web app config: maintenanceCommand (Web App Website → Maintenance Mode)
 //   console settings: webApp.commands.{start,stop,restart} (power bar)
 const WA_COMMAND_KEYS = ['maintenanceCommand'];
+// Settings that describe the MACHINE the Web App runs on rather than the
+// site: the listening port, TLS / proxy setup (server), the database
+// connection, and whether AWS credentials come from the instance profile.
+// The EC2 install script writes these for the instance it builds, so a full
+// restore keeps the host's values by default (opts.keepHostSettings) — a
+// bundle made on another machine must not point the new server at a cert,
+// port or database it doesn't have.
+const WA_HOST_KEYS = ['port', 'server', 'database'];
 const RESTORE_COMMANDS_LABEL = 'Also restore the shell commands in this file (the Web App maintenance command / Start · Stop · Restart commands). Leave this off unless you made the backup yourself — the console runs these on the Web App host.';
 
 // Normalize a multi-value form field (checkboxes share name="sections") into
@@ -1015,7 +1023,8 @@ module.exports = function (db, appConfig, appConfigModule) {
   // Only known web-app config keys are written (WA_CONFIG_KEYS); the
   // maintenance command is kept as the host has it unless
   // opts.restoreCommands — see WA_COMMAND_KEYS.
-  //   opts.pruneUploads     — delete uploads/<kind>/* files the bundle lacks
+  //   opts.pruneFiles       — delete website images + uploads the bundle lacks
+//   opts.keepHostSettings — keep the host's port / server / database / aws.runningInAws (default true)
   //   opts.restoreTemplates — write the console templates (default true)
   // Returns { steps, restored, skipped } (restored / skipped for the audit row).
   async function restoreBundle(bundle, progress = () => {}, opts = {}) {
@@ -1029,10 +1038,18 @@ module.exports = function (db, appConfig, appConfigModule) {
     const cfg = (bundle.config && typeof bundle.config === 'object' && !Array.isArray(bundle.config)) ? bundle.config : {};
     let nKeys = 0;
     const keptCommands = [], ignoredKeys = [];
+    const keepHost = opts.keepHostSettings !== false;
+    const keptHost = [];
     for (const k of Object.keys(cfg)) {
       if (k.startsWith('_')) continue; // the web app's own _comment keys — the host's copy stays
       if (!WA_CONFIG_KEYS.includes(k)) { ignoredKeys.push(k); continue; }
       if (WA_COMMAND_KEYS.includes(k) && !opts.restoreCommands) { keptCommands.push(k); continue; }
+      if (keepHost && WA_HOST_KEYS.includes(k) && json[k] !== undefined) { keptHost.push(k); continue; }
+      if (keepHost && k === 'aws' && cfg.aws && typeof cfg.aws === 'object' && json.aws && typeof json.aws === 'object' && 'runningInAws' in json.aws) {
+        // Take the bundle's AWS settings but keep how THIS machine gets credentials.
+        json.aws = { ...cfg.aws, runningInAws: json.aws.runningInAws };
+        keptHost.push('aws.runningInAws'); nKeys++; continue;
+      }
       json[k] = cfg[k]; nKeys++;
     }
     await waConfig.writeRemoteConfig(accessor, json);
@@ -1040,6 +1057,7 @@ module.exports = function (db, appConfig, appConfigModule) {
     const cfgNotes = [];
     if (keptCommands.length) { cfgNotes.push(`${keptCommands.join(', ')} left as on the host (tick "also restore commands" to take it from the bundle)`); skipped.push(keptCommands.join(', ')); }
     if (ignoredKeys.length) cfgNotes.push(`${ignoredKeys.length} unknown key(s) ignored: ${ignoredKeys.join(', ')}`);
+    if (keptHost.length) cfgNotes.push(`this server's own ${keptHost.join(', ')} kept`);
     // local-secrets.json — session signing keys, 0600 like the web app writes it.
     const secrets = (bundle.localSecrets && typeof bundle.localSecrets === 'object' && !Array.isArray(bundle.localSecrets)) ? bundle.localSecrets : null;
     if (secrets) {
@@ -1074,7 +1092,25 @@ module.exports = function (db, appConfig, appConfigModule) {
       nImg++;
     }
     restored.push(`${nSec} HTML sections`, `${nImg} website images`);
-    done('Website', `${nSec} HTML sections, ${nImg} images`);
+    let webDetail = `${nSec} HTML sections, ${nImg} images`;
+    if (opts.pruneFiles) {
+      // Images in HTML/images/ the bundle doesn't have (added after the
+      // backup) are removed. Never one the bundle lists as skipped (it
+      // couldn't be read when the bundle was made — the live copy is the
+      // only one), and only image files (README.txt / .gitkeep stay).
+      const keep = new Set([...imgNames, ...(Array.isArray(web.skippedImages) ? web.skippedImages : [])]);
+      const listing = await accessor.readBundle({ files: [], dirs: [imgDir] });
+      const extra = ((listing.dirs[imgDir] || {}).names || []).filter(n => IMAGE_EXT.test(n) && /^[A-Za-z0-9._-]+$/.test(n) && !keep.has(n));
+      if (extra.length) {
+        const r = await accessor.runCommand(`rm -f -- ${extra.map(n => shq(waConfig.joinPath(imgDir, n))).join(' ')}`, { timeoutMs: 60000, comment: 'bundle restore: remove website images not in the bundle' });
+        if (r.code !== 0) throw new Error(`Could not remove website images not in the bundle: ${(r.stderr || '').trim() || 'exit ' + r.code}`);
+      }
+      restored.push(`${extra.length} website images not in the bundle removed`);
+      webDetail += `; ${extra.length} image(s) not in the bundle removed`;
+    } else {
+      skipped.push('website images not in the bundle (kept)');
+    }
+    done('Website', webDetail);
 
     // uploads/** — same chunked transport; only contract-shaped paths.
     const up = (bundle.uploads && bundle.uploads.files && typeof bundle.uploads.files === 'object') ? bundle.uploads.files : {};
@@ -1087,12 +1123,14 @@ module.exports = function (db, appConfig, appConfigModule) {
     }
     restored.push(`${nUp} uploads`);
     let upDetail = `${nUp} files written to uploads/`;
-    if (opts.pruneUploads) {
+    if (opts.pruneFiles) {
       // Files in uploads/<kind>/ that the bundle doesn't have (an image
-      // uploaded after the backup, or an orphan): removed on request only.
+      // uploaded after the backup, or an orphan) — except ones the bundle
+      // lists as skipped (unreadable when it was made; the live copy is the
+      // only one).
       const upDirs = uploadsHelper.KINDS.map(k => waConfig.joinPath(accessor.appPath, UPLOADS_REL_DIR + '/' + k));
       const listing = await accessor.readBundle({ files: [], dirs: upDirs });
-      const have = new Set(upRels);
+      const have = new Set([...upRels, ...((bundle.uploads && Array.isArray(bundle.uploads.skipped)) ? bundle.uploads.skipped : [])]);
       const extra = [];
       uploadsHelper.KINDS.forEach((k, i) => {
         for (const n of ((listing.dirs[upDirs[i]] || {}).names || [])) {
@@ -1184,7 +1222,7 @@ module.exports = function (db, appConfig, appConfigModule) {
     }).join('');
 
     return `<div class="card surface-target card-pad" x-data="{
-        busy: '', log: [], selected: '', confirmText: '', maintOn: false, restoreCommands: false, pruneUploads: false, restoreTemplates: true,
+        busy: '', log: [], selected: '', confirmText: '', maintOn: false, restoreCommands: false, pruneFiles: true, keepHostSettings: true, restoreTemplates: true,
         md: { open: false, what: '', title: ${jsStr(MAINT_TITLE)}, message: ${jsStr(MAINT_MESSAGE)}, resolve: null },
         sw: { open: false, op: null, timer: null, now: Date.now() },
         say(kind, text) { this.log.push({ kind, text }); },
@@ -1318,11 +1356,11 @@ module.exports = function (db, appConfig, appConfigModule) {
             this.showChecks(this.selected, v); this.sw.open = false;
             if (!v.valid) { this.say('err', 'Stopped: the bundle failed verification (see the checklist).'); await this.offerDisableMaintenance('The restore did not start (the bundle failed verification).'); return; }
             this.say('ok', 'Bundle verified.');
-            const go = await window.uiConfirm('Restore ' + this.selected + ' now? This REPLACES the Web App configuration, session keys, website files, uploads' + (this.pruneUploads ? ' (removing files not in the bundle)' : '') + ', the ENTIRE database' + (this.restoreTemplates ? ' and the raffle text templates' : '') + '.', { title: 'Restore the Web App?', confirmLabel: 'Restore now', cancelLabel: 'Cancel' });
+            const go = await window.uiConfirm('Restore ' + this.selected + ' now? This REPLACES the Web App configuration' + (this.keepHostSettings ? ' (keeping the port, TLS, database connection and AWS credential source of this server)' : '') + ', session keys, website files, images and uploads' + (this.pruneFiles ? ' (removing images not in the bundle)' : '') + ', the ENTIRE database' + (this.restoreTemplates ? ' and the raffle text templates' : '') + '.', { title: 'Restore the Web App?', confirmLabel: 'Restore now', cancelLabel: 'Cancel' });
             if (!go) { this.say('info', 'Restore canceled.'); await this.offerDisableMaintenance('The restore was canceled.'); return; }
             this.say('info', 'Step 4/4 — restoring (configuration + secrets → website → uploads → database → templates → maintenance file)…');
             this.sw.op = null; this.startWatch();
-            const r = await this.post('/backup-restore/bundle/restore', { name: this.selected, confirm: this.confirmText.trim(), restoreCommands: !!this.restoreCommands, pruneUploads: !!this.pruneUploads, restoreTemplates: !!this.restoreTemplates });
+            const r = await this.post('/backup-restore/bundle/restore', { name: this.selected, confirm: this.confirmText.trim(), restoreCommands: !!this.restoreCommands, pruneFiles: !!this.pruneFiles, keepHostSettings: !!this.keepHostSettings, restoreTemplates: !!this.restoreTemplates });
             this.stopWatch(); await this.pollOnce();
             (r.steps || []).forEach(s => this.say(s.ok ? 'ok' : 'err', s.step + ' — ' + s.detail));
             if (!r.ok) { this.say('err', 'Restore failed: ' + (r.error || 'unknown error') + ' — the Web App may be partially restored; fix the cause and run the restore again.'); await this.offerDisableMaintenance('The restore FAILED — the Web App may be partially restored.'); return; }
@@ -1362,8 +1400,12 @@ module.exports = function (db, appConfig, appConfigModule) {
             <span>Restore this console's raffle text templates from the bundle (writes into the Settings → Templates folder; a template with the same id is replaced, others are kept).</span>
           </label>
           <label class="mt-2 flex items-start gap-2 text-xs text-slate-700 dark:text-slate-200">
-            <input type="checkbox" x-model="pruneUploads" class="mt-0.5">
-            <span>Remove uploads not in the bundle (files under uploads/ the bundle doesn't have — images added after the backup — are deleted; off = they are kept).</span>
+            <input type="checkbox" x-model="pruneFiles" class="mt-0.5">
+            <span>Remove images not in the bundle (website images and uploads added after the backup are deleted, so the site's files match the backup exactly; off = they are kept).</span>
+          </label>
+          <label class="mt-2 flex items-start gap-2 text-xs text-slate-700 dark:text-slate-200">
+            <input type="checkbox" x-model="keepHostSettings" class="mt-0.5">
+            <span>Keep this server's own machine settings — port, TLS / proxy (server), database connection and where AWS credentials come from — instead of the bundle's. Recommended, especially when restoring onto a new server; everything else in the configuration comes from the bundle.</span>
           </label>
           <label class="mt-2 flex items-start gap-2 text-xs text-amber-700 dark:text-amber-300">
             <input type="checkbox" x-model="restoreCommands" class="mt-0.5">
@@ -2100,7 +2142,10 @@ module.exports = function (db, appConfig, appConfigModule) {
     const name = safeBundleName(req.body && req.body.name);
     if (!name) return res.status(400).json({ ok: false, error: 'Bad bundle name.' });
     const restoreCommands = !!(req.body && req.body.restoreCommands === true);
-    const pruneUploads = !!(req.body && req.body.pruneUploads === true);
+    // pruneFiles defaults ON (a full restore puts the files back exactly as
+    // they were); the older pruneUploads flag is still understood.
+    const pruneFiles = !(req.body && (req.body.pruneFiles === false || req.body.pruneUploads === false));
+    const keepHostSettings = !(req.body && req.body.keepHostSettings === false);
     const restoreTemplates = !(req.body && req.body.restoreTemplates === false);
     // Claim the one-operation slot BEFORE the awaits below (the access test
     // takes seconds) — otherwise two restores could both pass the check.
@@ -2129,7 +2174,7 @@ module.exports = function (db, appConfig, appConfigModule) {
     }
     mark('Access check', 'ok', '');
     try {
-      const r = await restoreBundle(loaded.bundle, mark, { restoreCommands, pruneUploads, restoreTemplates });
+      const r = await restoreBundle(loaded.bundle, mark, { restoreCommands, pruneFiles, keepHostSettings, restoreTemplates });
       finishOp(true);
       console.log(`[backup] bundle restored: ${loaded.name}`);
       // Written AFTER the database step, so it lands in the restored
