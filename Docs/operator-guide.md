@@ -273,9 +273,13 @@ the board and the directory come from the database (their own pages).
   load — no restart. **Preview** shows the unsaved HTML on the site's dark
   palette.
 - Keep the `{{tokens}}` — the website fills them in: `{{appTitle}}`,
-  `{{orgName}}`, `{{phone}}`, `{{phoneTel}}` (digits only, for `tel:` links),
-  `{{ein}}`, `{{facebookUrl}}`, `{{donationUrl}}` (empty while the Donate
-  button is off), `{{year}}` and `{{eventCount}}`. The values come from Web
+  `{{appSubtitle}}`, `{{orgName}}`, `{{tagline}}`, `{{foundedYear}}`,
+  `{{phone}}`, `{{phoneTel}}` (digits only, for `tel:` links), `{{email}}`,
+  `{{ein}}`, `{{addressLine1}}`, `{{addressLine2}}`, `{{city}}`, `{{state}}`,
+  `{{zip}}`, `{{address}}` (all of it on one line), `{{meetingInfo}}`,
+  `{{facebookUrl}}`, `{{instagramUrl}}`, `{{youtubeUrl}}`, `{{xUrl}}`,
+  `{{nextdoorUrl}}`, `{{donationUrl}}` (empty while the Donate button is
+  off), `{{year}}` and `{{eventCount}}`. An unset value renders as nothing. The values come from Web
   App Settings → General, where each field that feeds a token says so
   ("Website token: …").
 - **Website** — the site's public address (`publicBaseUrl` from Web App
