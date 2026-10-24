@@ -248,7 +248,10 @@ linked to the nonprofit's page); "Only show currently locked" hides lapsed rows.
 
 All nonprofits, nonprofits pending verification, events, raffles, login
 lockouts and console admins. **View** opens the rows in-app; **Download CSV** saves them
-(cells that look like spreadsheet formulas are neutralised).
+(cells that look like spreadsheet formulas are neutralised). The nonprofit
+reports and the lockout report include each account's login name; a
+lockout row also shows the email and whether the lock is an admin lock
+("locked by MMoA").
 
 ## Web App Website
 

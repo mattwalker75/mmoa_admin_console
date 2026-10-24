@@ -14,6 +14,7 @@
 // time function.
 
 const express = require('express');
+const lockouts = require('../helpers/lockouts');
 const { page, flash } = require('../views/layout');
 const { escapeHtml } = require('../views/escapeHtml');
 const { requireAdmin } = require('../middleware/auth');
@@ -71,6 +72,7 @@ const REPORTS = {
     needsDb: true,
     columns: [
       { key: 'user_id',             label: 'User ID' },
+      { key: 'login_name',          label: 'Login' },
       { key: 'org_name',            label: 'Organization' },
       { key: 'ein',                 label: 'EIN' },
       { key: 'full_name',           label: 'Contact' },
@@ -88,7 +90,7 @@ const REPORTS = {
     ],
     async fetch({ db }) {
       const rows = await db.allAsync(`
-        SELECT u.user_id, u.first_name, u.last_name, u.email, u.phone_number, u.is_active,
+        SELECT u.user_id, u.login_name, u.first_name, u.last_name, u.email, u.phone_number, u.is_active,
                u.email_verified_at, u.created_at, u.last_login_at,
                o.name AS org_name, o.ein, o.phone AS org_phone, o.city, o.verification_status,
                o.verified_at, o.verified_by, o.is_listed, o.org_id
@@ -111,6 +113,7 @@ const REPORTS = {
     needsDb: true,
     columns: [
       { key: 'user_id',    label: 'User ID' },
+      { key: 'login_name', label: 'Login' },
       { key: 'org_name',   label: 'Organization' },
       { key: 'ein',        label: 'EIN' },
       { key: 'full_name',  label: 'Contact' },
@@ -120,7 +123,7 @@ const REPORTS = {
     ],
     async fetch({ db }) {
       const rows = await db.allAsync(`
-        SELECT u.user_id, u.first_name, u.last_name, u.email, o.name AS org_name, o.ein, o.city, o.created_at
+        SELECT u.user_id, u.login_name, u.first_name, u.last_name, u.email, o.name AS org_name, o.ein, o.city, o.created_at
           FROM organizations o JOIN users u ON u.user_id = o.user_id
          WHERE o.verification_status = 'unverified'
          ORDER BY o.created_at ASC, o.org_id ASC`);
@@ -213,12 +216,14 @@ const REPORTS = {
 
   'login-lockouts': {
     label: 'Login lockouts',
-    description: 'Every lockout row (nonprofit logins and IP addresses) with failure counts and whether the lock is still in force.',
+    description: 'Every lockout row (nonprofit logins and IP addresses) with failure counts and whether the lock is still in force. An account row carries the login name and email it belongs to; an admin lock ("Lock login") shows as locked by MMoA.',
     needsDb: true,
     columns: [
       { key: 'id',             label: 'ID' },
       { key: 'scope',          label: 'Type' },
-      { key: 'scope_key',      label: 'Account / IP' },
+      { key: 'scope_key',      label: 'Typed as / IP' },
+      { key: 'login_name',     label: 'Login' },
+      { key: 'email',          label: 'Email' },
       { key: 'fail_count',     label: 'Failed attempts' },
       { key: 'status',         label: 'Status' },
       { key: 'locked_until',   label: 'Locked until (UTC)' },
@@ -231,13 +236,27 @@ const REPORTS = {
                last_failed_at, created_at
           FROM login_lockouts
          ORDER BY locked_until_ms DESC, last_failed_at DESC`);
+      // The website keys account rows by whatever was typed (login name or
+      // email, lower-cased): resolve each to its account in one query.
+      const keys = [...new Set(rows.filter(r => r.scope !== 'ip' && r.scope_key).map(r => String(r.scope_key).toLowerCase()))];
+      const userByKey = new Map();
+      if (keys.length) {
+        const ph = keys.map(() => '?').join(',');
+        const users = await db.allAsync(
+          `SELECT login_name, email FROM users WHERE LOWER(login_name) IN (${ph}) OR LOWER(email) IN (${ph})`, [...keys, ...keys]);
+        for (const u of users) for (const k of [u.login_name, u.email]) if (k) userByKey.set(String(k).toLowerCase(), u);
+      }
       const now = Date.now();
       return rows.map(r => {
         const until = r.locked_until_ms == null ? null : Number(r.locked_until_ms);
+        const u = r.scope !== 'ip' ? userByKey.get(String(r.scope_key || '').toLowerCase()) : null;
+        const manual = lockouts.isManual(until);
         return {
           ...r,
-          status: until != null && until > now ? 'locked' : 'lapsed',
-          locked_until: until == null ? '' : new Date(until).toISOString().replace('T', ' ').replace(/\..+/, '')
+          login_name: u ? (u.login_name || '') : '',
+          email: u ? (u.email || '') : '',
+          status: until != null && until > now ? (manual ? 'locked by MMoA' : 'locked') : 'lapsed',
+          locked_until: until == null ? '' : manual ? 'until unlocked' : new Date(until).toISOString().replace('T', ' ').replace(/\..+/, '')
         };
       });
     }
