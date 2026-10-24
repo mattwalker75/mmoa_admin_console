@@ -155,6 +155,7 @@ function sidebar(appConfig, user, activeNav) {
       ${navItem('/web-app-logs', 'Web App Logs', '📄', activeNav === 'web-app-logs')}
       ${navItem('/backup-restore', 'Backup/Restore', '⇅', activeNav === 'backup')}
       ${navItem('/web-app-settings', 'Web App Settings', '🛠', activeNav === 'web-app-settings')}
+      <hr class="my-2 border-t-2 border-slate-600">
       ${navItem('/settings', 'Settings', '⚒', activeNav === 'settings')}
     </nav>
     <div class="border-t-2 border-slate-600 px-4 py-4 space-y-3">
