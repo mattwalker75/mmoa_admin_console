@@ -93,20 +93,43 @@
       for (var j = 0; j < buttons.length; j++) buttons[j].disabled = wasDisabled[j];
     }
 
-    window.fetch(action, { method: 'POST', body: fd, credentials: 'same-origin', redirect: 'follow' })
-      .then(function (r) {
-        if (r.redirected) { window.location.assign(r.url); return; }
+    // XHR rather than fetch so a long upload (a backup file can be large)
+    // shows its progress on the button, then a "restoring" state until the
+    // server answers. The CSRF header is added here (XHR doesn't go through
+    // the fetch wrapper).
+    var label = buttons.length ? buttons[buttons.length - 1] : null;
+    var labelText = label ? label.textContent : '';
+    function say(t) { if (label) label.textContent = t; }
+    function restoreAll() { restore(); say(labelText); document.body.style.cursor = ''; }
+    function failed(msg) {
+      restoreAll();
+      if (typeof window.uiConfirm === 'function') window.uiConfirm(msg, { title: 'Upload failed', confirmLabel: 'OK', danger: false });
+      else window.alert(msg);
+    }
+    try {
+      var xhr = new XMLHttpRequest();
+      xhr.open('POST', action, true);
+      xhr.withCredentials = true;
+      var t = token();
+      if (t) xhr.setRequestHeader(HEADER, t);
+      xhr.upload.onprogress = function (ev) {
+        if (ev.lengthComputable && ev.total > 0) say('Uploading ' + Math.floor((ev.loaded / ev.total) * 100) + '%…');
+      };
+      xhr.upload.onload = function () { say('Working — keep this page open…'); };
+      xhr.onload = function () {
+        var finalUrl = xhr.responseURL || '';
+        if (finalUrl && finalUrl.split('#')[0] !== new URL(action, window.location.href).href) { window.location.assign(finalUrl); return; }
         // No redirect (an error page such as 403 / 413): show it in place.
-        return r.text().then(function (html) {
-          document.open(); document.write(html); document.close();
-        });
-      })
-      .catch(function (err) {
-        restore();
-        var msg = 'The upload could not be sent: ' + ((err && err.message) || err);
-        if (typeof window.uiConfirm === 'function') window.uiConfirm(msg, { title: 'Upload failed', confirmLabel: 'OK', danger: false });
-        else window.alert(msg);
-      });
+        document.open(); document.write(xhr.responseText); document.close();
+      };
+      xhr.onerror = function () { failed('The upload could not be sent (network error).'); };
+      xhr.onabort = function () { failed('The upload was cancelled.'); };
+      document.body.style.cursor = 'progress';
+      say('Uploading…');
+      xhr.send(fd);
+    } catch (err) {
+      failed('The upload could not be sent: ' + ((err && err.message) || err));
+    }
   }
 
   document.addEventListener('submit', submitMultipartViaFetch, false);

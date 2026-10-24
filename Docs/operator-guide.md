@@ -500,13 +500,18 @@ snapshot), or on the host `sqlite3 mmoa_web_app.db ".backup backup.db"`.
   from the file — only with every section ticked; the broken file is kept as
   `config.json.broken-…` and the new one is private (0600). Sections must
   have the right shape (text, groups, http(s) links) or nothing is written. Exports and restores are in the Audit log.
-- **Web App website** — selective restore of the HTML sections.
+- **Web App website** — selective restore of the HTML sections (each up to
+  the editor's 60 KB; the form shows every section's size). One file
+  operation runs at a time: it waits for a running Full Backup / Restore or
+  Image Restore. Audited.
 - **Images** — *Image Backup* downloads every image with a size and
   SHA-256 each: the website images in `HTML/images/` (Web App Website →
   Images) and the uploads in `uploads/` (event flyers and covers, raffle
   photos, nonprofit photos, board photos). The HTML-sections backup does
   not include them. *Image Restore* takes that file or a full bundle (its
-  images are used), checks every checksum before writing anything, then
+  images are used), checks every checksum (an Image Backup's or a bundle's own) and that each
+  file really is the image its name says (≤ 8 MB, uploads jpg / png / webp,
+  like the editor) before writing anything, then
   writes each file back to its folder, replacing same-name files and
   leaving the rest alone. An upload only shows on the site while the
   database still points at it, so after losing database rows restore the

@@ -302,6 +302,7 @@ function sectionCard(section, content, contentErr, openByDefault) {
 // list of editable website fragments.
 module.exports = makeRouter;
 module.exports.SECTIONS = SECTIONS;
+module.exports.sniffImage = sniffImage; // Image Restore uses the editor's own check
 
 function makeRouter(appConfig, db) {
   const router = express.Router();

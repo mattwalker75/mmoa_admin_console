@@ -144,6 +144,9 @@ function ensureBundleDir() {
 // agent runs several commands at once, so 4 files in parallel cut a
 // photo-heavy backup / restore to about a quarter of the time.
 const FILE_PARALLEL = 4;
+// Largest HTML section a restore writes: the editor saves through a 64 KB
+// JSON request, so it could never save back anything bigger.
+const SECTION_MAX_BYTES = 60 * 1024;
 // On the first failure no new item is started, and the call only rejects
 // once every transfer already in flight has settled — so a failed restore
 // is never reported (and its lock released) while files are still being
@@ -379,7 +382,7 @@ function uploadJson(redirectBase) {
     upload.single('backup')(req, res, (err) => {
       if (err) {
         console.error('[backup] upload error:', err.message);
-        return res.redirect(redirectBase + '?error=' + encodeURIComponent(err.message));
+        return res.redirect(redirectBase + '?error=' + encodeURIComponent(err.code === 'LIMIT_FILE_SIZE' ? 'That file is larger than the 4 MB limit for this restore.' : err.message));
       }
       next();
     });
@@ -388,6 +391,14 @@ function uploadJson(redirectBase) {
 
 // Parse the uploaded JSON body into an object, or redirect with an error.
 // Returns the parsed object, or null (after redirecting).
+// Accept what the browser accepts: a UTF-8 byte-order mark, or UTF-16.
+function parseJsonBuffer(buf) {
+  const text = (buf[0] === 0xff && buf[1] === 0xfe) ? buf.slice(2).toString('utf16le')
+    : (buf[0] === 0xfe && buf[1] === 0xff) ? Buffer.from(buf.slice(2)).swap16().toString('utf16le')
+    : buf.toString('utf8');
+  return JSON.parse(text.replace(/^\uFEFF/, ''));
+}
+
 function parseUpload(req, res) {
   if (!req.file || !req.file.buffer) {
     res.redirect('/backup-restore?error=' + encodeURIComponent('No file received.'));
@@ -395,12 +406,7 @@ function parseUpload(req, res) {
   }
   let parsed;
   try {
-    // Accept what the browser accepts: a UTF-8 byte-order mark, or UTF-16.
-    const buf = req.file.buffer;
-    let text = (buf[0] === 0xff && buf[1] === 0xfe) ? buf.slice(2).toString('utf16le')
-      : (buf[0] === 0xfe && buf[1] === 0xff) ? Buffer.from(buf.slice(2)).swap16().toString('utf16le')
-      : buf.toString('utf8');
-    parsed = JSON.parse(text.replace(/^\uFEFF/, ''));
+    parsed = parseJsonBuffer(req.file.buffer);
   } catch (err) {
     res.redirect('/backup-restore?error=' + encodeURIComponent('Not valid JSON: ' + err.message));
     return null;
@@ -463,10 +469,11 @@ function selectiveRestoreForm(kind, action, confirmText, headsHtml, validKeys, l
                       const metaType = parsed._meta && parsed._meta.type;
                       let keys = [];
                       if (knd === 'wawebsite') {
-                        if (metaType && metaType !== 'web-app-website') { this.parseError = 'This is not a Web App website backup.'; return; }
+                        if (metaType !== 'web-app-website') { this.parseError = 'This is not a Web App website backup.'; return; }
                         const secs = parsed.sections || {};
                         keys = Object.keys(secs).filter(k => typeof secs[k] === 'string');
                         if (valid) keys = keys.filter(k => valid.includes(k));
+                        for (const k of keys) labels[k] = (labels[k] || k) + ' — ' + (new Blob([secs[k]]).size / 1024).toFixed(1) + ' KB';
                       } else if (knd === 'waconfig') {
                         if (metaType && metaType !== 'web-app-config') { this.parseError = 'This is not a Web App config backup.'; return; }
                         const cfg = (parsed.config && typeof parsed.config === 'object') ? parsed.config : parsed;
@@ -1900,10 +1907,12 @@ module.exports = function (db, appConfig, appConfigModule) {
           <h3 class="text-base font-semibold text-slate-900 dark:text-slate-100">Image Restore</h3>
           <p class="mt-1 text-sm text-slate-500 dark:text-slate-400">Upload an Image Backup (or a Web App Full Backup bundle — its images are used). Each website image and upload is written back to its folder, replacing a file with the same name; images that are not in the backup are left alone. Uploads only show on the site while the database still points at them — restore the database too if its rows were lost.</p>
           <form method="POST" action="/backup-restore/web-app-images/import" enctype="multipart/form-data" class="mt-5 space-y-4"
-                x-data="{ fileName: '', confirmed: false }">
+                x-data="{ fileName: '', confirmed: false, typeErr: '' }">
             <input type="file" name="backup" accept=".json,application/json" required
-                   x-on:change="fileName = $event.target.files[0] ? $event.target.files[0].name : ''"
+                   x-on:change="fileName = ''; typeErr = ''; const f = $event.target.files[0]; if (!f) return;
+                     f.slice(0, 4096).text().then(t => { if (/&quot;type&quot;\\s*:\\s*&quot;(web-app-images|web-app-bundle)&quot;/.test(t)) fileName = f.name; else typeErr = 'That file is not an Image Backup or a Web App Full Backup bundle.'; })"
                    class="block text-sm text-slate-600 dark:text-slate-300 file:mr-3 file:rounded-lg file:border-0 file:bg-brand-600 file:px-4 file:py-2 file:text-sm file:font-semibold file:text-white hover:file:bg-brand-700">
+            <p x-show="typeErr" x-cloak class="text-xs text-red-600 dark:text-red-300" x-text="typeErr"></p>
             <div class="flash-error text-xs"><strong>Heads up:</strong> same-name images are overwritten and are live on the next page load (no restart). Over EC2 (SSM) access this can take several minutes — keep the page open until it finishes.</div>
             <label class="flex items-start gap-2 text-sm"><input type="checkbox" class="h-4 w-4 mt-0.5" x-model="confirmed">
               <span>I understand this overwrites website images and uploads with the same names.</span></label>
@@ -2184,6 +2193,7 @@ module.exports = function (db, appConfig, appConfigModule) {
       };
       res.set('Content-Type', 'application/json; charset=utf-8');
       res.set('Content-Disposition', `attachment; filename="web_app_website_${dateStamp()}.json"`);
+      audit(req, 'backup.website_export', { kind: 'backup', label: 'Web App website', summary: `HTML sections downloaded: ${Object.keys(sections).join(', ')}` }).catch(() => {});
       res.send(JSON.stringify(envelope, null, 2));
     } catch (err) {
       console.error('[backup] web app website export failed:', err);
@@ -2194,8 +2204,8 @@ module.exports = function (db, appConfig, appConfigModule) {
   router.post('/backup-restore/web-app-website/import', requireAdmin, uploadJson('/backup-restore'), async (req, res) => {
     const parsed = parseUpload(req, res);
     if (!parsed) return;
-    if (parsed._meta && parsed._meta.type && parsed._meta.type !== 'web-app-website') {
-      return res.redirect('/backup-restore?error=' + encodeURIComponent('That file is not a Web App website backup.'));
+    if (!parsed._meta || typeof parsed._meta !== 'object' || parsed._meta.type !== 'web-app-website') {
+      return res.redirect('/backup-restore?error=' + encodeURIComponent('That file is not a Web App website backup (download one with Backup above).'));
     }
     const sections = (parsed.sections && typeof parsed.sections === 'object' && !Array.isArray(parsed.sections)) ? parsed.sections : null;
     if (!sections) {
@@ -2210,15 +2220,28 @@ module.exports = function (db, appConfig, appConfigModule) {
     if (!webAppAccess.isConfigured(appConfig)) {
       return res.redirect('/backup-restore?error=' + encodeURIComponent('Web App access is not configured (Settings → Web App).'));
     }
+    // The editor saves a section through a 64 KB request; a restore may not
+    // put in what the editor couldn't save back.
+    const big = recognized.filter(k => Buffer.byteLength(sections[k], 'utf8') > SECTION_MAX_BYTES);
+    if (big.length) {
+      await audit(req, 'backup.website_restore', { kind: 'backup', label: req.file && req.file.originalname, summary: `Refused: section(s) over ${SECTION_MAX_BYTES / 1024} KB: ${big.join(', ')}` });
+      return res.redirect('/backup-restore?error=' + encodeURIComponent(`Nothing was restored — section(s) larger than the editor allows (${SECTION_MAX_BYTES / 1024} KB): ${big.join(', ')}`));
+    }
+    // One file operation at a time with the Full / Image restores.
+    if (!startOp('website restore', req.file && req.file.originalname)) return res.redirect('/backup-restore?error=' + encodeURIComponent(`A ${opStatus.kind} is running — wait for it to finish.`));
     try {
       const accessor = webAppAccess.createAccessorFromConfig(appConfig);
       await Promise.all(recognized.map((key) => {
         const p = waConfig.joinPath(accessor.appPath, 'HTML/' + key + '.html');
         return accessor.writeFile(p, sections[key]);
       }));
+      finishOp(true);
+      await audit(req, 'backup.website_restore', { kind: 'backup', label: req.file && req.file.originalname, summary: `HTML sections restored: ${recognized.map(k => `${k} (${Buffer.byteLength(sections[k], 'utf8')} B)`).join(', ')}` });
       res.redirect('/backup-restore?ok=wawebsite&n=' + recognized.length);
     } catch (err) {
+      finishOp(false, err.message || String(err));
       console.error('[backup] web app website import failed:', err);
+      await audit(req, 'backup.website_restore', { kind: 'backup', label: req.file && req.file.originalname, summary: `FAILED: ${err.message || err}` });
       res.redirect('/backup-restore?error=' + encodeURIComponent('Web App website restore failed: ' + (err.message || err)));
     }
   });
@@ -2284,14 +2307,18 @@ module.exports = function (db, appConfig, appConfigModule) {
 
   router.post('/backup-restore/web-app-images/import', requireAdmin, (req, res, next) => {
     bundleUpload.single('backup')(req, res, (err) => {
-      if (err) return res.redirect('/backup-restore?error=' + encodeURIComponent(err.message || 'Upload failed'));
+      if (err) return res.redirect('/backup-restore?error=' + encodeURIComponent(err.code === 'LIMIT_FILE_SIZE' ? 'That file is larger than the 256 MB upload limit.' : (err.message || 'Upload failed')));
       next();
     });
   }, async (req, res) => {
     const back = (msg) => res.redirect('/backup-restore?error=' + encodeURIComponent(msg));
     if (!req.file) return back('No file received.');
     let parsed;
-    try { parsed = JSON.parse(req.file.buffer.toString('utf8')); } catch (e) { return back('That file is not valid JSON.'); }
+    try { parsed = parseJsonBuffer(req.file.buffer); } catch (e) { return back('That file is not valid JSON.'); }
+    const refuse = async (msg) => {
+      await audit(req, 'backup.images_restore', { kind: 'backup', label: req.file.originalname, summary: `Refused: ${msg}` });
+      return back(msg);
+    };
     const type = parsed && parsed._meta && parsed._meta.type;
     const isObj = (o) => o && typeof o === 'object' && !Array.isArray(o);
     let images = null, uploads = null, manifest = {}, upManifest = {};
@@ -2300,43 +2327,72 @@ module.exports = function (db, appConfig, appConfigModule) {
       uploads = parsed.uploads; // v2+; a v1 Image Backup has website images only
       manifest = (parsed._meta && parsed._meta.files) || {};
       upManifest = (parsed._meta && parsed._meta.uploadFiles) || {};
-    } else if (type === BUNDLE_TYPE || (parsed && parsed.website && parsed.website.images)) {
+    } else if (type === BUNDLE_TYPE) {
       images = parsed.website && parsed.website.images;
       uploads = parsed.uploads && parsed.uploads.files;
+      // The bundle's own manifest (keys "HTML/images/<n>", "uploads/<rel>").
+      const mf = (parsed._meta && parsed._meta.files) || {};
+      for (const k of Object.keys(mf)) {
+        if (k.startsWith('HTML/images/')) manifest[k.slice(12)] = mf[k];
+        else if (k.startsWith('uploads/')) upManifest[k.slice(8)] = mf[k];
+      }
     } else {
       return back('That file is not an Image Backup or a Web App Full Backup bundle.');
     }
     images = isObj(images) ? images : {};
     uploads = isObj(uploads) ? uploads : {};
-    const names = Object.keys(images).filter(n => IMAGE_EXT.test(n) && IMG_NAME_RE.test(n) && typeof images[n] === 'string');
+    const okName = (n) => IMAGE_EXT.test(n) && IMG_NAME_RE.test(n) && !n.startsWith('.') && n.length <= 200;
+    const names = Object.keys(images).filter(n => okName(n) && typeof images[n] === 'string');
     const rels = Object.keys(uploads).filter(r => uploadsHelper.isValidRel(r) && typeof uploads[r] === 'string');
-    if (!names.length && !rels.length) return back('No images found in that file.');
+    const ignored = [...Object.keys(images).filter(n => !names.includes(n)), ...Object.keys(uploads).filter(r => !rels.includes(r)).map(r => 'uploads/' + r)];
+    if (!names.length && !rels.length) return refuse('No images found in that file.' + (ignored.length ? ` (${ignored.length} entr${ignored.length === 1 ? 'y' : 'ies'} with names that aren't allowed were ignored.)` : ''));
+    // A v2 Image Backup lists every file with a checksum; one that doesn't is damaged / edited.
+    if (type === 'web-app-images' && parsed._meta.version >= 2) {
+      const unlisted = [...names.filter(n => !manifest[n]), ...rels.filter(r => !upManifest[r]).map(r => 'uploads/' + r)];
+      if (unlisted.length) return refuse(`Nothing was restored — ${unlisted.length} file(s) are not in the backup's checksum list: ${unlisted.slice(0, 5).join(', ')}${unlisted.length > 5 ? '…' : ''}`);
+    }
     // Decode and check everything BEFORE writing anything.
     const sha = (buf) => crypto.createHash('sha256').update(buf).digest('hex');
-    const decode = (label, b64, m) => {
+    // The editor's own checks: the bytes must be the image the name says
+    // (uploads: jpg / png / webp only, like the uploads contract), ≤ 8 MB.
+    const sniff = require('./webAppWebsite').sniffImage;
+    const decode = (label, b64, m, isUpload) => {
+      if (!/^[A-Za-z0-9+/\s]*={0,2}\s*$/.test(b64)) throw new Error(`"${label}" is not valid base64. Nothing was restored.`);
       const buf = Buffer.from(b64, 'base64');
       if (!buf.length) throw new Error(`"${label}" in the file is empty. Nothing was restored.`);
       if (m && m.sha256 && sha(buf) !== m.sha256) throw new Error(`"${label}" does not match its checksum — the file is damaged. Nothing was restored.`);
+      if (buf.length > uploadsHelper.MAX_BYTES) throw new Error(`"${label}" is larger than 8 MB (the editor's limit). Nothing was restored.`);
+      const ext = (/\.([A-Za-z0-9]+)$/.exec(label) || [])[1].toLowerCase();
+      const kind = isUpload ? uploadsHelper.sniffExt(buf) : (sniff(buf) || {}).kind;
+      const same = kind && (kind === ext || (kind === 'jpg' && ext === 'jpeg'));
+      if (!same) throw new Error(`"${label}" is not a ${ext.toUpperCase()} image (its contents are ${kind ? kind.toUpperCase() : 'not an image'}). Nothing was restored.`);
       return buf;
     };
     const imgBufs = {}, upBufs = {};
     try {
-      for (const n of names) imgBufs[n] = decode(n, images[n], manifest[n]);
-      for (const r of rels) upBufs[r] = decode(`uploads/${r}`, uploads[r], upManifest[r]);
-    } catch (e) { return back(e.message); }
+      for (const n of names) imgBufs[n] = decode(n, images[n], manifest[n], false);
+      for (const r of rels) upBufs[r] = decode(`uploads/${r}`, uploads[r], upManifest[r], true);
+    } catch (e) { return refuse(e.message); }
     if (!webAppAccess.isConfigured(appConfig)) return back('Web App access is not configured (Settings → Web App).');
     let nImg = 0, nUp = 0;
     const total = names.length + rels.length;
+    // One file operation at a time with the Full Backup / Restore (whose
+    // clean-up step would otherwise delete what this writes).
+    if (!startOp('image restore', req.file.originalname)) return back(`A ${opStatus.kind} is running — wait for it to finish.`);
     try {
       const accessor = webAppAccess.createAccessorFromConfig(appConfig);
       const imgDir = waConfig.joinPath(accessor.appPath, IMAGES_REL_DIR);
-      // mkdir -p + atomic write; ≤40 KB SSM pieces on EC2.
-      for (const n of names) { await accessor.writeFileChunked(waConfig.joinPath(imgDir, n), imgBufs[n]); nImg++; }
-      for (const r of rels) { await accessor.writeFileChunked(waConfig.joinPath(accessor.appPath, UPLOADS_REL_DIR + '/' + r), upBufs[r]); nUp++; }
+      // mkdir -p + atomic write; ≤40 KB SSM pieces on EC2; 4 at a time.
+      mark('Images', 'in_progress', `${total} files`);
+      await mapPool(names, FILE_PARALLEL, async (n) => { await accessor.writeFileChunked(waConfig.joinPath(imgDir, n), imgBufs[n]); nImg++; });
+      await mapPool(rels, FILE_PARALLEL, async (r) => { await accessor.writeFileChunked(waConfig.joinPath(accessor.appPath, UPLOADS_REL_DIR + '/' + r), upBufs[r]); nUp++; });
+      mark('Images', 'ok', `${nImg} website image(s), ${nUp} upload(s)`);
+      finishOp(true);
       await audit(req, 'backup.images_restore', { kind: 'backup', label: req.file.originalname,
-        summary: `${nImg} website image(s) + ${nUp} upload(s) restored from ${type === 'web-app-images' ? 'an Image Backup' : 'a full bundle'}` });
-      res.redirect(`/backup-restore?ok=waimages&n=${nImg}&u=${nUp}`);
+        summary: `${nImg} website image(s) + ${nUp} upload(s) restored from ${type === 'web-app-images' ? 'an Image Backup' : 'a full bundle'}${ignored.length ? `; ${ignored.length} with names that aren't allowed ignored` : ''}` });
+      res.redirect(`/backup-restore?ok=waimages&n=${nImg}&u=${nUp}` + (ignored.length ? '&warn=' + encodeURIComponent(`${ignored.length} entr${ignored.length === 1 ? 'y' : 'ies'} with names that aren't allowed were ignored: ${ignored.slice(0, 5).join(', ')}${ignored.length > 5 ? '…' : ''}`) : ''));
     } catch (err) {
+      finishOp(false, err.message || String(err));
       console.error('[backup] web app images import failed:', err);
       await audit(req, 'backup.images_restore', { kind: 'backup', label: req.file.originalname,
         summary: `Image restore FAILED after ${nImg + nUp} of ${total}: ${err.message || err}` });
