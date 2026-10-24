@@ -397,6 +397,14 @@ one-at-a-time lock holds) and the browser flow. Bundles use about 9× their
 size in console memory while being made, verified or restored — mind that
 on a small instance once the photo library grows.
 
+**Over EC2 (SSM)** the same backup → damage → restore and the brand-new
+install restore were run through a local SSM stand-in that enforces AWS's
+output limits: identical results. Files move 4 at a time; with this data
+set (≈23 MB of images) a backup was ≈270 SSM-seconds and a restore ≈200 at
+0.25 s per command — expect several minutes on real SSM, more as photos
+grow. A database step the console stops waiting for is followed to the
+end on the host rather than reported as failed.
+
 **Full Restore** walks through: test access (read, write, run a command,
 every uploads folder) → optional Maintenance Mode → verify the bundle
 (including whether it fits *this* database) → restore → restart the Web

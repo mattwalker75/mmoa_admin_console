@@ -103,15 +103,18 @@ async function runCommand(appConfig, instanceId, command, opts) {
   // first poll immediately (most short commands finish in well under a
   // second), then back off 250ms → 2s so long commands don't hammer the API.
   const fixedPollMs  = (opts && opts.pollEveryMs) || 0;
-  // AWS SSM caps Run Command timeout at 2 days; we hard-cap at 600s here
-  // because the operator is staring at the UI waiting.
+  // TimeoutSeconds is SSM's DELIVERY timeout (how long the command may wait
+  // to reach the agent); how long it may RUN is the document's
+  // executionTimeout (AWS-RunShellScript default 3600 s). Set both from the
+  // caller's budget so a command can't outlive what the console expects.
   const ssmTimeoutSec = Math.min(600, Math.max(30, Math.ceil(timeoutMs / 1000)));
+  const execTimeoutSec = Math.min(172800, Math.max(30, Math.ceil(timeoutMs / 1000)));
 
   const sendInput = {
     InstanceIds: [instanceId],
     DocumentName: 'AWS-RunShellScript',
     Comment: (opts && opts.comment) || 'Admin console run',
-    Parameters: { commands: [command] },
+    Parameters: { commands: [command], executionTimeout: [String(execTimeoutSec)] },
     TimeoutSeconds: ssmTimeoutSec
   };
   const sendRes = await logAwsCall('SendCommand', sendInput,

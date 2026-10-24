@@ -138,6 +138,17 @@ function ensureBundleDir() {
 }
 // The stamp is to the second: a second bundle in the same second (two
 // operators, a script) must not overwrite the first — append -2, -3, ….
+// Run fn over items with at most `n` in flight. File transfers use it:
+// over EC2 every piece of every file is its own SSM round trip, and the SSM
+// agent runs several commands at once, so 4 files in parallel cut a
+// photo-heavy backup / restore to about a quarter of the time.
+const FILE_PARALLEL = 4;
+async function mapPool(items, n, fn) {
+  let i = 0;
+  const worker = async () => { while (i < items.length) { const k = i++; await fn(items[k], k); } };
+  await Promise.all(Array.from({ length: Math.min(n, items.length) }, worker));
+}
+
 function uniqueBundleName(base) {
   let name = `${base}.json`;
   for (let n = 2; fs.existsSync(path.join(BUNDLE_DIR, name)); n++) name = `${base}-${n}.json`;
@@ -982,8 +993,12 @@ module.exports = function (db, appConfig, appConfigModule) {
     progress('Website', 'ok', `${Object.keys(sections).length} sections`);
     const images = {}, skippedImages = [];
     const names = ((b.dirs[imgDir] || {}).names || []).filter(n => IMAGE_EXT.test(n)).sort();
+    for (const d of [imgDir, ...upDirs]) {
+      const e = b.dirs[d] && b.dirs[d].err;
+      if (e) throw new Error(`Could not list ${d} on the Web App host: ${e}`);
+    }
     progress('Images', 'in_progress', `${names.length} to capture`);
-    for (const n of names) {
+    await mapPool(names, FILE_PARALLEL, async (n) => {
       try {
         const buf = Buffer.from(await accessor.readFile(waConfig.joinPath(imgDir, n)));
         images[n] = buf.toString('base64');
@@ -992,7 +1007,7 @@ module.exports = function (db, appConfig, appConfigModule) {
         skippedImages.push(n);
         warnings.push(`image "${n}" skipped: ${e.message || e}`);
       }
-    }
+    });
 
     progress('Images', skippedImages.length ? 'warn' : 'ok', `${Object.keys(images).length} captured${skippedImages.length ? `, ${skippedImages.length} skipped` : ''}`);
 
@@ -1008,7 +1023,8 @@ module.exports = function (db, appConfig, appConfigModule) {
     upNames.sort();
     progress('Uploads', 'in_progress', `${upNames.length} to capture`);
     const upFiles = {}, skippedUploads = [];
-    for (const rel of upNames) {
+    let upDone = 0;
+    await mapPool(upNames, FILE_PARALLEL, async (rel) => {
       try {
         const buf = Buffer.from(await accessor.readFile(waConfig.joinPath(accessor.appPath, UPLOADS_REL_DIR + '/' + rel)));
         upFiles[rel] = buf.toString('base64');
@@ -1017,7 +1033,8 @@ module.exports = function (db, appConfig, appConfigModule) {
         skippedUploads.push(rel);
         warnings.push(`upload "${rel}" skipped: ${e.message || e}`);
       }
-    }
+      if (++upDone % 10 === 0) progress('Uploads', 'in_progress', `${upDone} of ${upNames.length}`);
+    });
     progress('Uploads', skippedUploads.length ? 'warn' : 'ok', `${Object.keys(upFiles).length} captured${skippedUploads.length ? `, ${skippedUploads.length} skipped` : ''}`);
     const filesFinishedAt = new Date().toISOString();
 
@@ -1196,11 +1213,11 @@ module.exports = function (db, appConfig, appConfigModule) {
     const imgNames = (web.images && typeof web.images === 'object')
       ? Object.keys(web.images).filter(x => IMAGE_EXT.test(x) && /^[A-Za-z0-9._-]+$/.test(x)) : [];
     let nImg = 0;
-    for (const x of imgNames) {
-      // Chunked: mkdir -p + atomic write, ≤40 KB SSM pieces on EC2.
+    // Chunked: mkdir -p + atomic write, ≤40 KB SSM pieces on EC2.
+    await mapPool(imgNames, FILE_PARALLEL, async (x) => {
       await accessor.writeFileChunked(waConfig.joinPath(imgDir, x), Buffer.from(String(web.images[x]), 'base64'));
       nImg++;
-    }
+    });
     restored.push(`${nSec} HTML sections`, `${nImg} website images`);
     done('Website', `${nSec} HTML sections, ${nImg} images`);
 
@@ -1208,10 +1225,10 @@ module.exports = function (db, appConfig, appConfigModule) {
     const upRels = Object.keys(up).filter(uploadsHelper.isValidRel);
     progress('Uploads', 'in_progress', `${upRels.length} files`);
     let nUp = 0;
-    for (const rel of upRels) {
+    await mapPool(upRels, FILE_PARALLEL, async (rel) => {
       await accessor.writeFileChunked(waConfig.joinPath(accessor.appPath, UPLOADS_REL_DIR + '/' + rel), Buffer.from(String(up[rel]), 'base64'));
-      nUp++;
-    }
+      if (++nUp % 10 === 0) progress('Uploads', 'in_progress', `${nUp} of ${upRels.length}`);
+    });
     restored.push(`${nUp} uploads`);
     done('Uploads', `${nUp} files written to uploads/`);
 
@@ -1240,6 +1257,10 @@ module.exports = function (db, appConfig, appConfigModule) {
       const keepUp = new Set([...upRels, ...((bundle.uploads && Array.isArray(bundle.uploads.skipped)) ? bundle.uploads.skipped : [])]);
       const upDirs = uploadsHelper.KINDS.map(k => waConfig.joinPath(accessor.appPath, UPLOADS_REL_DIR + '/' + k));
       const listing = await accessor.readBundle({ files: [], dirs: [imgDir, ...upDirs] });
+      for (const d of [imgDir, ...upDirs]) {
+        const e = listing.dirs[d] && listing.dirs[d].err;
+        if (e) throw new Error(`Could not list ${d} to remove files not in the bundle: ${e}`);
+      }
       const extraImg = ((listing.dirs[imgDir] || {}).names || []).filter(n => IMAGE_EXT.test(n) && /^[A-Za-z0-9._-]+$/.test(n) && !keepImg.has(n));
       const extraUp = [];
       uploadsHelper.KINDS.forEach((k, i) => {

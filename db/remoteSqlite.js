@@ -207,7 +207,9 @@ function init(appConfig, sqliteCfg) {
       // otherwise hand back a marker and read the file in pieces.
       tmp = `${file}.console-out.${tmpSuffix()}.tmp`;
       cmd = guardMissing(file,
-        `${run} > ${shq(tmp)}; rc=$?; sz=$(wc -c < ${shq(tmp)} | tr -d ' '); ` +
+        // Create the file private first (it can hold the whole database); the
+        // umask stays in the subshell so sqlite3's own -wal/-shm are unaffected.
+        `( umask 077; : > ${shq(tmp)} ); ${run} > ${shq(tmp)}; rc=$?; sz=$(wc -c < ${shq(tmp)} | tr -d ' '); ` +
         `if [ "$rc" -ne 0 ] || [ "$sz" -lt ${MAX_INLINE_OUTPUT} ]; then cat ${shq(tmp)}; rm -f ${shq(tmp)}; exit $rc; fi; echo "__RS_BIG__ $sz"`);
     } else {
       cmd = guardMissing(file, run);
@@ -298,19 +300,36 @@ function init(appConfig, sqliteCfg) {
       const pieces = chunkForUpload(text, MAX_INLINE_SQL);
       for (let i = 0; i < pieces.length; i++) {
         const redir = i === 0 ? '>' : '>>';
-        const r = await a.runCommand(`printf '%s' ${shq(pieces[i])} | base64 -d ${redir} ${shq(tmp)}`, { timeoutMs: 60000 });
+        // umask 077: the staged SQL holds the whole database (password hashes).
+        const r = await a.runCommand(`umask 077; printf '%s' ${shq(pieces[i])} | base64 -d ${redir} ${shq(tmp)}`, { timeoutMs: 60000 });
         if (r.code !== 0) throw new Error(`Could not stage transaction SQL on the host: ${(r.stderr || '').trim() || 'exit ' + r.code}`);
       }
-      const r = await a.runCommand(
-        guardMissing(file, `sqlite3 -batch -bail -cmd ".timeout 5000" ${shq(file)} < ${shq(tmp)}`),
+      // The exit code also goes to a marker file: over SSM the console can
+      // stop waiting while the command keeps running on the host, and a
+      // transaction that then COMMITs must not be reported as failed.
+      const mk = `${tmp}.rc`;
+      let r = await a.runCommand(
+        guardMissing(file, `sqlite3 -batch -bail -cmd ".timeout 5000" ${shq(file)} < ${shq(tmp)}; rc=$?; echo $rc > ${shq(mk)}; exit $rc`),
         { timeoutMs: 600000 }
       );
-      if (r.timedOut) throw new Error('Remote SQLite transaction timed out (it may still be running on the host).');
-      if (r.code !== 0) {
-        throw new Error(`Remote SQLite transaction failed (rolled back): ${(r.stderr || '').trim() || 'exit ' + r.code}`);
+      let code = r.code;
+      if (r.timedOut) {
+        code = null;
+        const deadline = Date.now() + 60 * 60 * 1000;
+        while (code === null && Date.now() < deadline) {
+          await new Promise(res => setTimeout(res, 5000));
+          const m = await a.runCommand(`cat ${shq(mk)} 2>/dev/null || echo __WAIT__`, { timeoutMs: 30000 }).catch(() => null);
+          const t = m && String(m.stdout || '').trim();
+          if (t && t !== '__WAIT__' && /^\d+$/.test(t)) code = Number(t);
+        }
+        if (code === null) throw new Error('Remote SQLite transaction still running after an hour — check the host before retrying.');
+        r = { ...r, stderr: code === 0 ? '' : (r.stderr || 'the transaction failed on the host (see its log)') };
+      }
+      if (code !== 0) {
+        throw new Error(`Remote SQLite transaction failed (rolled back): ${(r.stderr || '').trim() || 'exit ' + code}`);
       }
     } finally {
-      try { await a.runCommand(`rm -f ${shq(tmp)}`, { timeoutMs: 30000 }); } catch (e) { /* best effort */ }
+      try { await a.runCommand(`rm -f ${shq(tmp)} ${shq(tmp + '.rc')}`, { timeoutMs: 30000 }); } catch (e) { /* best effort */ }
     }
   }
 

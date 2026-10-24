@@ -164,11 +164,26 @@ async function genericReadBundle(accessor, spec, opts) {
     }),
     ...dirs.map(async (p) => {
       try {
-        const r = await accessor.runCommand(`ls -1 -- ${shQuote(p)}`, { timeoutMs: 20000 });
-        out.dirs[p] = {
-          names: r.code === 0 ? (r.stdout || '').split('\n').map(s => s.trim()).filter(Boolean) : [],
-          err: null
-        };
+        // exit 3 = the folder doesn't exist (an empty list, not an error).
+        const r = await accessor.runCommand(`[ -d ${shQuote(p)} ] || exit 3; ls -1 -- ${shQuote(p)}`, { timeoutMs: 20000 });
+        if (r.code === 3) { out.dirs[p] = { names: [], err: null }; return; }
+        if (r.code !== 0) { out.dirs[p] = { names: [], err: (r.stderr || '').trim() || `ls exited ${r.code}` }; return; }
+        let text = r.stdout || '';
+        if (r.truncated) {
+          // SSM caps a command's output (~24 KB ≈ 1,100 upload names): a
+          // cut-off listing must never pass for the whole folder (a backup
+          // would silently miss files). Write it to a file and read that
+          // back in pieces instead.
+          const tmp = `${p.replace(/\/+$/, '')}/../.wa-ls.${require('crypto').randomBytes(6).toString('hex')}.txt`;
+          try {
+            const w = await accessor.runCommand(`umask 077; ls -1 -- ${shQuote(p)} > ${shQuote(tmp)}`, { timeoutMs: 60000 });
+            if (w.code !== 0) throw new Error((w.stderr || '').trim() || `ls exited ${w.code}`);
+            text = String(await accessor.readFileChunked(tmp, { encoding: 'utf8' }));
+          } finally {
+            await accessor.runCommand(`rm -f -- ${shQuote(tmp)}`, { timeoutMs: 20000 }).catch(() => {});
+          }
+        }
+        out.dirs[p] = { names: text.split('\n').map(s => s.trim()).filter(Boolean), err: null };
       } catch (e) {
         out.dirs[p] = { names: [], err: e.message || String(e) };
       }
