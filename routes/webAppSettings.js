@@ -564,3 +564,30 @@ module.exports = function (appConfig, appConfigModule) {
 
   return router;
 };
+
+// Check values from somewhere other than this form (a restored backup)
+// against the same limits the form enforces: number ranges, select
+// options and guarded toggles (e.g. the Donate button needs a valid link).
+// Only the given top-level keys are checked. Returns [error, …].
+module.exports.validateConfigValues = function validateConfigValues(json, keys) {
+  const errs = [];
+  const want = new Set(keys || []);
+  for (const tab of Object.keys(FIELDS)) {
+    for (const d of FIELDS[tab]) {
+      if (!d.path || d.type === 'heading' || !want.has(d.path.split('.')[0])) continue;
+      const v = waConfig.getPath(json, d.path);
+      if (v === undefined || v === null || v === '') continue;
+      if (d.type === 'number' && (!Number.isInteger(v) || (d.min !== undefined && v < d.min) || (d.max !== undefined && v > d.max))) {
+        errs.push(`${d.path}: ${JSON.stringify(v)} is outside ${d.min ?? '…'}–${d.max ?? '…'}`);
+      } else if (d.type === 'select' && !d.options.map(o => o[0]).includes(v)) {
+        errs.push(`${d.path}: ${JSON.stringify(v)} is not one of ${d.options.map(o => o[0]).join(', ')}`);
+      } else if (d.type === 'toggle' && typeof v !== 'boolean') {
+        errs.push(`${d.path}: must be true or false`);
+      } else if (d.guard && v === true) {
+        const m = d.guard.server(json);
+        if (m) errs.push(`${d.path}: ${m}`);
+      }
+    }
+  }
+  return errs;
+};

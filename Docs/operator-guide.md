@@ -484,9 +484,19 @@ snapshot), or on the host `sqlite3 mmoa_web_app.db ".backup backup.db"`.
   Stop / Restart commands) is only taken from the file when you tick that
   box. The result lists what needs a console restart. Exports and restores
   are in the Audit log.
-- **Web App configuration / website** — selective restore by section.
-  Only known config keys are offered; `maintenanceCommand` needs the
-  commands box ticked.
+- **Web App configuration** — the Web App's `config.json` plus its session
+  keys (`local-secrets.json`, so members stay signed in). Each ticked
+  section replaces that section; values are checked with Web App Settings'
+  own limits first (number ranges, choices, the Donate-link guard, a real
+  port) and nothing is written if one fails. **Keep this server's own
+  machine settings** (on by default) keeps the host's port, TLS / proxy,
+  database connection, public address and AWS credential source / region,
+  as the Full Restore does. The maintenance command is only taken from the
+  file when you tick that box — the page shows the file's command first.
+  Every restored section needs a Web App restart; the page offers it. If
+  the Web App's `config.json` is missing or broken, the restore rebuilds it
+  from the file. Exports and restores are in the Audit log.
+- **Web App website** — selective restore of the HTML sections.
 - **Images** — *Image Backup* downloads every image with a size and
   SHA-256 each: the website images in `HTML/images/` (Web App Website →
   Images) and the uploads in `uploads/` (event flyers and covers, raffle
