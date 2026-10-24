@@ -267,6 +267,42 @@ const WA_HOST_KEYS = ['port', 'server', 'database'];
 const WA_HOST_KEYS_IF_SET = ['publicBaseUrl'];
 const RESTORE_COMMANDS_LABEL = 'Also restore the shell commands in this file (the Web App maintenance command / Start · Stop · Restart commands). Leave this off unless you made the backup yourself — the console runs these on the Web App host.';
 
+// Shape checks for restored Web App config sections (on top of
+// webAppSettings.validateConfigValues, which covers numbers / choices):
+// text keys are strings, object sections are plain objects (not too deep),
+// address / link fields are http(s), session keys look like keys. Prototype
+// keys are stripped. Returns [error, …] and mutates `cfg` (stripping only).
+const WA_TEXT_KEYS = ['appTitle', 'appSubtitle', 'orgName', 'publicBaseUrl', 'sessionKeyMode', 'maintenanceCommand'];
+const WA_OBJECT_KEYS = ['site', 'uploads', 'server', 'database', 'email', 'aws', 'security'];
+const WA_URL_PATHS = ['publicBaseUrl', 'site.facebookUrl', 'site.instagramUrl', 'site.youtubeUrl', 'site.xUrl', 'site.nextdoorUrl', 'site.donationUrl'];
+function stripProto(v, d = 0) {
+  if (d > 10) throw new Error('nested too deeply');
+  if (Array.isArray(v)) { v.forEach(x => stripProto(x, d + 1)); return; }
+  if (v && typeof v === 'object') for (const k of Object.keys(v)) {
+    if (k === '__proto__' || k === 'constructor' || k === 'prototype') delete v[k]; else stripProto(v[k], d + 1);
+  }
+}
+function validKeyList(a) {
+  return Array.isArray(a) && a.length >= 1 && a.every(k => typeof k === 'string' && (k === '' || k.length >= 16));
+}
+function checkWaConfigShapes(cfg, keys) {
+  const errs = [];
+  for (const k of keys) {
+    const v = cfg[k];
+    try { stripProto(v); } catch (e) { errs.push(`${k}: nested too deeply`); continue; }
+    if (WA_TEXT_KEYS.includes(k) && v !== undefined && v !== null && (typeof v !== 'string' || v.length > 2000)) errs.push(`${k}: must be text (up to 2000 characters)`);
+    if (WA_OBJECT_KEYS.includes(k) && !(v && typeof v === 'object' && !Array.isArray(v))) errs.push(`${k}: must be a group of settings, not ${Array.isArray(v) ? 'a list' : typeof v}`);
+    if (k === 'site' && v && typeof v === 'object') for (const [sk, sv] of Object.entries(v)) if (typeof sv === 'string' && sv.length > 2000) errs.push(`site.${sk}: longer than 2000 characters`);
+    if (k === 'sessionKeys' && !validKeyList(v)) errs.push('sessionKeys: not a list of signing keys (each at least 16 characters)');
+  }
+  for (const pth of WA_URL_PATHS) {
+    if (!keys.includes(pth.split('.')[0])) continue;
+    const v = waConfig.getPath(cfg, pth);
+    if (v && (typeof v !== 'string' || !/^https?:\/\/[^\s<>"']+$/i.test(v))) errs.push(`${pth}: must be empty or an http(s) address`);
+  }
+  return errs;
+}
+
 // Normalize a multi-value form field (checkboxes share name="sections") into
 // an array of strings.
 function normalizeArray(v) {
@@ -1763,7 +1799,7 @@ module.exports = function (db, appConfig, appConfigModule) {
       bundle: 'Web App restored from the bundle — database, configuration, session keys, website, uploads, console templates and maintenance file.' + (req.query.restarted ? ' The Web App was restarted and is running the restored configuration.' : ' Restart the Web App so it reads the restored config.'),
       bundleup: 'Bundle uploaded.',
       settings: `Console settings restored${nTxt}.`,
-      waconfig: `Web App config restored${nTxt} on the remote host.`,
+      waconfig: `Web App config restored${nTxt}.`,
       wawebsite: `Web App website restored${nTxt}.`,
       waimages: `Images restored${req.query.n ? ' (' + (parseInt(req.query.n, 10) || 0) + ' website image(s), ' + (parseInt(req.query.u, 10) || 0) + ' upload(s))' : ''}.`,
       database: `Web App database restored${req.query.n ? ' (' + (parseInt(req.query.n, 10) || 0) + ' tables)' : ''}.`
@@ -1820,8 +1856,13 @@ module.exports = function (db, appConfig, appConfigModule) {
           ${selectiveRestoreForm('waconfig', '/backup-restore/web-app-config/import',
             'I understand this overwrites the selected sections in the Web App config.json.',
             `<div class="flash-error text-xs"><strong>Heads up:</strong> every restored section takes effect after the Web App restarts (the page offers it). Only the keys Web App Settings edits can be restored; <code class="font-mono">maintenanceCommand</code> is kept as it is unless you tick the commands box below.</div>`,
-            [...WA_CONFIG_KEYS, 'localSecrets'], { ...WA_CONFIG_LABELS, localSecrets: 'Session keys (members stay signed in)' }, true,
-            `<input type="hidden" name="keep_host" value="0">
+            [...WA_CONFIG_KEYS, 'localSecrets'], { ...WA_CONFIG_LABELS, localSecrets: 'Session keys (members stay signed in)' },
+            'Also restore the maintenance command from the file. Leave this off unless you made the backup yourself — the console runs it on the Web App host when you use Maintenance Mode.',
+            `<label class="flex items-start gap-2 text-xs text-amber-700 dark:text-amber-300" x-show="sections.length" x-cloak>
+              <input type="checkbox" name="restore_session_keys" value="1" class="mt-0.5">
+              <span>Also restore the session keys (signing keys) — members stay signed in. Only for a backup you made yourself: whoever has the file can sign in as any member with them.</span>
+            </label>
+            <input type="hidden" name="keep_host" value="0">
             <label class="flex items-start gap-2 text-xs text-slate-700 dark:text-slate-200" x-show="sections.length" x-cloak>
               <input type="checkbox" name="keep_host" value="1" checked class="mt-0.5">
               <span>Keep this server's own machine settings — port, TLS / proxy (server), database connection, public address (publicBaseUrl) and AWS credential source / region — instead of the file's. Recommended, especially when restoring onto a new server.</span>
@@ -2023,9 +2064,22 @@ module.exports = function (db, appConfig, appConfigModule) {
     const selected = normalizeArray(req.body.sections);
     const restoreCommands = req.body.restore_commands === '1';
     const keepHost = req.body.keep_host !== '0';
-    const wantSecrets = selected.includes('localSecrets') && parsed.localSecrets && typeof parsed.localSecrets === 'object' && !Array.isArray(parsed.localSecrets);
-    const present = selected.filter(k => WA_CONFIG_KEYS.includes(k) && Object.prototype.hasOwnProperty.call(cfg, k));
-    if (!present.length && !wantSecrets) return back('No sections selected to restore.');
+    // Session signing keys: whoever made the file could sign in as any
+    // member with them, so they only come from the file on an explicit opt-in.
+    const restoreKeys = req.body.restore_session_keys === '1';
+    const wantSecrets = restoreKeys && selected.includes('localSecrets') && parsed.localSecrets && typeof parsed.localSecrets === 'object' && !Array.isArray(parsed.localSecrets);
+    let present = selected.filter(k => WA_CONFIG_KEYS.includes(k) && Object.prototype.hasOwnProperty.call(cfg, k));
+    const keyNote = (!restoreKeys && (present.includes('sessionKeys') || selected.includes('localSecrets'))) ? 'session keys kept as on the host (tick "restore the session keys" to take them from the file)' : '';
+    if (!restoreKeys) present = present.filter(k => k !== 'sessionKeys');
+    if (Array.isArray(parsed.config)) return back('No Web App config found in that file.');
+    if (!present.length && !wantSecrets) return back(keyNote ? 'Only the session keys were selected — ' + keyNote + '.' : 'No sections selected to restore.');
+    if (wantSecrets) {
+      const ls = parsed.localSecrets;
+      const extra = Object.keys(ls).filter(k => !['sessionKeys', 'createdAt', '_comment'].includes(k));
+      if (extra.length || !validKeyList(ls.sessionKeys) || ls.sessionKeys.length < 2 || ls.sessionKeys.some(k => k.length < 16)) return back('Nothing was restored — the session keys in the file are not valid signing keys.');
+    }
+    const shapeErrs = checkWaConfigShapes(cfg, present);
+    if (shapeErrs.length) return back('Nothing was restored — ' + shapeErrs.join('; '));
     if (!webAppAccess.isConfigured(appConfig)) return back('Web App access is not configured (Settings → Web App).');
     try {
       const accessor = webAppAccess.createAccessorFromConfig(appConfig);
@@ -2033,9 +2087,18 @@ module.exports = function (db, appConfig, appConfigModule) {
       // missing or broken (when a restore matters most), start from the file.
       let json, liveBroken = null;
       try { ({ json } = await waConfig.readRemoteConfig(accessor)); }
-      catch (e) { liveBroken = e.message || String(e); json = {}; }
+      catch (e) { liveBroken = (e.message || String(e)).replace(/ Fix it on the Web App before editing here\.?/, ''); json = {}; }
       const notes = [], restoredKeys = [], keptHost = [];
-      if (liveBroken) notes.push(`the Web App's config.json could not be read (${liveBroken}) — rebuilt from this file; sections you didn't tick are now at their defaults`);
+      const cfgPath = waConfig.remoteConfigPath(accessor);
+      if (liveBroken) {
+        // Rebuilding from a partial selection would silently drop every
+        // section not ticked (port, database, mail…): require all of them.
+        const fileKeys = Object.keys(cfg).filter(k => WA_CONFIG_KEYS.includes(k) && !WA_COMMAND_KEYS.includes(k) && k !== 'sessionKeys');
+        const missing = fileKeys.filter(k => !present.includes(k));
+        if (missing.length) return back(`The Web App's config.json can't be read (${liveBroken}). To rebuild it from this file, tick ALL its sections (missing: ${missing.join(', ')}).`);
+        await accessor.runCommand(`[ -e ${shq(cfgPath)} ] && cp -p -- ${shq(cfgPath)} ${shq(cfgPath + '.broken-' + Date.now())} ; ( umask 077; [ -e ${shq(cfgPath)} ] || : > ${shq(cfgPath)} ); true`, { timeoutMs: 20000 }).catch(() => {});
+        notes.push(`the Web App's config.json could not be read (${liveBroken}) — the old file was kept as config.json.broken-…, and config.json was rebuilt from this file`);
+      }
       for (const k of present) {
         if (WA_COMMAND_KEYS.includes(k) && !restoreCommands) {
           if (JSON.stringify(cfg[k]) !== JSON.stringify(json[k])) notes.push(`${k} differs from the file and was kept as on the host — tick the commands box to restore it`);
@@ -2059,12 +2122,20 @@ module.exports = function (db, appConfig, appConfigModule) {
       // Same limits as Web App Settings; port must be a real port.
       const errs = require('./webAppSettings').validateConfigValues(json, restoredKeys);
       if (restoredKeys.includes('port') && !(Number.isInteger(json.port) && json.port >= 1 && json.port <= 65535)) errs.push(`port: ${JSON.stringify(json.port)} is not a port number`);
+      if (restoredKeys.includes('server') && json.server && json.server.ssl === true) {
+        for (const f of ['keyPath', 'certPath']) {
+          const fp = json.server[f];
+          const abs = fp && (fp.startsWith('/') ? fp : waConfig.joinPath(accessor.appPath, fp));
+          if (!abs || !(await accessor.exists(abs).catch(() => false))) errs.push(`server.ssl is on but server.${f} (${fp || 'empty'}) does not exist on the Web App host — it would refuse to start`);
+        }
+      }
       if (errs.length) {
         await audit(req, 'backup.waconfig_restore', { kind: 'backup', label: req.file && req.file.originalname, summary: `Refused: ${errs.join('; ')}` });
         return back('Nothing was restored — the file has values Web App Settings would not accept: ' + errs.join('; '));
       }
       if (restoredKeys.length || liveBroken) {
         await waConfig.writeRemoteConfig(accessor, json);
+        if (liveBroken) await accessor.runCommand(`chmod 600 ${shq(cfgPath)}`, { timeoutMs: 20000 }).catch(() => {});
         waConfig.markWebAppWritten(appConfig);
         appConfigModule.save();
       }
@@ -2078,13 +2149,19 @@ module.exports = function (db, appConfig, appConfigModule) {
       }
       if (keptHost.length) notes.push(`this server's own ${keptHost.join(', ')} kept (untick "keep this server's settings" to take them from the file)`);
       if (restoredKeys.includes('database')) notes.push('database settings restored — the console keeps using its own connection (Settings → Web App); make sure both point at the same database');
+      if (restoredKeys.includes('email')) {
+        const h = (o) => (o && o.email && o.email.smtp && o.email.smtp.host) || '';
+        notes.push(`mail now goes out via ${json.email && json.email.transport || '?'}${h(json) ? ' / ' + h(json) : ''} — password-reset links are sent that way`);
+      }
       await audit(req, 'backup.waconfig_restore', { kind: 'backup', label: req.file && req.file.originalname,
         summary: `Restored: ${restoredKeys.join(', ') || 'nothing'}${keptHost.length ? `; host kept: ${keptHost.join(', ')}` : ''}${restoreCommands ? '; maintenance command taken from the file' : ''}` });
+      if (keyNote) notes.push(keyNote);
+      if (!restoredKeys.length && !liveBroken) return res.redirect('/backup-restore?ok=waconfig&n=0&warn=' + encodeURIComponent(['Nothing was changed.', ...notes].join(' ')));
       res.redirect('/backup-restore?ok=waconfig&restored=1&n=' + restoredKeys.length +
         '&warn=' + encodeURIComponent(['Every restored section takes effect after the Web App restarts.', ...notes].join(' ')));
     } catch (err) {
       console.error('[backup] web app config import failed:', err);
-      back('Web App config restore failed: ' + (err.message || err));
+      back('Web App config restore failed, nothing was changed: ' + (/call stack/i.test(err.message || '') ? 'the file is nested too deeply' : (err.message || err)));
     }
   });
 

@@ -485,7 +485,9 @@ snapshot), or on the host `sqlite3 mmoa_web_app.db ".backup backup.db"`.
   box. The result lists what needs a console restart. Exports and restores
   are in the Audit log.
 - **Web App configuration** — the Web App's `config.json` plus its session
-  keys (`local-secrets.json`, so members stay signed in). Each ticked
+  keys (`local-secrets.json`). The keys are only restored when you tick
+  **Also restore the session keys** (members stay signed in) — whoever has
+  the file could sign in as any member with them. Each ticked
   section replaces that section; values are checked with Web App Settings'
   own limits first (number ranges, choices, the Donate-link guard, a real
   port) and nothing is written if one fails. **Keep this server's own
@@ -495,7 +497,9 @@ snapshot), or on the host `sqlite3 mmoa_web_app.db ".backup backup.db"`.
   file when you tick that box — the page shows the file's command first.
   Every restored section needs a Web App restart; the page offers it. If
   the Web App's `config.json` is missing or broken, the restore rebuilds it
-  from the file. Exports and restores are in the Audit log.
+  from the file — only with every section ticked; the broken file is kept as
+  `config.json.broken-…` and the new one is private (0600). Sections must
+  have the right shape (text, groups, http(s) links) or nothing is written. Exports and restores are in the Audit log.
 - **Web App website** — selective restore of the HTML sections.
 - **Images** — *Image Backup* downloads every image with a size and
   SHA-256 each: the website images in `HTML/images/` (Web App Website →
