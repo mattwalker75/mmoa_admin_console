@@ -517,7 +517,14 @@ snapshot), or on the host `sqlite3 mmoa_web_app.db ".backup backup.db"`.
   database still points at it, so after losing database rows restore the
   database (or the full bundle) as well.
 - **Web App database** — full JSON snapshot; restore replaces *all* data
-  and requires typing `RESTORE`. **Every live table is emptied**, then
+  and requires typing `RESTORE`. Files up to 256 MB; the file must be a
+  database backup; checked against this database first (a NUL character
+  in a value, a missing required value … refuse it, nothing changes). One
+  operation at a time with the other restores. The result shows accounts
+  before → after and locked logins, and offers the Web App restart it
+  needs. Audited — and because the audit log lives in the database a
+  restore replaces, every database-replacing restore is also written to
+  `backups/.restore-log.jsonl` on the console's own disk. **Every live table is emptied**, then
   the tables the backup has are reloaded — a live table the backup lacks
   ends up empty, a backup table the live schema lacks is skipped, and
   both cases are reported on the result banner. Stop the web app or

@@ -683,6 +683,8 @@ module.exports = function (db, appConfig, appConfigModule) {
         for (const k of Object.keys(r)) if (!names.has(k)) unknown.add(k);
       }
       if (nonObj) errors.push(`${t}: ${nonObj} row(s) are not records`);
+      const nulAt = rows.findIndex(r => r && typeof r === 'object' && Object.values(r).some(v => typeof v === 'string' && v.includes('\u0000')));
+      if (nulAt !== -1) errors.push(`${t}: row ${nulAt + 1} has a NUL character in a value (it would be cut off / corrupt the load)`);
       if (unknown.size) warnings.push(`${t}: column(s) not in this database will be dropped: ${[...unknown].join(', ')}`);
       if (rows.length) {
         const seen = new Set();
@@ -715,7 +717,7 @@ module.exports = function (db, appConfig, appConfigModule) {
     for (const t of targets) colsByTable[t] = new Set(await dbListColumns(t));
 
     const sc = await schemaCheck(backupTables);
-    if (sc.errors.length) throw new Error('The bundle does not fit this database — nothing was changed: ' + sc.errors.join('; '));
+    if (sc.errors.length) throw new Error('The backup does not fit this database — nothing was changed: ' + sc.errors.join('; '));
     let fkProblems = [];
     const doWork = async (tx) => {
       for (const t of liveTables) {
@@ -797,6 +799,15 @@ module.exports = function (db, appConfig, appConfigModule) {
   function saveOp() {
     try { fs.mkdirSync(BUNDLE_DIR, { recursive: true, mode: 0o700 }); fs.writeFileSync(OP_FILE, JSON.stringify(opStatus), { mode: 0o600 }); }
     catch (e) { /* status display only */ }
+  }
+  // backups/.restore-log.jsonl — one line per database-replacing restore,
+  // on the console's own disk: the admin_audit table lives IN the database a
+  // restore replaces, so its history is whatever the file carried.
+  function restoreLog(req, entry) {
+    try {
+      fs.mkdirSync(BUNDLE_DIR, { recursive: true, mode: 0o700 });
+      fs.appendFileSync(path.join(BUNDLE_DIR, '.restore-log.jsonl'), JSON.stringify({ at: new Date().toISOString(), admin: req.session && req.session.user && req.session.user.username, ip: req.ip, ...entry }) + '\n', { mode: 0o600 });
+    } catch (e) { console.warn('[backup] could not write the restore log:', e.message); }
   }
   let opStatus = null;
   try {
@@ -2409,6 +2420,7 @@ module.exports = function (db, appConfig, appConfigModule) {
       const backup = await buildDatabaseBackup();
       res.set('Content-Type', 'application/json; charset=utf-8');
       res.set('Content-Disposition', `attachment; filename="web_app_database_${dateStamp()}.json"`);
+      audit(req, 'backup.database_export', { kind: 'backup', label: 'Web App database', summary: `Database downloaded: ${backup._meta.tableCount} tables / ${backup._meta.rowCount} rows` }).catch(() => {});
       res.send(JSON.stringify(backup, null, 2));
     } catch (err) {
       console.error('[backup] database export failed:', err);
@@ -2416,30 +2428,51 @@ module.exports = function (db, appConfig, appConfigModule) {
     }
   });
 
-  router.post('/backup-restore/database/import', requireAdmin, uploadJson('/backup-restore'), async (req, res) => {
+  router.post('/backup-restore/database/import', requireAdmin, (req, res, next) => {
+    // Same limit as bundles: a database backup outgrows 4 MB quickly
+    // (org_metrics alone grows every hour).
+    bundleUpload.single('backup')(req, res, (err) => {
+      if (err) return res.redirect('/backup-restore?error=' + encodeURIComponent(err.code === 'LIMIT_FILE_SIZE' ? 'That file is larger than the 256 MB upload limit.' : (err.message || 'Upload failed')));
+      next();
+    });
+  }, async (req, res) => {
     const parsed = parseUpload(req, res);
     if (!parsed) return;
-    if (parsed._meta && parsed._meta.type && parsed._meta.type !== 'web-app-database') {
-      return res.redirect('/backup-restore?error=' + encodeURIComponent('That file is not a Web App database backup.'));
-    }
+    const back = (msg) => res.redirect('/backup-restore?error=' + encodeURIComponent(msg));
+    if (!parsed._meta || typeof parsed._meta !== 'object' || parsed._meta.type !== 'web-app-database') return back('That file is not a Web App database backup (download one with Backup above).');
     const backupTables = (parsed.tables && typeof parsed.tables === 'object' && !Array.isArray(parsed.tables)) ? parsed.tables : null;
-    if (!backupTables) {
-      return res.redirect('/backup-restore?error=' + encodeURIComponent('No database tables found in that file.'));
-    }
+    if (!backupTables || !Object.keys(backupTables).length) return back('No database tables found in that file.');
     const confirm = ((req.body && req.body.confirm_text) || '').trim();
-    if (confirm !== 'RESTORE') {
-      return res.redirect('/backup-restore?error=' + encodeURIComponent('Type RESTORE to confirm the database restore.'));
-    }
-    if (!db || !db.available) {
-      return res.redirect('/backup-restore?error=' + encodeURIComponent('Database is not available (Settings → Web App).'));
-    }
+    if (confirm !== 'RESTORE') return back('Type RESTORE to confirm the database restore.');
+    if (!db || !db.available) return back('Database is not available (Settings → Web App).');
+    // One at a time with the Full Backup / Restore and the other restores.
+    if (!startOp('database restore', req.file && req.file.originalname)) return back(`A ${opStatus.kind} is running — wait for it to finish.`);
+    // What changes for people: accounts and locks before vs after.
+    const count = async (sql, p) => { try { const r = await db.getAsync(sql, p || []); return r ? Number(r.c) : null; } catch (e) { return null; } };
+    const now = Date.now();
+    const usersBefore = await count('SELECT COUNT(*) AS c FROM users');
     try {
+      mark('Database', 'in_progress', 'replacing every table in one transaction');
       const { tables, warnings } = await restoreDatabase(backupTables);
-      res.redirect('/backup-restore?ok=database&n=' + tables +
-        (warnings.length ? '&warn=' + encodeURIComponent(warnings.join('; ')) : ''));
+      mark('Database', warnings.length ? 'warn' : 'ok', `${tables} tables replaced`);
+      finishOp(true);
+      const usersAfter = await count('SELECT COUNT(*) AS c FROM users');
+      const lockedAfter = await count("SELECT COUNT(DISTINCT scope_key) AS c FROM login_lockouts WHERE scope <> 'ip' AND locked_until_ms > ?", [now]);
+      const impact = `nonprofit accounts ${usersBefore ?? '?'} → ${usersAfter ?? '?'}${lockedAfter ? `; ${lockedAfter} login(s) are locked` : ''}`;
+      // Written AFTER the load, so it lands in the restored admin_audit; the
+      // local restore log keeps a copy the next restore can't overwrite.
+      await audit(req, 'backup.database_restore', { kind: 'backup', label: req.file && req.file.originalname,
+        summary: `Database replaced: ${tables} tables (${impact})${warnings.length ? '; ' + warnings.join('; ') : ''}` });
+      restoreLog(req, { kind: 'database restore', file: req.file && req.file.originalname, ok: true, tables, impact, warnings });
+      waConfig.markWebAppWritten(appConfig); appConfigModule.save();
+      res.redirect('/backup-restore?ok=database&restored=1&n=' + tables + '&warn=' + encodeURIComponent([
+        `Restart the Web App now — it still holds data from before the restore in memory. ${impact}.`, ...warnings].join(' ')));
     } catch (err) {
+      finishOp(false, err.message || String(err));
       console.error('[backup] database import failed:', err);
-      res.redirect('/backup-restore?error=' + encodeURIComponent('Database restore failed: ' + (err.message || err)));
+      restoreLog(req, { kind: 'database restore', file: req.file && req.file.originalname, ok: false, error: err.message || String(err) });
+      await audit(req, 'backup.database_restore', { kind: 'backup', label: req.file && req.file.originalname, summary: `FAILED (nothing was changed): ${err.message || err}` });
+      back('Database restore failed: ' + (err.message || err));
     }
   });
 
@@ -2599,7 +2632,7 @@ module.exports = function (db, appConfig, appConfigModule) {
       const warns = v.checks.filter(c => !c.ok && c.level !== 'error');
       // Fit against THIS database before anything is written.
       const sc = await schemaCheck(loaded.bundle.database && loaded.bundle.database.tables);
-      if (sc.errors.length) throw new Error('The bundle does not fit this database — nothing was changed: ' + sc.errors.join('; '));
+      if (sc.errors.length) throw new Error('The backup does not fit this database — nothing was changed: ' + sc.errors.join('; '));
       mark('Bundle', (warns.length || sc.warnings.length) ? 'warn' : 'ok', `${name} verified${warns.length ? ' — ' + warns.map(c => c.name).join(', ') : ''}${sc.warnings.length ? ' — ' + sc.warnings.join('; ') : ''}`);
     } catch (err) {
       finishOp(false, err.message || String(err));
@@ -2626,6 +2659,7 @@ module.exports = function (db, appConfig, appConfigModule) {
       // admin_audit (the dump's own rows came back with it).
       await audit(req, 'backup.restore', { kind: 'backup', id: loaded.name, label: loaded.name,
         summary: `Restored: ${r.restored.join(', ')}${r.skipped.length ? '. Skipped: ' + r.skipped.join(', ') : ''}` });
+      restoreLog(req, { kind: 'full restore', bundle: loaded.name, ok: true, restored: r.restored });
       res.json({ ok: true, steps: r.steps, restored: r.restored, skipped: r.skipped, maintenanceEnabled: r.maintenanceEnabled });
     } catch (err) {
       finishOp(false, err.message || String(err));
