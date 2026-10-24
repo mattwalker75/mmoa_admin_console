@@ -385,7 +385,9 @@ function uploadJson(redirectBase) {
     upload.single('backup')(req, res, (err) => {
       if (err) {
         console.error('[backup] upload error:', err.message);
-        return res.redirect(redirectBase + '?error=' + encodeURIComponent(err.code === 'LIMIT_FILE_SIZE' ? 'That file is larger than the 4 MB limit for this restore.' : err.message));
+        const msg = err.code === 'LIMIT_FILE_SIZE' ? 'That file is larger than the 4 MB limit for this restore.' : err.message;
+        if (req.get('x-restore-validate') === '1') return res.json({ valid: false, error: msg });
+        return res.redirect(redirectBase + '?error=' + encodeURIComponent(msg));
       }
       next();
     });
@@ -535,7 +537,9 @@ function selectiveRestoreForm(kind, action, confirmText, headsHtml, validKeys, l
       <input type="checkbox" x-model="confirmed" class="mt-0.5">
       <span>${confirmText}</span>
     </label>
-    <div class="flex justify-end">
+    <div data-validate-result hidden class="mt-3"></div>
+    <div class="flex justify-end gap-2">
+      <span x-show="sections.length" x-cloak><button type="button" class="btn-secondary" x-on:click="validateRestore($el)">Validate</button></span>
       <button type="submit" class="btn-danger" :disabled="!canSubmit" :class="canSubmit ? '' : 'opacity-50 cursor-not-allowed'">
         Restore selected
       </button>
@@ -604,7 +608,9 @@ function databaseRestoreForm(action, engine) {
       <label class="label">Type <span class="font-mono font-semibold">RESTORE</span> to confirm</label>
       <input class="input" type="text" name="confirm_text" autocomplete="off" x-model="confirmText" placeholder="RESTORE">
     </div>
-    <div class="flex justify-end">
+    <div data-validate-result hidden class="mt-3"></div>
+    <div class="flex justify-end gap-2">
+      <span x-show="ok" x-cloak><button type="button" class="btn-secondary" x-on:click="validateRestore($el)">Validate</button></span>
       <button type="submit" class="btn-danger" :disabled="!canSubmit" :class="canSubmit ? '' : 'opacity-50 cursor-not-allowed'">Restore database</button>
     </div>
   </form>`;
@@ -612,7 +618,29 @@ function databaseRestoreForm(action, engine) {
 
 module.exports = function (db, appConfig, appConfigModule) {
   const router = express.Router();
-  const audit = require('../helpers/audit')(db);
+  const auditReal = require('../helpers/audit')(db);
+  // A validation (dry run) is never audited — nothing happened.
+  const audit = (req, ...a) => (req && req.dryRun ? Promise.resolve() : auditReal(req, ...a));
+
+  // ── Validate = dry run ────────────────────────────────────────────────
+  // Every restore route can be called with the X-Restore-Validate: 1
+  // header (the forms' Validate button, public/js/validate-restore.js): the
+  // handler runs every check the restore runs and stops before its first
+  // write (validated() below), answering JSON instead of redirecting. Any
+  // error it hits on the way — including the upload's own size limit — is
+  // turned into { valid: false, error }.
+  const isValidate = (req) => req.get('x-restore-validate') === '1';
+  function dryRunAware(req, res, next) {
+    if (!isValidate(req)) return next();
+    req.dryRun = true;
+    res.redirect = function (url) {
+      let q; try { q = new URL(url, 'http://x').searchParams; } catch (e) { q = new URLSearchParams(); }
+      const error = q.get('error');
+      return res.json({ valid: !error, error: error || null, warn: q.get('warn') || null });
+    };
+    next();
+  }
+  function validated(res, details) { return res.json(Object.assign({ valid: true }, details)); }
 
   // ── Database backup/restore helpers (engine-aware) ──────────────────────
   // Identifiers only ever come from the LIVE schema (helpers/dbSchema.js),
@@ -726,7 +754,8 @@ module.exports = function (db, appConfig, appConfigModule) {
   // tables the backup also has are reloaded. A live table the backup lacks
   // ends up empty; a backup table the live schema lacks is skipped. Both are
   // reported in `warnings` so the result never hides what happened.
-  async function restoreDatabase(backupTables) {
+  async function restoreDatabase(backupTables, opts = {}) {
+    const DRY = { dry: true };
     const has = (t) => Object.prototype.hasOwnProperty.call(backupTables, t);
     const liveTables = await dbListTables(); // ORDER BY name
     const liveSet = new Set(liveTables);
@@ -764,7 +793,10 @@ module.exports = function (db, appConfig, appConfigModule) {
           fkProblems = Object.keys(by).map(t => `${t} (${by[t]})`);
         } catch (e) { /* informational only */ }
       }
+      // A validation: the whole load ran — now undo it.
+      if (opts.dryRun && !(db.remote)) throw DRY;
     };
+    const swallowDry = (e) => { if (e !== DRY) throw e; };
 
     // Disable FK enforcement during the wipe+reload so table order doesn't
     // matter — engine-specific mechanism (the whole point of "check config").
@@ -783,12 +815,13 @@ module.exports = function (db, appConfig, appConfigModule) {
           // the connection itself died, mysql2 drops it from the pool.)
           await tx.runAsync('SET FOREIGN_KEY_CHECKS = 1', []).catch(() => {});
         }
-      });
+      }).catch(swallowDry);
     } else {
       // SQLite: foreign_keys can't be toggled inside a transaction, so bracket it.
       await db.runAsync('PRAGMA foreign_keys = OFF', []);
       try {
-        await db.transaction(doWork);
+        // Remote SQLite runs the staged script with ROLLBACK at the end.
+        await db.transaction(doWork, opts.dryRun ? { rollback: true } : undefined).catch(swallowDry);
       } finally {
         await db.runAsync('PRAGMA foreign_keys = ON', []).catch(() => {});
       }
@@ -1629,12 +1662,13 @@ module.exports = function (db, appConfig, appConfigModule) {
           if (this.busy || !this.selected) return;
           this.busy = 'verify'; this.clear();
           try {
-            const r = await this.post('/backup-restore/bundle/verify', { name: this.selected });
-            if (!r.ok && !r.checks) { this.say('err', r.error || 'Verify failed'); return; }
+            this.say('info', 'Validating ' + this.selected + ' — checksums, row counts, fit with this database, access to the Web App, and a trial database load that is rolled back… (nothing is changed)');
+            const r = await this.post('/backup-restore/bundle/verify', { name: this.selected, deep: true });
+            if (!r.ok && !r.checks) { this.say('err', r.error || 'Validation failed'); return; }
             this.showChecks(this.selected, r);
             const s = r.summary || {};
             this.say(r.valid ? 'ok' : 'err', r.valid
-              ? 'Bundle is complete: ' + s.configKeys + ' config keys, secrets ' + (s.localSecrets ? 'yes' : 'no') + ', ' + s.sections + ' HTML sections, ' + s.images + ' images, ' + (s.uploads || 0) + ' uploads, ' + s.tables + ' tables / ' + s.rows + ' rows (' + (s.engine || '?') + '), ' + (s.templates || 0) + ' templates.'
+              ? 'Validated — this bundle can be restored here. ' + s.configKeys + ' config keys, secrets ' + (s.localSecrets ? 'yes' : 'no') + ', ' + s.sections + ' HTML sections, ' + s.images + ' images, ' + (s.uploads || 0) + ' uploads, ' + s.tables + ' tables / ' + s.rows + ' rows (' + (s.engine || '?') + '), ' + (s.templates || 0) + ' templates.'
               : 'Bundle has problems — see the checklist above.');
             (s.warnings || []).forEach(w => this.say('warn', w));
           } finally { this.busy = ''; }
@@ -1721,7 +1755,7 @@ module.exports = function (db, appConfig, appConfigModule) {
           ${dbReady ? '' : `<div class="mt-3 flash-error text-xs">Database is not available — the restore can't run until <a class="underline" href="/settings/web-app">Settings → Web App</a> reaches it.</div>`}
           <div class="mt-4 flex flex-wrap items-center gap-2">
             <button type="button" class="btn-secondary" x-on:click="testAccess()" :disabled="!!busy">Test access to the Web App</button>
-            <button type="button" class="btn-secondary" x-on:click="verify()" :disabled="!!busy || !selected">Verify selected bundle</button>
+            <button type="button" class="btn-secondary" x-on:click="verify()" :disabled="!!busy || !selected">Validate selected bundle</button>
           </div>
           <label class="mt-3 flex items-start gap-2 text-xs text-slate-700 dark:text-slate-200">
             <input type="checkbox" x-model="restoreTemplates" class="mt-0.5">
@@ -1969,7 +2003,11 @@ module.exports = function (db, appConfig, appConfigModule) {
               <span>Remove images added after the backup, so the site looks as it did (website images and uploads not in the file; photos the database uses are always kept).</span></label>
             <label class="flex items-start gap-2 text-sm"><input type="checkbox" class="h-4 w-4 mt-0.5" x-model="confirmed">
               <span>I understand this overwrites website images and uploads with the same names.</span></label>
-            <button type="submit" class="btn-danger" :disabled="!fileName || !confirmed" :class="(!fileName || !confirmed) ? 'opacity-50 cursor-not-allowed' : ''">Restore images</button>
+            <div data-validate-result hidden class="mt-3"></div>
+            <div class="flex gap-2">
+              <span x-show="fileName" x-cloak><button type="button" class="btn-secondary" x-on:click="validateRestore($el)">Validate</button></span>
+              <button type="submit" class="btn-danger" :disabled="!fileName || !confirmed" :class="(!fileName || !confirmed) ? 'opacity-50 cursor-not-allowed' : ''">Restore images</button>
+            </div>
           </form>
         </section>
       </div>`}`;
@@ -2041,7 +2079,7 @@ module.exports = function (db, appConfig, appConfigModule) {
     }
   });
 
-  router.post('/backup-restore/import', requireAdmin, uploadJson('/backup-restore'), async (req, res) => {
+  router.post('/backup-restore/import', requireAdmin, uploadJson('/backup-restore'), dryRunAware, async (req, res) => {
     const parsed = parseUpload(req, res);
     if (!parsed) return;
     const selected = normalizeArray(req.body.sections);
@@ -2062,6 +2100,14 @@ module.exports = function (db, appConfig, appConfigModule) {
       if (dropped.length) warnings.push(`unsafe appearance value(s) dropped: ${dropped.join(', ')}`);
       updates.theme = theme;
     }
+    if (req.dryRun) return validated(res, {
+      summary: `${sections.length} section(s) would be restored: ${sections.map(k => SETTINGS_LABELS[k] || k).join(', ')}`,
+      details: [
+        ...(plan.images.length ? [`${plan.images.length} appearance image(s) would be written`] : []),
+        ...(plan.restart.length ? [`needs a console restart afterwards: ${[...new Set(plan.restart)].join(', ')}`] : [])
+      ],
+      warnings
+    });
     // All-or-nothing: remember the live values, apply, save; on a failed
     // save put every key back so memory and disk agree.
     const before = {};
@@ -2115,7 +2161,7 @@ module.exports = function (db, appConfig, appConfigModule) {
     }
   });
 
-  router.post('/backup-restore/web-app-config/import', requireAdmin, uploadJson('/backup-restore'), async (req, res) => {
+  router.post('/backup-restore/web-app-config/import', requireAdmin, uploadJson('/backup-restore'), dryRunAware, async (req, res) => {
     const parsed = parseUpload(req, res);
     if (!parsed) return;
     const back = (msg) => res.redirect('/backup-restore?error=' + encodeURIComponent(msg));
@@ -2195,6 +2241,15 @@ module.exports = function (db, appConfig, appConfigModule) {
         await audit(req, 'backup.waconfig_restore', { kind: 'backup', label: req.file && req.file.originalname, summary: `Refused: ${errs.join('; ')}` });
         return back('Nothing was restored — the file has values Web App Settings would not accept: ' + errs.join('; '));
       }
+      if (req.dryRun) {
+        if (keptHost.length) notes.push(`this server's own ${keptHost.join(', ')} would be kept`);
+        if (keyNote) notes.push(keyNote);
+        return validated(res, {
+          summary: restoredKeys.length || wantSecrets ? `${restoredKeys.length} section(s) would be restored: ${restoredKeys.join(', ')}${wantSecrets ? ' + session keys' : ''}` : 'Nothing would change.',
+          details: ['the Web App needs a restart afterwards'],
+          warnings: notes
+        });
+      }
       if (restoredKeys.length || liveBroken) {
         await waConfig.writeRemoteConfig(accessor, json);
         if (liveBroken) await accessor.runCommand(`chmod 600 ${shq(cfgPath)}`, { timeoutMs: 20000 }).catch(() => {});
@@ -2255,7 +2310,7 @@ module.exports = function (db, appConfig, appConfigModule) {
     }
   });
 
-  router.post('/backup-restore/web-app-website/import', requireAdmin, uploadJson('/backup-restore'), async (req, res) => {
+  router.post('/backup-restore/web-app-website/import', requireAdmin, uploadJson('/backup-restore'), dryRunAware, async (req, res) => {
     const parsed = parseUpload(req, res);
     if (!parsed) return;
     if (!parsed._meta || typeof parsed._meta !== 'object' || parsed._meta.type !== 'web-app-website') {
@@ -2281,6 +2336,11 @@ module.exports = function (db, appConfig, appConfigModule) {
       await audit(req, 'backup.website_restore', { kind: 'backup', label: req.file && req.file.originalname, summary: `Refused: section(s) over ${SECTION_MAX_BYTES / 1024} KB: ${big.join(', ')}` });
       return res.redirect('/backup-restore?error=' + encodeURIComponent(`Nothing was restored — section(s) larger than the editor allows (${SECTION_MAX_BYTES / 1024} KB): ${big.join(', ')}`));
     }
+    if (req.dryRun) return validated(res, {
+      summary: `${recognized.length} HTML section(s) would be restored: ${recognized.map(k => `${k} (${(Buffer.byteLength(sections[k], 'utf8') / 1024).toFixed(1)} KB)`).join(', ')}`,
+      details: ['live on the next page load — no restart'],
+      warnings: (opStatus && opStatus.running) ? [`a ${opStatus.kind} is running right now — the restore would have to wait for it`] : []
+    });
     // One file operation at a time with the Full / Image restores.
     if (!startOp('website restore', req.file && req.file.originalname)) return res.redirect('/backup-restore?error=' + encodeURIComponent(`A ${opStatus.kind} is running — wait for it to finish.`));
     try {
@@ -2372,10 +2432,14 @@ module.exports = function (db, appConfig, appConfigModule) {
 
   router.post('/backup-restore/web-app-images/import', requireAdmin, (req, res, next) => {
     bundleUpload.single('backup')(req, res, (err) => {
-      if (err) return res.redirect('/backup-restore?error=' + encodeURIComponent(err.code === 'LIMIT_FILE_SIZE' ? 'That file is larger than the 256 MB upload limit.' : (err.message || 'Upload failed')));
+      if (err) {
+        const msg = err.code === 'LIMIT_FILE_SIZE' ? 'That file is larger than the 256 MB upload limit.' : (err.message || 'Upload failed');
+        if (req.get('x-restore-validate') === '1') return res.json({ valid: false, error: msg });
+        return res.redirect('/backup-restore?error=' + encodeURIComponent(msg));
+      }
       next();
     });
-  }, async (req, res) => {
+  }, dryRunAware, async (req, res) => {
     const back = (msg) => res.redirect('/backup-restore?error=' + encodeURIComponent(msg));
     if (!req.file) return back('No file received.');
     let parsed;
@@ -2444,6 +2508,16 @@ module.exports = function (db, appConfig, appConfigModule) {
     if (!wNames.length && !wRels.length) return refuse('Nothing was restored — ' + notWritten.join('; '));
     const pruneFiles = req.body.prune_files !== '0';
     if (!webAppAccess.isConfigured(appConfig)) return back('Web App access is not configured (Settings → Web App).');
+    if (req.dryRun) {
+      const det = [`${wNames.length} website image(s) and ${wRels.length} upload(s) would be written (checksums and image types checked)`];
+      if (pruneFiles) det.push('website images / uploads added after the backup would be removed (photos the database uses are always kept)');
+      const w = [];
+      if (notWritten.length) w.push(`would NOT be written: ${notWritten.slice(0, 5).join('; ')}${notWritten.length > 5 ? '…' : ''}`);
+      if (ignored.length) w.push(`${ignored.length} entr${ignored.length === 1 ? 'y' : 'ies'} with names that aren't allowed would be ignored`);
+      if (parsed._meta && Array.isArray(parsed._meta.warnings) && parsed._meta.warnings.length) w.push('When this backup was made: ' + parsed._meta.warnings.join(' | '));
+      if (opStatus && opStatus.running) w.push(`a ${opStatus.kind} is running right now — the restore would have to wait for it`);
+      return validated(res, { summary: `Image ${type === 'web-app-images' ? 'Backup' : 'bundle'}: every file checked.`, details: det, warnings: w });
+    }
     let nImg = 0, nUp = 0, same = 0, removed = 0;
     const total = wNames.length + wRels.length;
     // One file operation at a time with the Full Backup / Restore (whose
@@ -2533,16 +2607,39 @@ module.exports = function (db, appConfig, appConfigModule) {
     // Same limit as bundles: a database backup outgrows 4 MB quickly
     // (org_metrics alone grows every hour).
     bundleUpload.single('backup')(req, res, (err) => {
-      if (err) return res.redirect('/backup-restore?error=' + encodeURIComponent(err.code === 'LIMIT_FILE_SIZE' ? 'That file is larger than the 256 MB upload limit.' : (err.message || 'Upload failed')));
+      if (err) {
+        const msg = err.code === 'LIMIT_FILE_SIZE' ? 'That file is larger than the 256 MB upload limit.' : (err.message || 'Upload failed');
+        if (req.get('x-restore-validate') === '1') return res.json({ valid: false, error: msg });
+        return res.redirect('/backup-restore?error=' + encodeURIComponent(msg));
+      }
       next();
     });
-  }, async (req, res) => {
+  }, dryRunAware, async (req, res) => {
     const parsed = parseUpload(req, res);
     if (!parsed) return;
     const back = (msg) => res.redirect('/backup-restore?error=' + encodeURIComponent(msg));
     if (!parsed._meta || typeof parsed._meta !== 'object' || parsed._meta.type !== 'web-app-database') return back('That file is not a Web App database backup (download one with Backup above).');
     const backupTables = (parsed.tables && typeof parsed.tables === 'object' && !Array.isArray(parsed.tables)) ? parsed.tables : null;
     if (!backupTables || !Object.keys(backupTables).length) return back('No database tables found in that file.');
+    if (req.dryRun) {
+      if (!db || !db.available) return back('Database is not available (Settings → Web App).');
+      // A real trial: the whole load runs in a transaction that is always
+      // rolled back, so constraint problems show up now, not mid-restore.
+      if (!startOp('validation', req.file && req.file.originalname)) return back(`A ${opStatus.kind} is running — try again when it has finished.`);
+      try {
+        const r = await restoreDatabase(backupTables, { dryRun: true });
+        finishOp(true);
+        const rows = Object.values(backupTables).reduce((n, t) => n + (Array.isArray(t) ? t.length : 0), 0);
+        return validated(res, {
+          summary: `${r.tables} table(s) / ${rows} row(s) would replace the live database (${(parsed._meta && parsed._meta.engine) || '?'} backup → ${db.engine}).`,
+          details: ['trial load done and rolled back — every row fits this database', 'the Web App needs a restart afterwards'],
+          warnings: r.warnings
+        });
+      } catch (e) {
+        finishOp(false, e.message || String(e));
+        return back((e.message || String(e)));
+      }
+    }
     const confirm = ((req.body && req.body.confirm_text) || '').trim();
     if (confirm !== 'RESTORE') return back('Type RESTORE to confirm the database restore.');
     if (!db || !db.available) return back('Database is not available (Settings → Web App).');
@@ -2725,6 +2822,25 @@ module.exports = function (db, appConfig, appConfigModule) {
         r.checks.push({ name: 'Fits this database', ok: !sc.errors.length && !sc.warnings.length, level: sc.errors.length ? 'error' : 'warn',
           detail: [...sc.errors, ...sc.warnings].join('; ') || 'every table and column matches' });
         if (sc.errors.length) r.valid = false;
+        if (req.body && req.body.deep === true && r.valid) {
+          // Validate: can the restore actually be done here, right now?
+          const acc = await testAccess().catch(e => ({ ok: false, checks: [{ name: 'Access test', ok: false, detail: e.message || String(e) }] }));
+          r.checks.push({ name: 'Access to the Web App (read, write, run commands, every uploads folder)', ok: acc.ok, level: 'error', detail: acc.ok ? 'all ok' : acc.checks.filter(c => !c.ok).map(c => `${c.name}: ${c.detail || 'failed'}`).join('; ') });
+          if (!acc.ok) r.valid = false;
+          if (startOp('validation', name)) {
+            try {
+              const t = await restoreDatabase(bundle.database.tables, { dryRun: true });
+              finishOp(true);
+              r.checks.push({ name: 'Database trial load (rolled back)', ok: true, level: 'error', detail: `${t.tables} tables load cleanly${t.warnings.length ? ' — ' + t.warnings.join('; ') : ''}` });
+            } catch (e) {
+              finishOp(false, e.message || String(e));
+              r.checks.push({ name: 'Database trial load (rolled back)', ok: false, level: 'error', detail: e.message || String(e) });
+              r.valid = false;
+            }
+          } else {
+            r.checks.push({ name: 'Database trial load (rolled back)', ok: false, level: 'warn', detail: `skipped — a ${opStatus.kind} is running` });
+          }
+        }
       } catch (e) {
         r.checks.push({ name: 'Fits this database', ok: false, level: 'warn', detail: 'could not read the live schema: ' + (e.message || e) });
       }

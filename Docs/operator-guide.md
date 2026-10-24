@@ -374,6 +374,30 @@ bundle invalid and the restore refuses it; the rest are warnings. Bundles
 made by an older console (no manifest) still restore — Verify says what it
 could not check.
 
+### Validate (before any restore)
+
+Every restore has a **Validate** button — *Validate selected bundle* for
+the Full Restore, and *Validate* next to the restore button of Console
+settings, Web App configuration, Web App website, Image Restore and Web
+App database. It runs every check the restore would run, with the options
+you ticked, and stops before the first write: **nothing on the Web App or
+this console changes**. The result says whether the restore can be done
+and what it would do (sections, files, tables, what needs a restart) or
+exactly why not.
+
+- Database (and the database part of a Full bundle): a real **trial load**
+  — every row is written inside a transaction that is always rolled back,
+  so duplicate keys and other constraint problems are found now, not mid-
+  restore. Over EC2 the trial runs on the Web App host with ROLLBACK.
+- Full bundle: checksums, row counts and table contents against the
+  manifest, fit with this database, access to the Web App (read, write,
+  run commands, every uploads folder) and the trial load.
+- Images: every checksum and that each file is the image its name says.
+- Settings / configuration: every value against the Settings pages'
+  limits, and what this server would keep.
+- Validation isn't audited (nothing happened) — except the Full bundle
+  check, which records a "verify" entry as before.
+
 ### Restore
 
 **Tested end to end (2026-10-23, local access, SQLite).** A full backup,

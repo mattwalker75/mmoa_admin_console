@@ -285,8 +285,9 @@ function init(appConfig, sqliteCfg) {
   // ones (e.g. a database restore) are chunk-appended to a remote temp file
   // and executed with `sqlite3 < file` — still ONE sqlite3 run, so BEGIN…
   // COMMIT stays atomic and -bail aborts (implicit rollback) on any error.
-  async function flushTransaction(stmts) {
-    const script = ['BEGIN;', ...stmts.map(terminate), 'COMMIT;'];
+  // opts.rollback: run everything, then ROLLBACK — a trial load (Validate).
+  async function flushTransaction(stmts, opts) {
+    const script = ['BEGIN;', ...stmts.map(terminate), (opts && opts.rollback) ? 'ROLLBACK;' : 'COMMIT;'];
     const totalLen = script.reduce((n, s) => n + s.length, 0);
     if (totalLen <= MAX_INLINE_SQL) {
       await execRaw(script, { bail: true, timeoutMs: 120000 });
@@ -384,7 +385,7 @@ function init(appConfig, sqliteCfg) {
         allAsync: async () => { throw new Error('Reads inside a transaction are not supported when the SQLite database is on a remote Web App host.'); }
       };
       const result = await fn(tx);
-      if (stmts.length) await flushTransaction(stmts);
+      if (stmts.length) await flushTransaction(stmts, opts);
       return result;
     }
   };
