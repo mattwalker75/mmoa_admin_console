@@ -28,6 +28,7 @@ const multer = require('multer');
 const { page, flash } = require('../views/layout');
 const { escapeHtml } = require('../views/escapeHtml');
 const { websiteLinkCard } = require('../helpers/websiteCard');
+const { siteTokens } = require('../helpers/siteTokens');
 const { requireAdmin } = require('../middleware/auth');
 const webAppAccess = require('../helpers/webAppAccess');
 const waConfig = require('../helpers/webAppConfig');
@@ -110,6 +111,11 @@ function pageHeader(title, subtitle) {
 }
 
 // One row in the images list: filename, a copyable <img> snippet, delete.
+// A JS string literal safe inside an x-on attribute (single quotes).
+function jsAttr(v) {
+  return "'" + String(v).replace(/\\/g, '\\\\').replace(/'/g, "\\'") + "'";
+}
+
 function imageRow(name) {
   const snippet = '<img src="/content/images/' + name + '" alt="">';
   return `
@@ -121,6 +127,7 @@ function imageRow(name) {
                class="mt-1 w-full font-mono text-xs rounded border border-slate-200 bg-slate-50 px-2 py-1 text-slate-600 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-300"
                x-on:focus="$event.target.select()">
       </div>
+      <button type="button" class="btn-secondary text-xs shrink-0" x-on:click="waImagePreview({ name: ${jsAttr(name)}, url: ${jsAttr('/web-app-website/images/' + encodeURIComponent(name)) } })">Preview</button>
       <button type="button" class="btn-secondary text-xs shrink-0" x-on:click="copy()">
         <span x-show="!copied">Copy tag</span><span x-show="copied" x-cloak>Copied ✓</span>
       </button>
@@ -296,7 +303,7 @@ function sectionCard(section, content, contentErr, openByDefault) {
 module.exports = makeRouter;
 module.exports.SECTIONS = SECTIONS;
 
-function makeRouter(appConfig) {
+function makeRouter(appConfig, db) {
   const router = express.Router();
 
   router.get('/web-app-website', requireAdmin, async (req, res) => {
@@ -309,6 +316,7 @@ function makeRouter(appConfig) {
     let publicBaseUrl = '';
     let maintenanceCommand = '';
     let images = [];
+    let cfgForTokens = null;
 
     if (!webAppAccess.isConfigured(appConfig)) {
       notConfigured = true;
@@ -349,6 +357,7 @@ function makeRouter(appConfig) {
       const cfgEntry = bundle.files[cfgPath] || {};
       try {
         const cfgJson = cfgEntry.content ? JSON.parse(cfgEntry.content) : null;
+        cfgForTokens = cfgJson;
         publicBaseUrl = (cfgJson && typeof cfgJson.publicBaseUrl === 'string') ? cfgJson.publicBaseUrl : '';
         maintenanceCommand = (cfgJson && typeof cfgJson.maintenanceCommand === 'string') ? cfgJson.maintenanceCommand : '';
       } catch (e) { /* keep blanks */ }
@@ -366,17 +375,30 @@ function makeRouter(appConfig) {
       ? `<div class="flash-error mb-6"><strong class="font-semibold">Web App access is not configured.</strong> Set how this console reaches the Web App under <a class="underline" href="/settings/web-app">Settings → Web App</a> first.</div>`
       : readErr
       ? `<div class="flash-error mb-6"><strong class="font-semibold">Could not reach the Web App.</strong> ${escapeHtml(readErr)} (via ${escapeHtml(accessDesc)}). Check <a class="underline" href="/settings/web-app">Settings → Web App</a>.</div>`
-      : `<div class="mb-6 text-xs text-slate-500 dark:text-slate-400">Editing <code class="font-mono">HTML/</code> fragments via ${escapeHtml(accessDesc)}. Saved changes go live on the next page load — no restart needed. Tokens the Web App fills in at serve time (values from <a class="underline" href="/web-app-settings/general">Web App Settings → General</a>): <code class="font-mono">{{appTitle}}</code> <code class="font-mono">{{appSubtitle}}</code> <code class="font-mono">{{orgName}}</code> <code class="font-mono">{{tagline}}</code> <code class="font-mono">{{foundedYear}}</code> <code class="font-mono">{{phone}}</code> <code class="font-mono">{{phoneTel}}</code> <code class="font-mono">{{email}}</code> <code class="font-mono">{{ein}}</code> <code class="font-mono">{{addressLine1}}</code> <code class="font-mono">{{addressLine2}}</code> <code class="font-mono">{{city}}</code> <code class="font-mono">{{state}}</code> <code class="font-mono">{{zip}}</code> <code class="font-mono">{{address}}</code> <code class="font-mono">{{meetingInfo}}</code> <code class="font-mono">{{facebookUrl}}</code> <code class="font-mono">{{instagramUrl}}</code> <code class="font-mono">{{youtubeUrl}}</code> <code class="font-mono">{{xUrl}}</code> <code class="font-mono">{{nextdoorUrl}}</code> <code class="font-mono">{{donationUrl}}</code>, plus <code class="font-mono">{{year}}</code> and <code class="font-mono">{{eventCount}}</code> (upcoming published events).</div>`;
+      : `<div class="mb-6 text-xs text-slate-500 dark:text-slate-400">Editing <code class="font-mono">HTML/</code> fragments via ${escapeHtml(accessDesc)}. Saved changes go live on the next page load — no restart needed. Preview shows a section with its images and tokens filled in. Tokens the Web App fills in at serve time (values from <a class="underline" href="/web-app-settings/general">Web App Settings → General</a>): <code class="font-mono">{{appTitle}}</code> <code class="font-mono">{{appSubtitle}}</code> <code class="font-mono">{{orgName}}</code> <code class="font-mono">{{tagline}}</code> <code class="font-mono">{{foundedYear}}</code> <code class="font-mono">{{phone}}</code> <code class="font-mono">{{phoneTel}}</code> <code class="font-mono">{{email}}</code> <code class="font-mono">{{ein}}</code> <code class="font-mono">{{addressLine1}}</code> <code class="font-mono">{{addressLine2}}</code> <code class="font-mono">{{city}}</code> <code class="font-mono">{{state}}</code> <code class="font-mono">{{zip}}</code> <code class="font-mono">{{address}}</code> <code class="font-mono">{{meetingInfo}}</code> <code class="font-mono">{{facebookUrl}}</code> <code class="font-mono">{{instagramUrl}}</code> <code class="font-mono">{{youtubeUrl}}</code> <code class="font-mono">{{xUrl}}</code> <code class="font-mono">{{nextdoorUrl}}</code> <code class="font-mono">{{donationUrl}}</code>, plus <code class="font-mono">{{year}}</code> and <code class="font-mono">{{eventCount}}</code> (upcoming published events).</div>`;
 
     let previewV = '';
     try { previewV = String(fs.statSync(path.join(__dirname, '..', 'public', 'js', 'wa-preview.js')).mtimeMs | 0); } catch (e) { /* ignore */ }
+
+    // Token values for the section Preview (public/js/wa-preview.js):
+    // computed from the Web App's config.json like the website does, plus
+    // {{eventCount}} from the database (0 when unavailable).
+    let eventCount = 0;
+    if (db) {
+      try {
+        const cut = new Date(Date.now() - 12 * 3600 * 1000).toISOString().replace('T', ' ').replace(/\..+/, '');
+        const row = await db.getAsync("SELECT COUNT(*) AS c FROM events WHERE status = 'published' AND starts_at >= ?", [cut]);
+        eventCount = row ? Number(row.c || 0) : 0;
+      } catch (e) { /* 0 */ }
+    }
+    const tokens = siteTokens(cfgForTokens, { eventCount });
 
     const body = `
       <script defer src="/js/wa-preview.js?v=${previewV}"></script>
       ${header}
       ${flash('error', req.query.error)}
       ${banner}
-      ${notConfigured ? '' : `<div class="max-w-4xl space-y-3">
+      ${notConfigured ? '' : `<div class="max-w-4xl space-y-3" data-wa-tokens="${escapeHtml(JSON.stringify(tokens))}">
         ${maintenanceCard(maintenanceCommand)}
         ${websiteLinkCard(publicBaseUrl)}
         ${imagesCard(images, req.query)}
@@ -384,6 +406,33 @@ function makeRouter(appConfig) {
       </div>`}
     `;
     res.send(page({ title: 'Web App Website', body, appConfig, user, activeNav: 'web-app-website' }));
+  });
+
+  // ── Image preview (bytes from the Web App host) ─────────────────────────
+  // GET /web-app-website/images/<name> serves HTML/images/<name> through
+  // the console (works in every access mode, and when the website itself
+  // is down) for the Images card's Preview and for images inside a section
+  // Preview. Name must be exactly what the upload sanitiser would produce
+  // (no path parts) and an image extension. Served with a tight CSP so an
+  // SVG opened directly can't run anything.
+  const IMAGE_MIME = { png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', gif: 'image/gif', webp: 'image/webp', svg: 'image/svg+xml' };
+  router.get('/web-app-website/images/:name', requireAdmin, async (req, res) => {
+    const name = String(req.params.name || '');
+    const ext = (/\.([A-Za-z0-9]+)$/.exec(name) || [])[1];
+    if (!name || sanitizeImageName(name) !== name || !IMAGE_EXT.test(name) || !ext) return res.status(404).send('Not found');
+    if (!webAppAccess.isConfigured(appConfig)) return res.status(404).send('Web App access is not configured');
+    let buf;
+    try {
+      const accessor = webAppAccess.createAccessorFromConfig(appConfig);
+      buf = await accessor.readFileChunked(waConfig.joinPath(imagesDirOf(accessor), name));
+    } catch (e) {
+      return res.status(404).send('Image not available: ' + (e.message || e));
+    }
+    if (!buf || !buf.length) return res.status(404).send('Not found');
+    res.set('Cache-Control', 'private, max-age=60'); // re-uploads overwrite in place
+    res.set('X-Content-Type-Options', 'nosniff');
+    res.set('Content-Security-Policy', "default-src 'none'; style-src 'unsafe-inline'; sandbox");
+    res.type(IMAGE_MIME[ext.toLowerCase()] || 'application/octet-stream').send(buf);
   });
 
   // ── Image upload (multipart) ──────────────────────────────────────────────

@@ -270,8 +270,9 @@ Edit the website's fixed copy — **Home hero**, **About — our story**,
 the board and the directory come from the database (their own pages).
 
 - Each card holds that section's HTML. Saves are live on the next page
-  load — no restart. **Preview** shows the unsaved HTML on the site's dark
-  palette.
+  load — no restart. **Preview** opens the unsaved HTML in a window on the
+  site's dark palette with its images shown and its `{{tokens}}` filled in
+  (the site's own component styles are not applied, so it is approximate).
 - Keep the `{{tokens}}` — the website fills them in: `{{appTitle}}`,
   `{{appSubtitle}}`, `{{orgName}}`, `{{tagline}}`, `{{foundedYear}}`,
   `{{phone}}`, `{{phoneTel}}` (digits only, for `tel:` links), `{{email}}`,
@@ -286,7 +287,8 @@ the board and the directory come from the database (their own pages).
   Settings → General) with an **Open website** button that opens it in a
   new browser window.
 - **Images** — upload, then copy the `<img src="/content/images/…">` tag
-  into a section. Works in every access mode.
+  into a section. **Preview** opens the picture in a floating window (Esc
+  or ✕ closes it). Works in every access mode.
 - **Maintenance Mode** — Enable (with a title and message), Disable, or
   Status. Visitors see the maintenance page while it's on.
 

@@ -250,7 +250,7 @@ app.use('/', require('./routes/settings')(db, appConfig, appConfigModule));
 app.use('/', require('./routes/templates')(appConfig, appConfigModule));
 app.use('/', require('./routes/webAppSettings')(appConfig, appConfigModule));
 app.use('/', require('./routes/webAppLogs')(appConfig));
-app.use('/', require('./routes/webAppWebsite')(appConfig));
+app.use('/', require('./routes/webAppWebsite')(appConfig, db));
 app.use('/', require('./routes/lockedUsers')(db, appConfig));
 app.use('/', require('./routes/dataBrowser')(db, appConfig));
 app.use('/', require('./routes/reports')(db, appConfig));
