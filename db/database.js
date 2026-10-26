@@ -387,7 +387,8 @@ function init(appConfig) {
 // the new database straight away instead of needing a restart. Every
 // property read goes to the CURRENT connection; a transaction already in
 // flight keeps the connection it started on, and the old connection is
-// closed a little later once in-flight work has finished.
+// closed an hour later — long enough for any in-flight work (a backup or
+// restore transaction can run for many minutes) to finish on it first.
 function initSwappable(appConfig) {
   let current = init(appConfig);
   const closeLater = (old) => setTimeout(() => {
@@ -395,7 +396,7 @@ function initSwappable(appConfig) {
       if (old && old.raw && typeof old.raw.close === 'function') old.raw.close(() => {});
       else if (old && old.raw && typeof old.raw.end === 'function') old.raw.end(() => {}); // MySQL pool
     } catch (e) { /* already closed */ }
-  }, 60000).unref();
+  }, 3600 * 1000).unref();
   function reconnect(cfg) {
     const old = current;
     current = init(cfg || appConfig);

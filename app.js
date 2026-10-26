@@ -34,7 +34,16 @@ const db = initSwappable(appConfig);
 
 const app = express();
 
-if (appConfig.server && appConfig.server.trustProxy) {
+// An https:// publicBaseUrl while this process serves plain HTTP means TLS
+// ends at a proxy / load balancer in front. The session cookie is Secure in
+// that case, and the cookie library refuses to set a Secure cookie on what it
+// thinks is an HTTP request — every page would fail — unless Express trusts
+// the proxy's X-Forwarded-Proto. So trust one hop automatically then.
+const tlsAtProxy = !(appConfig.server && appConfig.server.ssl) && /^https:\/\//i.test(appConfig.publicBaseUrl || '');
+if (tlsAtProxy && !(appConfig.server && appConfig.server.trustProxy)) {
+  app.set('trust proxy', 1);
+  console.log('[server] publicBaseUrl is https:// but this process serves HTTP — trusting one proxy hop (X-Forwarded-*) so secure cookies work. Set server.trustProxy to override.');
+} else if (appConfig.server && appConfig.server.trustProxy) {
   app.set('trust proxy', appConfig.server.trustProxy === true ? 1 : appConfig.server.trustProxy);
 }
 

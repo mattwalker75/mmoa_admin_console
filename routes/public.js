@@ -10,6 +10,7 @@ const express = require('express');
 const { page, flash } = require('../views/layout');
 const { verifyPassword, sessionFingerprint, sessionProblem, DUMMY_HASH } = require('../middleware/auth');
 const localAdmins = require('../helpers/localAdmins');
+const { ensureToken } = require('../middleware/csrf');
 
 module.exports = function (db, appConfig) {
   const router = express.Router();
@@ -80,6 +81,10 @@ module.exports = function (db, appConfig) {
       // middleware/auth.js sessionProblem.
       req.session.iat = Date.now();
       req.session.fp = sessionFingerprint(local.password_hash);
+      // Fresh CSRF token for the signed-in session: one minted before sign-in
+      // (possibly planted with the cookie) doesn't carry over.
+      delete req.session.csrf;
+      ensureToken(req);
       // Not awaited: over EC2 the audit insert is an SSM round trip, and
       // signing in must not wait for the Web App's database.
       audit(req, 'login.success', { kind: 'login', id: local.username, label: local.username, summary: 'Signed in' }).catch(() => {});

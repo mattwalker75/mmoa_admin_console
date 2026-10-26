@@ -741,7 +741,10 @@ module.exports = function (db, appConfig, appConfigModule) {
                 </div>
                 <div class="sm:col-span-2">
                   <label class="label">Password</label>
-                  <input class="input" type="password" name="mysql_password" value="${escapeHtml(dbMysql.password || '')}" autocomplete="off" maxlength="255">
+                  <input class="input" type="password" name="mysql_password" value="" autocomplete="off" maxlength="255"
+                         placeholder="${dbMysql.password ? 'A password is stored — enter a new one to replace it' : ''}">
+                  ${dbMysql.password ? `<p class="mt-1 text-xs text-emerald-700 dark:text-emerald-300">A password is stored — it is never shown here. Leave this blank to keep it, or enter a new one to replace it.</p>
+                  <label class="mt-1 flex items-center gap-2 text-xs text-slate-600 dark:text-slate-300"><input type="checkbox" name="mysql_password_clear" value="1"> Remove the stored password</label>` : ''}
                   <p class="mt-1 text-xs text-slate-500 dark:text-slate-400">Stored in config.json in plain text. Lock down file permissions.</p>
                 </div>
                 <div>
@@ -901,7 +904,8 @@ module.exports = function (db, appConfig, appConfigModule) {
       port: Number.isInteger(portNum) && portNum > 0 && portNum < 65536 ? portNum : 3306,
       database: (b.mysql_database || '').trim(),
       user: (b.mysql_user || '').trim(),
-      password: b.mysql_password || '',
+      // Write-only like the other secrets: blank keeps the stored one.
+      password: b.mysql_password_clear === '1' ? '' : (b.mysql_password ? b.mysql_password : ((p.mysql && p.mysql.password) || '')),
       connectionLimit: Number.isInteger(climit) && climit > 0 && climit <= 200 ? climit : 5
     });
     return next;
@@ -962,7 +966,13 @@ module.exports = function (db, appConfig, appConfigModule) {
           ? `&switched=${encodeURIComponent(`Now using the Web App's database ${db.remote ? `on the ${appConfig.webApp.mode === 'ec2' ? 'EC2 instance (over SSM)' : 'SSH host'}` : `(${db.engine})`} — no restart needed.`)}`
           : `&error=${encodeURIComponent(`Saved, but the console could not reach the database with these settings: ${db.statusMessage || 'connection failed'}. Check them and save again.`)}`;
       }
-      res.redirect('/settings/web-app?saved=1' + switched);
+      // EC2 with no "run as" user: SSM runs every command as root, so new
+      // files (uploads, the database's -wal / -shm) end up owned by root and
+      // the Web App (running as its own user) may not be able to use them.
+      const wa = appConfig.webApp || {};
+      const rootWarn = wa.mode === 'ec2' && !((wa.ec2 || {}).runAsUser || '').trim()
+        ? '&warn=' + encodeURIComponent('"Run commands as" is blank, so commands on the EC2 instance run as root and files the console creates there will be owned by root. Set it to the user the Web App runs as (mmoa on the standard install).') : '';
+      res.redirect('/settings/web-app?saved=1' + switched + rootWarn);
     } catch (err) {
       console.error('[settings] web-app save failed:', err);
       res.redirect('/settings/web-app?error=Save+failed');
