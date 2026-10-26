@@ -914,6 +914,11 @@ module.exports = function (db, appConfig, appConfigModule) {
   // backups/.restore-log.jsonl — one line per database-replacing restore,
   // on the console's own disk: the admin_audit table lives IN the database a
   // restore replaces, so its history is whatever the file carried.
+  // remoteSqlite's "lost contact" errors: the remote transaction may have
+  // committed — don't report "nothing was changed".
+  function dbOutcomeUnknown(err) {
+    return /may or may not have been replaced|still running after an hour/i.test((err && err.message) || String(err || ''));
+  }
   function restoreLog(req, entry) {
     try {
       fs.mkdirSync(BUNDLE_DIR, { recursive: true, mode: 0o700 });
@@ -1365,6 +1370,41 @@ module.exports = function (db, appConfig, appConfigModule) {
   // opts.restoreCommands; the host's machine settings (WA_HOST_KEYS +
   // aws.runningInAws) are kept unless opts.keepHostSettings === false.
   // Returns { steps, restored, skipped, maintenanceEnabled }.
+  // Keep only this machine's AWS credential source + region in json.aws
+  // (or drop the block if the host had neither).
+  function keepHostAws(json, keptHost) {
+    const h = json.aws && typeof json.aws === 'object' ? json.aws : {};
+    const kept = {};
+    if (h.runningInAws !== undefined) kept.runningInAws = h.runningInAws;
+    if (typeof h.region === 'string' && h.region.trim()) kept.region = h.region;
+    if (Object.keys(kept).length) { json.aws = kept; keptHost.push(...Object.keys(kept).map(x => 'aws.' + x)); }
+    else delete json.aws;
+  }
+
+  // The config checks the Web App config restore applies, run on what a full
+  // restore WOULD write — before the database step, so a bundle with values
+  // the Web App can't start on is refused while nothing has changed yet.
+  async function bundleConfigErrors(bundle, opts) {
+    const cfg = (bundle.config && typeof bundle.config === 'object' && !Array.isArray(bundle.config)) ? bundle.config : {};
+    const keepHost = opts.keepHostSettings !== false;
+    const keys = Object.keys(cfg).filter(k => !k.startsWith('_') && WA_CONFIG_KEYS.includes(k) &&
+      !(WA_COMMAND_KEYS.includes(k) && !opts.restoreCommands) &&
+      !(keepHost && (WA_HOST_KEYS.includes(k) || WA_HOST_KEYS_IF_SET.includes(k))) && k !== 'sessionKeys');
+    const errs = checkWaConfigShapes(cfg, keys);
+    if (errs.length) return errs;
+    errs.push(...require('./webAppSettings').validateConfigValues(cfg, keys));
+    if (keys.includes('port') && !(Number.isInteger(cfg.port) && cfg.port >= 1 && cfg.port <= 65535)) errs.push(`port: ${JSON.stringify(cfg.port)} is not a port number`);
+    if (keys.includes('server') && cfg.server && cfg.server.ssl === true) {
+      const accessor = webAppAccess.createAccessorFromConfig(appConfig);
+      for (const f of ['keyPath', 'certPath']) {
+        const fp = cfg.server[f];
+        const abs = fp && (String(fp).startsWith('/') ? fp : waConfig.joinPath(accessor.appPath, fp));
+        if (!abs || !(await accessor.exists(abs).catch(() => false))) errs.push(`server.ssl is on but server.${f} (${fp || 'empty'}) does not exist on the Web App host — it would refuse to start`);
+      }
+    }
+    return errs;
+  }
+
   async function restoreBundle(bundle, progress = () => {}, opts = {}) {
     const accessor = webAppAccess.createAccessorFromConfig(appConfig);
     const steps = [];
@@ -1403,6 +1443,7 @@ module.exports = function (db, appConfig, appConfigModule) {
         if (json[k] !== cfg[k]) keptHost.push(`${k} (${json[k]}; the bundle had ${cfg[k] || 'none'})`);
         continue;
       }
+      if (keepHost && k === 'aws' && !(cfg.aws && typeof cfg.aws === 'object')) { keepHostAws(json, keptHost); continue; }
       if (keepHost && k === 'aws' && cfg.aws && typeof cfg.aws === 'object') {
         // The bundle's AWS settings, but THIS machine's way of getting
         // credentials (absent on the host = the default, off).
@@ -1420,6 +1461,9 @@ module.exports = function (db, appConfig, appConfigModule) {
     if (Object.keys(cfg).length) {
       for (const k of WA_CONFIG_KEYS) {
         if (Object.prototype.hasOwnProperty.call(cfg, k) || WA_COMMAND_KEYS.includes(k) || (keepHost && (WA_HOST_KEYS.includes(k) || WA_HOST_KEYS_IF_SET.includes(k))) || k === 'sessionKeys') continue;
+        // No aws in the bundle: the rest goes back to defaults, but THIS
+        // server's credential source and region stay (keep host settings).
+        if (keepHost && k === 'aws') { keepHostAws(json, keptHost); continue; }
         if (json[k] !== undefined) { delete json[k]; resetKeys.push(k); }
       }
     }
@@ -1743,7 +1787,7 @@ module.exports = function (db, appConfig, appConfigModule) {
             this.stopWatch(); await this.pollOnce();
             (r.steps || []).forEach(s => this.say(s.ok ? 'ok' : 'err', s.step + ' — ' + s.detail));
             if (!r.ok) {
-              this.say('err', 'Restore failed: ' + (r.error || 'unknown error') + (r.dbCommitted ? ' — the database IS restored but some files may not be; fix the cause and run the restore again (it finishes the job).' : ' — nothing was changed (the database step runs first and was rolled back, or never started).'));
+              this.say('err', 'Restore failed: ' + (r.error || 'unknown error') + (r.dbCommitted ? ' — the database IS restored but some files may not be; fix the cause and run the restore again (it finishes the job).' : r.dbUncertain ? ' — the connection to the host was lost during the database step, so the database may or may not have been replaced; check it, then run the restore again (it is safe to repeat).' : ' — nothing was changed (the database step runs first and was rolled back, or never started).'));
               await this.offerDisableMaintenance('The restore FAILED.'); return;
             }
             this.say('ok', 'Restore complete.');
@@ -2125,6 +2169,10 @@ module.exports = function (db, appConfig, appConfigModule) {
   router.post('/backup-restore/import', requireAdmin, uploadJson('/backup-restore'), dryRunAware, async (req, res) => {
     const parsed = parseUpload(req, res);
     if (!parsed) return;
+    // One restore at a time: a Full Restore also writes config.json (and a
+    // console-settings restore can switch the database under it). Validate
+    // only reads, so it may run alongside.
+    if (!req.dryRun && opStatus && opStatus.running) return res.redirect('/backup-restore?error=' + encodeURIComponent(`A ${opStatus.kind} is running — wait for it to finish, then restore.`));
     const selected = normalizeArray(req.body.sections);
     const sections = BACKUP_KEYS.filter(k => selected.includes(k) && Object.prototype.hasOwnProperty.call(parsed, k));
     if (!sections.length) return res.redirect('/backup-restore?error=' + encodeURIComponent('No sections selected to restore.'));
@@ -2222,6 +2270,10 @@ module.exports = function (db, appConfig, appConfigModule) {
   router.post('/backup-restore/web-app-config/import', requireAdmin, uploadJson('/backup-restore'), dryRunAware, async (req, res) => {
     const parsed = parseUpload(req, res);
     if (!parsed) return;
+    // One restore at a time: a Full Restore also writes config.json (and a
+    // console-settings restore can switch the database under it). Validate
+    // only reads, so it may run alongside.
+    if (!req.dryRun && opStatus && opStatus.running) return res.redirect('/backup-restore?error=' + encodeURIComponent(`A ${opStatus.kind} is running — wait for it to finish, then restore.`));
     const back = (msg) => res.redirect('/backup-restore?error=' + encodeURIComponent(msg));
     if (parsed._meta && parsed._meta.type && parsed._meta.type !== 'web-app-config') return back('That file is not a Web App config backup.');
     // Accept either the envelope ({config: {...}}) or a raw config.json.
@@ -2262,8 +2314,12 @@ module.exports = function (db, appConfig, appConfigModule) {
         const fileKeys = Object.keys(cfg).filter(k => WA_CONFIG_KEYS.includes(k) && !WA_COMMAND_KEYS.includes(k) && k !== 'sessionKeys');
         const missing = fileKeys.filter(k => !present.includes(k));
         if (missing.length) return back(`The Web App's config.json can't be read (${liveBroken}). To rebuild it from this file, tick ALL its sections (missing: ${missing.join(', ')}).`);
-        await accessor.runCommand(`[ -e ${shq(cfgPath)} ] && cp -p -- ${shq(cfgPath)} ${shq(cfgPath + '.broken-' + Date.now())} ; ( umask 077; [ -e ${shq(cfgPath)} ] || : > ${shq(cfgPath)} ); true`, { timeoutMs: 20000 }).catch(() => {});
-        notes.push(`the Web App's config.json could not be read (${liveBroken}) — the old file was kept as config.json.broken-…, and config.json was rebuilt from this file`);
+        // The keep-a-copy / create-the-file step runs just before the write
+        // below — never in a Validate, and never for a restore that is then
+        // refused by the checks that follow.
+        notes.push(req.dryRun
+          ? `the Web App's config.json can't be read (${liveBroken}) — the restore would keep the old file as config.json.broken-… and rebuild config.json from this file`
+          : `the Web App's config.json could not be read (${liveBroken}) — the old file was kept as config.json.broken-…, and config.json was rebuilt from this file`);
       }
       for (const k of present) {
         if (WA_COMMAND_KEYS.includes(k) && !restoreCommands) {
@@ -2309,6 +2365,7 @@ module.exports = function (db, appConfig, appConfigModule) {
         });
       }
       if (restoredKeys.length || liveBroken) {
+        if (liveBroken) await accessor.runCommand(`[ -e ${shq(cfgPath)} ] && cp -p -- ${shq(cfgPath)} ${shq(cfgPath + '.broken-' + Date.now())} ; ( umask 077; [ -e ${shq(cfgPath)} ] || : > ${shq(cfgPath)} ); true`, { timeoutMs: 20000 }).catch(() => {});
         await waConfig.writeRemoteConfig(accessor, json);
         if (liveBroken) await accessor.runCommand(`chmod 600 ${shq(cfgPath)}`, { timeoutMs: 20000 }).catch(() => {});
         waConfig.markWebAppWritten(appConfig);
@@ -2609,10 +2666,23 @@ module.exports = function (db, appConfig, appConfigModule) {
         // Like the Full restore: files added after the backup go, so the
         // site looks as it did — but never a file the backup lists as
         // skipped / not written, nor an upload the live database points at.
-        const keepImg = new Set([...names, ...((parsed._meta && Array.isArray(parsed._meta.skipped)) ? parsed._meta.skipped.map(x => String(x).split(':')[0].replace(/^HTML\/images\//, '')) : [])]);
+        // Skipped = unreadable when the backup was made, so the live file is
+        // the only copy. Image Backups list them in _meta.skipped as
+        // "HTML/images/<name>: why" / "uploads/<rel>: why"; a Full Backup
+        // bundle keeps website.skippedImages (names) and uploads.skipped (rels).
+        const skipImg = [], skipUp = [];
+        for (const x of ((parsed._meta && Array.isArray(parsed._meta.skipped)) ? parsed._meta.skipped : [])) {
+          const p0 = String(x).split(':')[0].trim();
+          if (p0.startsWith('uploads/')) skipUp.push(p0.slice('uploads/'.length)); else skipImg.push(p0.replace(/^HTML\/images\//, ''));
+        }
+        if (type === BUNDLE_TYPE) {
+          if (parsed.website && Array.isArray(parsed.website.skippedImages)) skipImg.push(...parsed.website.skippedImages.map(String));
+          if (parsed.uploads && Array.isArray(parsed.uploads.skipped)) skipUp.push(...parsed.uploads.skipped.map(String));
+        }
+        const keepImg = new Set([...names, ...skipImg]);
         const refs = await liveImagePaths();
         if (refs === null) throw new Error('could not read the database to protect the photos it uses — files not in the backup were NOT removed');
-        const keepUp = new Set([...rels, ...refs]);
+        const keepUp = new Set([...rels, ...refs, ...skipUp]);
         const upDirs = uploadsHelper.KINDS.map(k => waConfig.joinPath(accessor.appPath, UPLOADS_REL_DIR + '/' + k));
         const listing = await accessor.readBundle({ files: [], dirs: [imgDir, ...upDirs] });
         for (const d of [imgDir, ...upDirs]) { const e = listing.dirs[d] && listing.dirs[d].err; if (e) throw new Error(`Could not list ${d} to remove files not in the backup: ${e}`); }
@@ -2722,8 +2792,9 @@ module.exports = function (db, appConfig, appConfigModule) {
     } catch (err) {
       finishOp(false, err.message || String(err));
       console.error('[backup] database import failed:', err);
-      restoreLog(req, { kind: 'database restore', file: req.file && req.file.originalname, ok: false, error: err.message || String(err) });
-      await audit(req, 'backup.database_restore', { kind: 'backup', label: req.file && req.file.originalname, summary: `FAILED (nothing was changed): ${err.message || err}` });
+      const unknown = dbOutcomeUnknown(err);
+      restoreLog(req, { kind: 'database restore', file: req.file && req.file.originalname, ok: false, error: err.message || String(err), dbUncertain: unknown });
+      await audit(req, 'backup.database_restore', { kind: 'backup', label: req.file && req.file.originalname, summary: `FAILED (${unknown ? 'outcome unknown — check the database' : 'nothing was changed'}): ${err.message || err}` });
       return back('Database restore failed: ' + (err.message || err));
     }
     // The database IS replaced from here on — nothing below may report otherwise.
@@ -2902,6 +2973,11 @@ module.exports = function (db, appConfig, appConfigModule) {
           const acc = await testAccess().catch(e => ({ ok: false, checks: [{ name: 'Access test', ok: false, detail: e.message || String(e) }] }));
           r.checks.push({ name: 'Access to the Web App (read, write, run commands, every uploads folder)', ok: acc.ok, level: 'error', detail: acc.ok ? 'all ok' : acc.checks.filter(c => !c.ok).map(c => `${c.name}: ${c.detail || 'failed'}`).join('; ') });
           if (!acc.ok) r.valid = false;
+          // The restore's config check, with the page's default options
+          // (keep this server's settings, keep its commands).
+          const ce = await bundleConfigErrors(bundle, { keepHostSettings: true, restoreCommands: false }).catch(e => [e.message || String(e)]);
+          r.checks.push({ name: 'Configuration values the Web App accepts', ok: !ce.length, level: 'error', detail: ce.length ? ce.join('; ') : 'all ok' });
+          if (ce.length) r.valid = false;
           if (startOp('validation', name)) {
             try {
               const t = await restoreDatabase(bundle.database.tables, { dryRun: true });
@@ -2961,6 +3037,8 @@ module.exports = function (db, appConfig, appConfigModule) {
       // Fit against THIS database before anything is written.
       const sc = await schemaCheck(loaded.bundle.database && loaded.bundle.database.tables);
       if (sc.errors.length) throw new Error('The backup does not fit this database — nothing was changed: ' + sc.errors.join('; '));
+      const ce = await bundleConfigErrors(loaded.bundle, { keepHostSettings, restoreCommands });
+      if (ce.length) throw new Error('The bundle\'s configuration has values the Web App would not accept — nothing was changed: ' + ce.join('; '));
       mark('Bundle', (warns.length || sc.warnings.length) ? 'warn' : 'ok', `${name} verified${warns.length ? ' — ' + warns.map(c => c.name).join(', ') : ''}${sc.warnings.length ? ' — ' + sc.warnings.join('; ') : ''}`);
     } catch (err) {
       finishOp(false, err.message || String(err));
@@ -2992,10 +3070,20 @@ module.exports = function (db, appConfig, appConfigModule) {
     } catch (err) {
       finishOp(false, err.message || String(err));
       console.error('[backup] bundle restore failed:', err);
-      await audit(req, 'backup.restore', { kind: 'backup', id: loaded.name, label: loaded.name, summary: `Restore FAILED: ${err.message || err}` });
       const steps = (opStatus && opStatus.steps) || [];
+      const dbCommitted = steps.some(st => st.step === 'Database' && (st.state === 'ok' || st.state === 'warn'));
+      // A remote transaction that lost contact may have committed or not.
+      const dbUncertain = !dbCommitted && dbOutcomeUnknown(err);
+      if (dbCommitted) {
+        // The database (and maybe config.json) is already replaced: the Web
+        // App needs a restart, so flag it like a finished restore would.
+        try { waConfig.markWebAppWritten(appConfig); appConfigModule.save(); } catch (e) { /* best effort */ }
+      }
+      restoreLog(req, { kind: 'full restore', bundle: loaded.name, ok: false, error: err.message || String(err), dbCommitted, dbUncertain });
+      await audit(req, 'backup.restore', { kind: 'backup', id: loaded.name, label: loaded.name,
+        summary: `Restore FAILED${dbCommitted ? ' after the database was replaced' : dbUncertain ? ' — the database may or may not have been replaced' : ''}: ${err.message || err}` });
       res.status(500).json({ ok: false, error: err.message || String(err), steps: steps.map(st => ({ step: st.step, ok: st.state === 'ok' || st.state === 'warn', detail: st.detail })),
-        dbCommitted: steps.some(st => st.step === 'Database' && (st.state === 'ok' || st.state === 'warn')) });
+        dbCommitted, dbUncertain });
     }
   });
 
