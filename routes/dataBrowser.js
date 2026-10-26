@@ -99,8 +99,16 @@ function isNumericType(col) {
 // Coerce a posted string for binding. Numeric-typed columns get a Number
 // when the text is a plain number (so remote SQLite / MySQL see a numeric
 // literal); everything else is bound as the string the operator typed.
+// Browsers send textarea line breaks as \r\n: store \n like everything else.
+const normNl = (v) => String(v).replace(/\r\n/g, '\n');
+// Fingerprint of a field's value as shown in the edit form (NULL distinct
+// from any text), so a save can tell which fields the admin actually changed.
+function fieldFp(v) {
+  return require('crypto').createHash('sha256').update(v === null || v === undefined ? '\u0000NULL' : 'v:' + normNl(v)).digest('hex').slice(0, 24);
+}
+
 function coerce(col, raw) {
-  const s = String(raw);
+  const s = normNl(raw);
   if (isNumericType(col) && /^-?\d+(\.\d+)?$/.test(s.trim())) return Number(s.trim());
   return s;
 }
@@ -410,8 +418,9 @@ module.exports = function (db, appConfig) {
         ? `<textarea id="f-${i}" name="v__${i}" rows="${Math.min(12, Math.max(3, Math.ceil((s || '').length / 90)))}" class="${TEXTAREA_CLS} mt-1" :disabled="isNull" spellcheck="false">${escapeHtml(s || '')}</textarea>`
         : `<input id="f-${i}" class="input mt-1" type="text" name="v__${i}" value="${escapeHtml(s || '')}" :disabled="isNull" autocomplete="off">`;
       const nullBox = c.notnull ? '' : `<label class="mt-1 inline-flex items-center gap-2 text-xs text-slate-600 dark:text-slate-300">
-          <input type="checkbox" name="null__${i}" value="1" x-model="isNull" class="h-3.5 w-3.5"> NULL</label>`;
-      return `<div x-data="{ isNull: ${isNull ? 'true' : 'false'} }">${label}${input}${nullBox}</div>`;
+          <input type="checkbox" name="null__${i}" value="1" x-model="isNull" class="h-3.5 w-3.5"${isNull ? ' checked' : ''}> NULL</label>`;
+      const fp = `<input type="hidden" name="o__${i}" value="${fieldFp(s)}">`;
+      return `<div x-data="{ isNull: ${isNull ? 'true' : 'false'} }">${label}${input}${nullBox}${fp}</div>`;
     }).join('\n') : '';
 
     const actions = `<a class="btn-secondary" href="/data/${encodeURIComponent(table)}">← ${escapeHtml(table)}</a>`;
@@ -453,6 +462,11 @@ module.exports = function (db, appConfig) {
     const sets = [], params = [];
     for (const [idx, f] of fields) {
       const col = columns[idx];
+      // Unchanged since the form was loaded → leave the column alone, so a
+      // value changed meanwhile by the website or the portal isn't
+      // overwritten with this page's stale copy.
+      const orig = req.body && req.body['o__' + idx];
+      if (typeof orig === 'string' && orig === fieldFp(f.isNull ? null : f.value)) continue;
       if (f.isNull) {
         if (col.notnull) return res.redirect(back + '&error=' + encodeURIComponent(`"${col.name}" cannot be NULL.`));
         sets.push(`${dbSchema.quoteIdent(col.name)} = NULL`);
@@ -461,7 +475,7 @@ module.exports = function (db, appConfig) {
         params.push(coerce(col, f.value));
       }
     }
-    if (!sets.length) return res.redirect(back + '&error=' + encodeURIComponent('Nothing to save.'));
+    if (!sets.length) return res.redirect(back + '&msg=' + encodeURIComponent('Nothing changed — the row was left as it is.'));
     try {
       const r = await db.runAsync(`UPDATE ${dbSchema.quoteIdent(table)} SET ${sets.join(', ')} WHERE ${key.where}`, [...params, ...key.params]);
       if (r && r.changes === 0) return res.redirect(`/data/${encodeURIComponent(table)}?error=` + encodeURIComponent('Row not found (it may have been deleted).'));

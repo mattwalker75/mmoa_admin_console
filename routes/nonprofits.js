@@ -110,6 +110,22 @@ function uniqueMessage(err) {
   return null;
 }
 
+// Create's one-time temporary password: kept in memory for up to 10 minutes,
+// with only a random reference in the (signed but readable) session cookie.
+const tempPasswords = new Map(); // ref → { password, at }
+function keepTempPassword(password) {
+  const now = Date.now();
+  for (const [k, v] of tempPasswords) if (now - v.at > 10 * 60 * 1000) tempPasswords.delete(k);
+  const ref = require('crypto').randomBytes(16).toString('hex');
+  tempPasswords.set(ref, { password, at: now });
+  return ref;
+}
+function takeTempPassword(ref) {
+  const v = ref && tempPasswords.get(ref);
+  if (ref) tempPasswords.delete(ref);
+  return v && Date.now() - v.at <= 10 * 60 * 1000 ? v.password : null;
+}
+
 function readAccount(b) {
   const f = {
     login_name: (b.login_name || '').trim(),
@@ -119,7 +135,10 @@ function readAccount(b) {
     phone_number: (b.phone_number || '').trim() || null
   };
   if (!f.login_name) return { error: 'Login name is required' };
-  if (!/^[^\s]+$/.test(f.login_name)) return { error: 'Login name cannot contain spaces' };
+  // Same rule as sign-up and Create: it also keeps a login name from ever
+  // looking like (or equalling) an email, which would make sign-in and the
+  // lockout keys ambiguous between two accounts.
+  if (!LOGIN_NAME_RE.test(f.login_name)) return { error: 'Login name must be 3–30 characters using letters, numbers, and . _ - only' };
   if (!f.email) return { error: 'Email is required' };
   if (!/^[^\s@]+@[^\s@]+$/.test(f.email)) return { error: 'Email does not look valid' };
   if (!f.first_name) return { error: 'First name is required' };
@@ -765,7 +784,7 @@ module.exports = function (db, appConfig) {
       await audit(req, 'nonprofit.create', { kind: 'nonprofit', id: newId, label: f.org_name,
         summary: `email verified: ${f.email_verified ? 'yes' : 'no'}, organization verified: ${f.org_verified ? 'yes' : 'no'}` });
       if (!newId) return res.redirect('/nonprofits?msg=' + encodeURIComponent(`"${f.org_name}" created.`));
-      req.session.npTempPassword = { id: newId, password: f.password };
+      req.session.npTempPassword = { id: newId, ref: keepTempPassword(f.password) };
       res.redirect(`/nonprofits/${newId}`);
     } catch (err) {
       console.error('[nonprofits] create failed:', err);
@@ -827,7 +846,8 @@ module.exports = function (db, appConfig) {
     let tempPassword = null;
     if (req.session.npTempPassword) {
       const t = req.session.npTempPassword;
-      if (String(t.id) === String(id)) tempPassword = t.password;
+      const pw = takeTempPassword(t.ref);
+      if (String(t.id) === String(id)) tempPassword = pw;
       delete req.session.npTempPassword;
     }
     const isPub = (k) => pub.has(k);
@@ -1122,15 +1142,37 @@ module.exports = function (db, appConfig) {
     try {
       const conflict = await findConflict(db, f.login_name, f.email, id);
       if (conflict) return res.redirect(`/nonprofits/${id}?error=` + encodeURIComponent(conflict));
-      const before = await db.getAsync('SELECT login_name, email, first_name, last_name, phone_number FROM users WHERE user_id = ?', [id]).catch(() => null);
-      const r = await db.runAsync('UPDATE users SET login_name = ?, email = ?, first_name = ?, last_name = ?, phone_number = ? WHERE user_id = ?',
-        [f.login_name, f.email, f.first_name, f.last_name, f.phone_number, id]);
-      if (!r.changes) return res.redirect('/nonprofits?error=Account+not+found');
+      const before = await db.getAsync('SELECT login_name, email, first_name, last_name, phone_number FROM users WHERE user_id = ?', [id]);
+      if (!before) return res.redirect('/nonprofits?error=Account+not+found');
+      const lc = (v) => String(v || '').trim().toLowerCase();
+      const emailChanged = lc(before.email) !== lc(f.email);
+      const rekey = [[lc(before.login_name), lc(f.login_name)], [lc(before.email), lc(f.email)]].filter(([o, n]) => o && n && o !== n);
+      const now = kit.sqlTime();
+      // One transaction: the account row, plus what has to follow a change
+      // of email or login name so it can't be used to get around the change.
+      await db.transaction(async (tx) => {
+        await tx.runAsync('UPDATE users SET login_name = ?, email = ?, first_name = ?, last_name = ?, phone_number = ? WHERE user_id = ?',
+          [f.login_name, f.email, f.first_name, f.last_name, f.phone_number, id]);
+        if (emailChanged) {
+          // Links already emailed to the OLD address (password reset,
+          // verification) must stop working — whoever had that mailbox
+          // could otherwise still take over the account.
+          await tx.runAsync('UPDATE password_reset_tokens SET consumed_at = ? WHERE user_id = ? AND consumed_at IS NULL', [now, id]);
+          await tx.runAsync('UPDATE email_verification_tokens SET consumed_at = ? WHERE user_id = ? AND consumed_at IS NULL', [now, id]);
+        }
+        // The web app's sign-in lockout is keyed by login name and email: move
+        // any lock (including a "Locked by MMoA" one) to the new keys, so a
+        // rename doesn't release it.
+        for (const [oldKey, newKey] of rekey) {
+          await tx.runAsync("DELETE FROM login_lockouts WHERE scope = 'account' AND scope_key = ?", [newKey]);
+          await tx.runAsync("UPDATE login_lockouts SET scope_key = ? WHERE scope = 'account' AND scope_key = ?", [newKey, oldKey]);
+        }
+      });
       // Which fields changed — not what they changed to.
       const changed = before ? ['login_name', 'email', 'first_name', 'last_name', 'phone_number'].filter(k => (before[k] || '') !== (f[k] || '')) : [];
       await audit(req, 'nonprofit.edit', { kind: 'nonprofit', id, label: await orgLabel(id),
         summary: changed.length ? `Account fields changed: ${changed.join(', ')}` : 'Account saved (no field changed)' });
-      res.redirect(`/nonprofits/${id}?msg=Account+saved.`);
+      res.redirect(`/nonprofits/${id}?msg=` + encodeURIComponent('Account saved.' + (emailChanged ? ' Any password-reset or verification links sent to the old email no longer work.' : '')));
     } catch (err) {
       console.error('[nonprofits] update failed:', err);
       res.redirect(`/nonprofits/${id}?error=` + encodeURIComponent(uniqueMessage(err) || ('Update failed: ' + (err.message || err))));
@@ -1182,9 +1224,10 @@ module.exports = function (db, appConfig) {
     const id = kit.idParam(req.params.id);
     if (!id) return res.redirect('/nonprofits?error=Invalid+id');
     try {
-      const u = await db.getAsync('SELECT user_id, login_name FROM users WHERE user_id = ?', [id]);
+      const u = await db.getAsync('SELECT user_id, login_name, email FROM users WHERE user_id = ?', [id]);
       if (!u) return res.redirect('/nonprofits?error=Account+not+found');
       const o = await db.getAsync('SELECT org_id, name FROM organizations WHERE user_id = ?', [id]);
+      const lockKeys = [...new Set([u.login_name, u.email].filter(Boolean).map(k => String(k).trim().toLowerCase()))];
       const paths = o ? (await db.allAsync('SELECT path FROM org_images WHERE org_id = ?', [o.org_id])).map(r => r.path) : [];
       await db.transaction(async (tx) => {
         if (o) {
@@ -1195,8 +1238,12 @@ module.exports = function (db, appConfig) {
           await tx.runAsync('DELETE FROM org_contacts WHERE org_id = ?', [o.org_id]);
           await tx.runAsync('DELETE FROM org_categories WHERE org_id = ?', [o.org_id]);
           await tx.runAsync('DELETE FROM org_cities WHERE org_id = ?', [o.org_id]);
+          await tx.runAsync('DELETE FROM org_metrics WHERE org_id = ?', [o.org_id]);
           await tx.runAsync('DELETE FROM organizations WHERE org_id = ?', [o.org_id]);
         }
+        // Its sign-in locks (incl. a "Locked by MMoA" one) go too, so a new
+        // account later given the same login name or email doesn't start locked.
+        for (const k of lockKeys) await tx.runAsync("DELETE FROM login_lockouts WHERE scope = 'account' AND scope_key = ?", [k]);
         await tx.runAsync('DELETE FROM email_verification_tokens WHERE user_id = ?', [id]);
         await tx.runAsync('DELETE FROM password_reset_tokens WHERE user_id = ?', [id]);
         await tx.runAsync('DELETE FROM users WHERE user_id = ?', [id]);

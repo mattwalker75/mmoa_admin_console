@@ -365,18 +365,21 @@ module.exports = function (db, appConfig) {
       const now = kit.sqlTime();
       // Clearing Latest elsewhere and inserting the row happen in ONE
       // transaction: a failed insert leaves the old holder in place.
+      // The row and its beneficiaries are one transaction (see events.js).
+      const benNames = await beneficiaries.resolveNames(db, r.bens);
       const ins = await db.transaction(async (tx) => {
         if (f.is_latest) await latest.take(tx, latest.RAFFLE, 0);
-        return tx.runAsync(`INSERT INTO raffles (slug, title, prize_description_md, total_tickets, ticket_price_text,
+        const res1 = await tx.runAsync(`INSERT INTO raffles (slug, title, prize_description_md, total_tickets, ticket_price_text,
             drawing_at, drawing_location, how_to_buy, claim_requirements, claim_preset, beneficiary_text,
             status, visibility, is_published, is_latest, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', ?, ?, ?, ?, ?)`,
           [f.slug, f.title, f.prize_description_md, f.total_tickets, f.ticket_price_text, f.drawing_at, f.drawing_location,
            f.how_to_buy, f.claim_requirements, f.claim_preset, f.beneficiary_text, f.visibility, f.is_published, f.is_latest, now, now]);
+        if (r.bens.length) await beneficiaries.writeInTx(tx, beneficiaries.KIND.raffle, { slug: f.slug }, r.bens, benNames);
+        return res1;
       });
       // Remote SQLite can't report lastID from inside a transaction → by slug.
       let id = ins && ins.lastID ? Number(ins.lastID) : null;
       if (!id) { const row = await db.getAsync('SELECT raffle_id FROM raffles WHERE slug = ?', [f.slug]); id = row && Number(row.raffle_id); }
-      if (r.bens.length) await beneficiaries.write(db, beneficiaries.KIND.raffle, id, r.bens);
       console.log(`[raffles] ${req.session.user.username} created raffle #${id} (${f.slug})`);
       await audit(req, 'raffle.create', { kind: 'raffle', id, label: f.title,
         summary: `Created as ${f.visibility} (stage open)${f.is_latest ? ', marked Latest' : ''}${r.bens.length ? `, ${r.bens.length} beneficiar${r.bens.length === 1 ? 'y' : 'ies'}` : ''}` });
@@ -463,6 +466,7 @@ module.exports = function (db, appConfig) {
       // Latest is one raffle only: the save and the clearing of Latest on
       // every other raffle are one transaction (helpers/latest.js).
       const prevLatest = f.is_latest ? await latest.holder(db, latest.RAFFLE, id) : null;
+      const benNames = await beneficiaries.resolveNames(db, r.bens);
       await db.transaction(async (tx) => {
         await tx.runAsync(`UPDATE raffles SET slug = ?, title = ?, prize_description_md = ?, total_tickets = ?, ticket_price_text = ?,
             drawing_at = ?, drawing_location = ?, how_to_buy = ?, claim_requirements = ?, claim_preset = ?,
@@ -471,8 +475,8 @@ module.exports = function (db, appConfig) {
            f.how_to_buy, f.claim_requirements, f.claim_preset, f.beneficiary_text, f.visibility, f.is_published,
            f.is_latest, kit.sqlTime(), id]);
         if (f.is_latest) await latest.take(tx, latest.RAFFLE, id);
+        await beneficiaries.writeInTx(tx, beneficiaries.KIND.raffle, { id }, r.bens, benNames);
       });
-      await beneficiaries.write(db, beneficiaries.KIND.raffle, id, r.bens);
       const msg = !req.body.set_status ? 'Raffle saved.'
         : f.visibility === 'published' ? 'Saved and published — it is on the website now.'
         : f.visibility === 'archived' ? 'Saved and archived — it is off the website, kept here for reference.'

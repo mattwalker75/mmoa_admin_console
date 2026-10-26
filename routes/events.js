@@ -426,7 +426,6 @@ module.exports = function (db, appConfig) {
 
   router.get('/events/new', requireAdmin, (req, res) => renderNew(req, res, null, null));
 
-  const writeBeneficiaries = (eventId, bens) => beneficiaries.write(db, beneficiaries.KIND.event, eventId, bens);
 
   router.post('/events', requireAdmin, async (req, res) => {
     const r = readForm(req.body || {}, appConfig);
@@ -438,19 +437,23 @@ module.exports = function (db, appConfig) {
       const now = kit.sqlTime();
       // Clearing Latest elsewhere and inserting the row happen in ONE
       // transaction: a failed insert leaves the old holder in place.
+      // The row and its beneficiaries are one transaction: a failure can't
+      // leave an event saved but reported as "Create failed".
+      const benNames = await beneficiaries.resolveNames(db, r.bens);
       const ins = await db.transaction(async (tx) => {
         if (f.is_latest) await latest.take(tx, latest.EVENT, 0);
-        return tx.runAsync(`INSERT INTO events (slug, title, summary, description_md, starts_at, ends_at, venue_name,
+        const res1 = await tx.runAsync(`INSERT INTO events (slug, title, summary, description_md, starts_at, ends_at, venue_name,
             address, city, map_url, registration_url, registration_label, registration_note, beneficiaries_text,
             is_published, status, is_latest, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           [f.slug, f.title, f.summary, f.description_md, f.starts_at, f.ends_at, f.venue_name, f.address, f.city,
            f.map_url, f.registration_url, f.registration_label, f.registration_note, f.beneficiaries_text,
            f.is_published, f.status, f.is_latest, now, now]);
+        if (r.bens.length) await beneficiaries.writeInTx(tx, beneficiaries.KIND.event, { slug: f.slug }, r.bens, benNames);
+        return res1;
       });
       // Remote SQLite can't report lastID from inside a transaction → by slug.
       let id = ins && ins.lastID ? Number(ins.lastID) : null;
       if (!id) { const row = await db.getAsync('SELECT event_id FROM events WHERE slug = ?', [f.slug]); id = row && Number(row.event_id); }
-      if (r.bens.length) await writeBeneficiaries(id, r.bens);
       console.log(`[events] ${req.session.user.username} created event #${id} (${f.slug})`);
       await audit(req, 'event.create', { kind: 'event', id, label: f.title,
         summary: `Created as ${f.status}${f.is_latest ? ', marked Latest' : ''}${r.bens.length ? `, ${r.bens.length} beneficiar${r.bens.length === 1 ? 'y' : 'ies'}` : ''}` });
@@ -528,6 +531,7 @@ module.exports = function (db, appConfig) {
       // Latest is one event only: the save and the clearing of Latest on
       // every other event are one transaction (helpers/latest.js).
       const prevLatest = f.is_latest ? await latest.holder(db, latest.EVENT, id) : null;
+      const benNames = await beneficiaries.resolveNames(db, r.bens);
       await db.transaction(async (tx) => {
         await tx.runAsync(`UPDATE events SET slug = ?, title = ?, summary = ?, description_md = ?, starts_at = ?, ends_at = ?,
             venue_name = ?, address = ?, city = ?, map_url = ?, registration_url = ?, registration_label = ?,
@@ -536,8 +540,8 @@ module.exports = function (db, appConfig) {
            f.map_url, f.registration_url, f.registration_label, f.registration_note, f.beneficiaries_text,
            f.is_published, f.status, f.is_latest, kit.sqlTime(), id]);
         if (f.is_latest) await latest.take(tx, latest.EVENT, id);
+        await beneficiaries.writeInTx(tx, beneficiaries.KIND.event, { id }, r.bens, benNames);
       });
-      await writeBeneficiaries(id, r.bens);
       const msg = !req.body.set_status ? 'Event saved.'
         : f.status === 'published' ? 'Saved and published — it is on the website now.'
         : f.status === 'archived' ? 'Saved and archived — it is off the website, kept here for reference.'

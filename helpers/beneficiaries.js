@@ -21,8 +21,8 @@ const { escapeHtml } = require('../views/escapeHtml');
 const kit = require('./pageKit');
 
 const KIND = {
-  event: { table: 'event_beneficiaries', idCol: 'event_id' },
-  raffle: { table: 'raffle_beneficiaries', idCol: 'raffle_id' }
+  event: { table: 'event_beneficiaries', idCol: 'event_id', parent: 'events' },
+  raffle: { table: 'raffle_beneficiaries', idCol: 'raffle_id', parent: 'raffles' }
 };
 
 function editor(benJson, orgs) {
@@ -102,28 +102,43 @@ function parse(b) {
   return { bens, json };
 }
 
-async function write(db, { table, idCol }, id, bens) {
-  // Org names are looked up BEFORE the transaction (remote SQLite: no reads
-  // inside one).
-  const ids = [...new Set(bens.filter(x => x.org_id).map(x => x.org_id))];
+// Org names for the beneficiaries — read BEFORE the transaction that
+// writes them (remote SQLite: no reads inside one).
+async function resolveNames(db, bens) {
+  const ids = [...new Set((bens || []).filter(x => x.org_id).map(x => x.org_id))];
   const names = new Map();
   if (ids.length) {
     const rows = await db.allAsync(`SELECT org_id, name FROM organizations WHERE org_id IN (${ids.map(() => '?').join(',')})`, ids);
     for (const r of rows) names.set(Number(r.org_id), r.name);
   }
-  await db.transaction(async (tx) => {
-    await tx.runAsync(`DELETE FROM ${table} WHERE ${idCol} = ?`, [id]);
-    let sort = 1;
-    for (const x of bens) {
-      if (x.org_id && !names.has(x.org_id)) continue; // org vanished meanwhile
-      await tx.runAsync(`INSERT INTO ${table} (${idCol}, org_id, name, url, sort) VALUES (?, ?, ?, ?, ?)`,
-        [id, x.org_id || null, x.org_id ? names.get(x.org_id) : x.name, x.org_id ? null : x.url, sort++]);
-    }
-  });
+  return names;
+}
+
+// Replace the beneficiary rows inside the caller's transaction, so the
+// event / raffle row and its beneficiaries are saved together or not at
+// all. ref = { id } or, for a row created in this same transaction (remote
+// SQLite can't report lastID from inside one), { slug } — slugs are unique.
+async function writeInTx(tx, { table, idCol, parent }, ref, bens, names) {
+  const byId = ref && ref.id;
+  const idExpr = byId ? '?' : `(SELECT ${idCol} FROM ${parent} WHERE slug = ?)`;
+  const idVal = byId ? ref.id : ref.slug;
+  await tx.runAsync(`DELETE FROM ${table} WHERE ${idCol} = ${idExpr}`, [idVal]);
+  let sort = 1;
+  for (const x of bens || []) {
+    if (x.org_id && !names.has(x.org_id)) continue; // org vanished meanwhile
+    await tx.runAsync(`INSERT INTO ${table} (${idCol}, org_id, name, url, sort) VALUES (${idExpr}, ?, ?, ?, ?)`,
+      [idVal, x.org_id || null, x.org_id ? names.get(x.org_id) : x.name, x.org_id ? null : x.url, sort++]);
+  }
+}
+
+// Stand-alone replace (its own transaction).
+async function write(db, kind, id, bens) {
+  const names = await resolveNames(db, bens);
+  await db.transaction((tx) => writeInTx(tx, kind, { id }, bens, names));
 }
 
 function toJson(rows) {
   return JSON.stringify((rows || []).map(x => ({ org_id: x.org_id ? Number(x.org_id) : '', name: x.name || '', url: x.url || '' })));
 }
 
-module.exports = { KIND, editor, parse, write, toJson };
+module.exports = { KIND, editor, parse, write, writeInTx, resolveNames, toJson };
