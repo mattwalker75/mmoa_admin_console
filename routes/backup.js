@@ -62,6 +62,9 @@ const CONSOLE_VERSION = (() => { try { return require('../package.json').version
 const WA_SECTIONS = require('./webAppWebsite').SECTIONS || [];
 const WA_SECTION_KEYS = WA_SECTIONS.map(s => s.key);
 const WA_WEBSITE_LABELS = WA_SECTIONS.reduce((m, s) => { m[s.key] = s.label; return m; }, {});
+// "impact (What we've done)" — a section's file key plus its name on the
+// Web App Website page, so messages say where to look.
+const secName = (k) => (WA_WEBSITE_LABELS[k] ? `${k} (${WA_WEBSITE_LABELS[k]})` : k);
 
 // ── Web App rebuild bundles ───────────────────────────────────────────
 // One .json file = config + website (HTML sections, images) + uploads
@@ -978,7 +981,7 @@ module.exports = function (db, appConfig, appConfigModule) {
     const warnings = Array.isArray(meta.warnings) ? meta.warnings.slice() : [];
     const missingSections = WA_SECTION_KEYS.filter(k => !sections.includes(k));
     if (!sections.length) problems.push('website: no HTML sections');
-    else if (missingSections.length) warnings.push(`website: ${missingSections.length} section(s) not in the bundle (${missingSections.join(', ')}) — those files stay as they are on the host`);
+    else if (missingSections.length) warnings.push(`website: ${missingSections.length} section(s) not in the bundle (${missingSections.map(secName).join(', ')}) — those files stay as they are on the host`);
     const images = (web.images && typeof web.images === 'object') ? Object.keys(web.images) : [];
     const up = (j && j.uploads) || {};
     const uploadFiles = (up.files && typeof up.files === 'object') ? Object.keys(up.files).filter(uploadsHelper.isValidRel) : [];
@@ -1028,7 +1031,7 @@ module.exports = function (db, appConfig, appConfigModule) {
     add('local-secrets.json present (session keys)', summary.localSecrets, summary.localSecrets ? 'yes' : 'no — the server keeps its own session keys (members of THAT install stay signed in; members from the backed-up site sign in again)', 'warn');
     add('maintenance.json present', summary.maintenance, summary.maintenance ? `yes (enabled: ${!!(j.maintenance && j.maintenance.enabled)})` : 'no — left as it is on the host', 'warn');
     const missingSec = WA_SECTION_KEYS.filter(k => !(j && j.website && j.website.sections && typeof j.website.sections[k] === 'string'));
-    add('Website HTML sections', summary.sections > 0 && !missingSec.length, missingSec.length ? `${summary.sections} of ${WA_SECTION_KEYS.length} — missing: ${missingSec.join(', ')}` : `${summary.sections} sections`, summary.sections ? 'warn' : 'error');
+    add('Website HTML sections', summary.sections > 0 && !missingSec.length, missingSec.length ? `${summary.sections} of ${WA_SECTION_KEYS.length} — missing: ${missingSec.map(secName).join(', ')}` : `${summary.sections} sections`, summary.sections ? 'warn' : 'error');
     add('Website images', true, `${summary.images} files${summary.skippedImages.length ? `, ${summary.skippedImages.length} skipped when the bundle was made` : ''}`);
     add('Uploads', true, `${summary.uploads} files${summary.skippedUploads.length ? `, ${summary.skippedUploads.length} skipped when the bundle was made` : ''}`);
     // Database: tables + row counts against the manifest.
@@ -1203,7 +1206,7 @@ module.exports = function (db, appConfig, appConfigModule) {
     WA_SECTION_KEYS.forEach((k, i) => {
       const f = b.files[fragPaths[i]];
       if (f && typeof f.content === 'string' && !f.err) { sections[k] = f.content; addFile(`HTML/${k}.html`, Buffer.from(f.content, 'utf8')); }
-      else warnings.push(`website section "${k}" not captured${f && f.err ? ': ' + f.err : ' (missing on the host)'}`);
+      else warnings.push(`website section ${secName(k)} not captured${f && f.err ? ': ' + f.err : ' (missing on the host)'}`);
     });
     progress('Website', 'ok', `${Object.keys(sections).length} sections`);
     const images = {}, skippedImages = [];
@@ -2388,13 +2391,16 @@ module.exports = function (db, appConfig, appConfigModule) {
     // put in what the editor couldn't save back.
     const big = recognized.filter(k => Buffer.byteLength(sections[k], 'utf8') > SECTION_MAX_BYTES);
     if (big.length) {
-      await audit(req, 'backup.website_restore', { kind: 'backup', label: req.file && req.file.originalname, summary: `Refused: section(s) over ${SECTION_MAX_BYTES / 1024} KB: ${big.join(', ')}` });
-      return res.redirect('/backup-restore?error=' + encodeURIComponent(`Nothing was restored — section(s) larger than the editor allows (${SECTION_MAX_BYTES / 1024} KB): ${big.join(', ')}`));
+      await audit(req, 'backup.website_restore', { kind: 'backup', label: req.file && req.file.originalname, summary: `Refused: section(s) over ${SECTION_MAX_BYTES / 1024} KB: ${big.map(secName).join(', ')}` });
+      return res.redirect('/backup-restore?error=' + encodeURIComponent(`Nothing was restored — section(s) larger than the editor allows (${SECTION_MAX_BYTES / 1024} KB): ${big.map(secName).join(', ')}`));
     }
     if (req.dryRun) return validated(res, {
-      summary: `${recognized.length} HTML section(s) would be restored: ${recognized.map(k => `${k} (${(Buffer.byteLength(sections[k], 'utf8') / 1024).toFixed(1)} KB)`).join(', ')}`,
+      summary: `${recognized.length} HTML section(s) would be restored: ${recognized.map(k => `${secName(k)}, ${(Buffer.byteLength(sections[k], 'utf8') / 1024).toFixed(1)} KB`).join('; ')}`,
       details: ['live on the next page load — no restart'],
-      warnings: (opStatus && opStatus.running) ? [`a ${opStatus.kind} is running right now — the restore would have to wait for it`] : []
+      warnings: [
+        ...((opStatus && opStatus.running) ? [`a ${opStatus.kind} is running right now — the restore would have to wait for it`] : []),
+        ...(() => { const absent = WA_SECTION_KEYS.filter(k => typeof sections[k] !== 'string'); return absent.length ? [`not in this backup, left as they are on the Web App: ${absent.map(secName).join(', ')}`] : []; })()
+      ]
     });
     // One file operation at a time with the Full / Image restores.
     if (!startOp('website restore', req.file && req.file.originalname)) return res.redirect('/backup-restore?error=' + encodeURIComponent(`A ${opStatus.kind} is running — wait for it to finish.`));
