@@ -220,10 +220,36 @@ function fmtBytes(n) {
   if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
   return `${(n / 1024 / 1024).toFixed(1)} MB`;
 }
+// ── Bundle size limits ──────────────────────────────────────────────────
+// A bundle is built, saved, validated and restored as ONE JSON string, and
+// Node.js caps a string at ~512 MB (buffer.constants.MAX_STRING_LENGTH) —
+// that's the hard ceiling. Uploading through the page is capped at 256 MB
+// (the file is held in memory). Warn from 200 MB so there's time to act.
+const BUNDLE_WARN_BYTES = 200 * 1024 * 1024;
+const BUNDLE_UPLOAD_MAX = 256 * 1024 * 1024;
+const BUNDLE_HARD_MAX = require('buffer').constants.MAX_STRING_LENGTH;
+function bundleSizeWarning(bytes) {
+  if (!(bytes >= BUNDLE_WARN_BYTES)) return null;
+  return `This bundle is ${fmtBytes(bytes)} — ` +
+    (bytes > BUNDLE_UPLOAD_MAX
+      ? 'over the 256 MB upload limit, so to move it to another console copy the file into that console\'s backups/ folder by hand'
+      : 'close to the 256 MB upload limit') +
+    `, and the console can't create, validate or restore a bundle over about ${Math.floor(BUNDLE_HARD_MAX / 1048576)} MB. ` +
+    'Most of a bundle is photos — deleting photos of old events, raffles or nonprofits that are no longer needed keeps it smaller.';
+}
+const TOO_BIG_MSG = `too large for the console to load (over about ${Math.floor(BUNDLE_HARD_MAX / 1048576)} MB) — it can't be validated or restored here`;
+// Read a bundle file as JSON, with a plain message instead of V8's when it is
+// past the string limit.
+function parseBundleFile(p) {
+  const size = fs.statSync(p).size;
+  if (size >= BUNDLE_HARD_MAX) throw new Error(`This bundle is ${fmtBytes(size)}, ${TOO_BIG_MSG}.`);
+  return JSON.parse(fs.readFileSync(p, 'utf8'));
+}
+
 // Bundles carry base64 images, so allow far more than the 4 MB single-file limit.
 const bundleUpload = multer({
   storage: multer.memoryStorage(),
-  limits: { fileSize: 256 * 1024 * 1024, files: 1 },
+  limits: { fileSize: BUNDLE_UPLOAD_MAX, files: 1 },
   fileFilter(req, file, cb) {
     if (!/\.json$/i.test(file.originalname)) return cb(new Error('Please upload a .json bundle.'));
     cb(null, true);
@@ -1108,8 +1134,8 @@ module.exports = function (db, appConfig, appConfigModule) {
       let meta = readBundleMeta(n, st);
       if (!meta) {
         let summary;
-        try { summary = summarizeBundle(JSON.parse(fs.readFileSync(p, 'utf8'))); }
-        catch (e) { summary = { valid: false, problems: ['not valid JSON: ' + e.message], warnings: [], skippedImages: [] }; }
+        try { summary = summarizeBundle(parseBundleFile(p)); }
+        catch (e) { summary = { valid: false, problems: [st.size >= BUNDLE_HARD_MAX ? TOO_BIG_MSG : 'not valid JSON: ' + e.message], warnings: [], skippedImages: [] }; }
         meta = writeBundleMeta(n, summary, st);
       }
       const made = (meta.summary && meta.summary.exportedAt) || st.mtime.toISOString();
@@ -1122,7 +1148,7 @@ module.exports = function (db, appConfig, appConfigModule) {
     if (!n) throw new Error('Bad bundle name.');
     const p = path.join(BUNDLE_DIR, n);
     if (!fs.existsSync(p)) throw new Error(`Bundle ${n} not found.`);
-    return { name: n, path: p, bundle: JSON.parse(fs.readFileSync(p, 'utf8')) };
+    return { name: n, path: p, bundle: parseBundleFile(p) };
   }
 
   // Capture everything (see the file header): config, secrets, maintenance
@@ -1543,7 +1569,7 @@ module.exports = function (db, appConfig, appConfigModule) {
         <td class="py-2 pr-2 pl-1"><input type="radio" name="bundle" value="${escapeHtml(b.name)}" x-model="selected" class="h-4 w-4"></td>
         <td class="py-2 pr-3 font-mono text-xs break-all">${escapeHtml(b.name)}</td>
         <td class="py-2 pr-3 whitespace-nowrap text-slate-500" title="when the bundle was made (UTC)">${escapeHtml(b.mtime.replace('T', ' ').slice(0, 16))} UTC</td>
-        <td class="py-2 pr-3 whitespace-nowrap text-slate-500">${fmtBytes(b.size)}</td>
+        <td class="py-2 pr-3 whitespace-nowrap ${b.size >= BUNDLE_WARN_BYTES ? 'text-amber-600 dark:text-amber-400 font-semibold' : 'text-slate-500'}"${b.size >= BUNDLE_WARN_BYTES ? ` title="${escapeHtml(bundleSizeWarning(b.size))}"` : ''}>${fmtBytes(b.size)}${b.size >= BUNDLE_WARN_BYTES ? ' ⚠' : ''}</td>
         <td class="py-2 pr-3 text-xs text-slate-600 dark:text-slate-300">${s.valid ? `v${s.version || 1} · ${s.configKeys} config keys · secrets ${s.localSecrets ? 'yes' : 'no'} · ${s.sections} sections · ${s.images} images${s.skippedImages && s.skippedImages.length ? ` (${s.skippedImages.length} skipped)` : ''} · ${s.uploads || 0} uploads${s.skippedUploads && s.skippedUploads.length ? ` (${s.skippedUploads.length} skipped)` : ''} · ${s.tables} tables / ${s.rows} rows · ${s.templates || 0} templates${s.manifest ? '' : ' · no manifest'}` : escapeHtml((s.problems || []).join('; '))}</td>
         <td class="py-2">${badge}${warn}</td>
         <td class="py-2 text-right whitespace-nowrap">
@@ -2754,9 +2780,18 @@ module.exports = function (db, appConfig, appConfigModule) {
       const bundle = await buildBundle(mark, { maintenanceOnForBackup: !!(req.body && req.body.maintenanceOnForBackup === true) });
       mark('Save bundle', 'in_progress', 'writing to backups/');
       const name = uniqueBundleName(`web_app_bundle_${bundleStamp()}`);
-      writeBundleFile(name, JSON.stringify(bundle));
+      let text;
+      try { text = JSON.stringify(bundle); }
+      catch (e) {
+        if (e instanceof RangeError) throw new Error(`The backup is too large to save as one bundle (over about ${Math.floor(BUNDLE_HARD_MAX / 1048576)} MB of data, mostly photos). Delete photos that are no longer needed and try again.`);
+        throw e;
+      }
+      writeBundleFile(name, text);
+      text = null;
       const st = fs.statSync(path.join(BUNDLE_DIR, name));
       const summary = summarizeBundle(bundle);
+      const sizeWarn = bundleSizeWarning(st.size);
+      if (sizeWarn) summary.warnings = [sizeWarn, ...(summary.warnings || [])];
       writeBundleMeta(name, summary, st);
       mark('Save bundle', 'ok', `${name} (${fmtBytes(st.size)})`);
       opStatus.name = name;
@@ -2830,7 +2865,12 @@ module.exports = function (db, appConfig, appConfigModule) {
         const v = verifyBundle(parsed);
         audit(req, 'backup.upload', { kind: 'backup', id: name, label: name,
           summary: `Bundle uploaded (${fmtBytes(st.size)}, v${s.version}) — verify ${v.valid ? 'passed' : 'FAILED'}: ${v.checks.filter(c => !c.ok).map(c => c.name).join(', ') || 'all checks ok'}` })
-          .finally(() => res.redirect('/backup-restore?ok=bundleup&bundle=' + encodeURIComponent(name) + (v.valid ? '' : '&warn=' + encodeURIComponent('Uploaded, but Verify reports: ' + v.checks.filter(c => !c.ok && c.level === 'error').map(c => c.name + ' — ' + c.detail).join('; '))) + '#full-backup'));
+          .finally(() => {
+            const warns = [];
+            if (!v.valid) warns.push('Uploaded, but Verify reports: ' + v.checks.filter(c => !c.ok && c.level === 'error').map(c => c.name + ' — ' + c.detail).join('; '));
+            const sw = bundleSizeWarning(st.size); if (sw) warns.push(sw);
+            res.redirect('/backup-restore?ok=bundleup&bundle=' + encodeURIComponent(name) + (warns.length ? '&warn=' + encodeURIComponent(warns.join(' ')) : '') + '#full-backup');
+          });
       } catch (e) {
         res.redirect('/backup-restore?error=' + encodeURIComponent('Could not save the bundle: ' + (e.message || e)));
       }

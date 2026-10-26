@@ -389,6 +389,16 @@ database table are inside it — nothing is referenced from elsewhere — so
 *Download* on one console and *Upload a bundle* on another moves a whole
 site (up to 256 MB per upload; copy bigger ones into `backups/` by hand).
 
+**Size limits.** The console builds, validates and restores a bundle as one
+piece of text, and Node.js caps that at about 512 MB — the hard limit for a
+bundle. Uploading through the page is capped at 256 MB. From 200 MB the
+console warns: after the backup, on upload, and with a ⚠ on the bundle's
+size in the list. A bundle past the hard limit gets a plain "too large"
+message instead of a failed restore. Photos are almost all of a bundle's
+size (each about 150 KB after the browser shrinks it), so a typical site
+stays well under 100 MB; deleting photos of old events, raffles or
+nonprofits keeps it down.
+
 Bundles are listed from a small `.meta.json` summary written next to each
 one (a bundle copied in by hand is summarized once, on the next page
 view). Each bundle row offers **Download** and, for bundles that carry one,
