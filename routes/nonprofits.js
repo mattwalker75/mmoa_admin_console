@@ -787,22 +787,29 @@ module.exports = function (db, appConfig) {
                ${mErr ? '' : `<p class="text-slate-500">No account with id <code class="font-mono">${id}</code>.</p>`}
                <p class="mt-4"><a class="text-brand-600 hover:underline" href="/nonprofits">← Back to nonprofits</a></p>` }));
     }
-    const { value: o, err: oErr } = await kit.safeGet(db, 'SELECT * FROM organizations WHERE user_id = ?', [id], null);
+    // Over EC2 every query is an SSM round trip, so run them in two
+    // parallel batches (the org's own rows need its org_id first).
+    const now = kit.sqlTime();
+    const [{ value: o, err: oErr }, { value: vRow, err: vErr }, { value: pRow, err: pErr }, { rows: lockRows, err: lErr }] = await Promise.all([
+      kit.safeGet(db, 'SELECT * FROM organizations WHERE user_id = ?', [id], null),
+      kit.safeGet(db,
+        'SELECT COUNT(*) AS c FROM email_verification_tokens WHERE user_id = ? AND consumed_at IS NULL AND expires_at > ?', [id, now], { c: null }),
+      kit.safeGet(db,
+        'SELECT COUNT(*) AS c FROM password_reset_tokens WHERE user_id = ? AND consumed_at IS NULL AND expires_at > ?', [id, now], { c: null }),
+      kit.safeAll(db,
+        `SELECT scope, scope_key, fail_count, locked_until_ms FROM login_lockouts
+          WHERE scope <> 'ip' AND (LOWER(scope_key) = LOWER(?) OR LOWER(scope_key) = LOWER(?))`, [m.login_name || '', m.email || '']),
+      kit.webAppPublicUrl(appConfig).catch(() => '') // warms the cache used for `base` below
+    ]);
     let contacts = { rows: [] }, images = { rows: [] }, cats = { rows: [] }, cities = { rows: [] };
     if (o) {
-      contacts = await kit.safeAll(db, 'SELECT * FROM org_contacts WHERE org_id = ? ORDER BY sort, contact_id', [o.org_id]);
-      images = await kit.safeAll(db, 'SELECT image_id, path, alt FROM org_images WHERE org_id = ? ORDER BY sort, image_id', [o.org_id]);
-      cats = await kit.safeAll(db, 'SELECT c.name, c.is_active FROM org_categories oc JOIN categories c ON c.category_id = oc.category_id WHERE oc.org_id = ? ORDER BY c.sort, c.name', [o.org_id]);
-      cities = await kit.safeAll(db, 'SELECT c.name, c.is_active FROM org_cities ox JOIN cities c ON c.city_id = ox.city_id WHERE ox.org_id = ? ORDER BY c.sort, c.name', [o.org_id]);
+      [contacts, images, cats, cities] = await Promise.all([
+        kit.safeAll(db, 'SELECT * FROM org_contacts WHERE org_id = ? ORDER BY sort, contact_id', [o.org_id]),
+        kit.safeAll(db, 'SELECT image_id, path, alt FROM org_images WHERE org_id = ? ORDER BY sort, image_id', [o.org_id]),
+        kit.safeAll(db, 'SELECT c.name, c.is_active FROM org_categories oc JOIN categories c ON c.category_id = oc.category_id WHERE oc.org_id = ? ORDER BY c.sort, c.name', [o.org_id]),
+        kit.safeAll(db, 'SELECT c.name, c.is_active FROM org_cities ox JOIN cities c ON c.city_id = ox.city_id WHERE ox.org_id = ? ORDER BY c.sort, c.name', [o.org_id])
+      ]);
     }
-    const now = kit.sqlTime();
-    const { value: vRow, err: vErr } = await kit.safeGet(db,
-      'SELECT COUNT(*) AS c FROM email_verification_tokens WHERE user_id = ? AND consumed_at IS NULL AND expires_at > ?', [id, now], { c: null });
-    const { value: pRow, err: pErr } = await kit.safeGet(db,
-      'SELECT COUNT(*) AS c FROM password_reset_tokens WHERE user_id = ? AND consumed_at IS NULL AND expires_at > ?', [id, now], { c: null });
-    const { rows: lockRows, err: lErr } = await kit.safeAll(db,
-      `SELECT scope, scope_key, fail_count, locked_until_ms FROM login_lockouts
-        WHERE scope <> 'ip' AND (LOWER(scope_key) = LOWER(?) OR LOWER(scope_key) = LOWER(?))`, [m.login_name || '', m.email || '']);
     const firstErr = oErr || contacts.err || images.err || cats.err || cities.err || vErr || pErr || lErr || null;
     const lockedNow = lockRows.filter(l => l.locked_until_ms != null && Number(l.locked_until_ms) > Date.now());
     const manualLock = lockedNow.some(l => lockouts.isManual(l.locked_until_ms));
@@ -1252,14 +1259,19 @@ module.exports = function (db, appConfig) {
 
   // ── Edit profile ────────────────────────────────────────────────────
   async function loadProfilePickers() {
-    const cats = await kit.safeAll(db, 'SELECT category_id, slug, name FROM categories WHERE is_active = 1 ORDER BY sort, name', []);
-    const cities = await kit.safeAll(db, 'SELECT city_id, name FROM cities WHERE is_active = 1 ORDER BY sort, name', []);
+    const [cats, cities] = await Promise.all([
+      kit.safeAll(db, 'SELECT category_id, slug, name FROM categories WHERE is_active = 1 ORDER BY sort, name', []),
+      kit.safeAll(db, 'SELECT city_id, name FROM cities WHERE is_active = 1 ORDER BY sort, name', [])
+    ]);
     return { categories: cats.rows, cities: cities.rows, err: cats.err || cities.err };
   }
   async function loadOrgChildren(orgId) {
-    const contacts = await db.allAsync('SELECT * FROM org_contacts WHERE org_id = ? ORDER BY sort, contact_id', [orgId]);
-    const cats = await db.allAsync('SELECT c.category_id, c.slug FROM org_categories oc JOIN categories c ON c.category_id = oc.category_id WHERE oc.org_id = ? ORDER BY c.category_id', [orgId]);
-    const cities = await db.allAsync('SELECT city_id FROM org_cities WHERE org_id = ? ORDER BY city_id', [orgId]);
+    // In parallel: over EC2 each query is an SSM round trip.
+    const [contacts, cats, cities] = await Promise.all([
+      db.allAsync('SELECT * FROM org_contacts WHERE org_id = ? ORDER BY sort, contact_id', [orgId]),
+      db.allAsync('SELECT c.category_id, c.slug FROM org_categories oc JOIN categories c ON c.category_id = oc.category_id WHERE oc.org_id = ? ORDER BY c.category_id', [orgId]),
+      db.allAsync('SELECT city_id FROM org_cities WHERE org_id = ? ORDER BY city_id', [orgId])
+    ]);
     return { contacts, catSlugs: cats.map(c => c.slug), catIds: cats.map(c => Number(c.category_id)), cityIds: cities.map(c => Number(c.city_id)) };
   }
   async function renderProfile(req, res, id, values, error) {
@@ -1271,10 +1283,12 @@ module.exports = function (db, appConfig) {
                ${err ? '' : `<p class="text-slate-500">This account has no organization profile to edit.</p>`}
                <p class="mt-4"><a class="text-brand-600 hover:underline" href="/nonprofits/${id}">← Back</a></p>` }));
     }
+    const childrenP = values ? null : loadOrgChildren(o.org_id);
+    if (childrenP) childrenP.catch(() => {}); // handled below; avoid an unhandled rejection meanwhile
     const pickers = await loadProfilePickers();
     let v = values;
     if (!v) {
-      try { const ch = await loadOrgChildren(o.org_id); v = profileValues(o, ch.contacts, ch.catSlugs, ch.cityIds); }
+      try { const ch = await childrenP; v = profileValues(o, ch.contacts, ch.catSlugs, ch.cityIds); }
       catch (e) { return res.send(page({ title: 'Edit profile', appConfig, user, activeNav: 'nonprofits', body: `${kit.pageHeader('Edit profile')}${kit.dbBanner(e)}` })); }
     }
     const status = o.verification_status || 'unverified';

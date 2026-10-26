@@ -187,7 +187,11 @@ async function webAppPublicUrl(appConfig) {
   let value = '';
   try {
     const { json } = await waConfig.readRemoteConfig(webAppAccess.createAccessorFromConfig(appConfig));
-    value = (json && typeof json.publicBaseUrl === 'string') ? json.publicBaseUrl.trim().replace(/\/+$/, '') : '';
+    // Same rules as the Website card: on EC2 the load balancer in front of
+    // the instance, on SSH the host — never a localhost address unless the
+    // Web App runs on this machine.
+    const addr = await require('./websiteCard').resolveWebsiteAddress(appConfig, json || {});
+    value = String((addr && addr.url) || '').trim().replace(/\/+$/, '');
   } catch (e) { value = ''; }
   _pbu = { at: Date.now(), key, value };
   return value;

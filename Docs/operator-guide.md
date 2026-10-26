@@ -304,6 +304,9 @@ the board and the directory come from the database (their own pages).
     it reports the instance healthy. With no load balancer it falls back
     to a non-localhost `publicBaseUrl`, and never shows localhost. The
     lookup is cached for 10 minutes; saving Settings → Web App clears it.
+    The same address is used everywhere the console points at the live
+    site: the Preview pop-ups on Events, Raffles and Nonprofits, and the
+    fast path for loading uploaded photos.
   - **SSH** — a non-localhost `publicBaseUrl`, else the SSH host on the
     Web App's port.
 - **Images** — upload, then copy the `<img src="/content/images/…">` tag
