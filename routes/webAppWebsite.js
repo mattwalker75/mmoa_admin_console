@@ -115,7 +115,8 @@ function imagesDirOf(accessor) {
 // Fixed list of editable fragments (matches the mmoa_web_app HTML/ contract).
 const SECTIONS = [
   { key: 'hero',    label: 'Home hero',          desc: 'Home page banner over the car-show photo — headline, mission line, calls to action.' },
-  { key: 'about',   label: 'About — our story',  desc: 'Story intro on the About page (values, board, impact list and photos are built in / database-driven).' },
+  { key: 'about',   label: 'About — our story',  desc: 'Story intro on the About page (values and photos are built in; the board comes from the Board page).' },
+  { key: 'impact',  label: "What we've done",    desc: 'The list under "What we\'ve done" on the About page — one <li> per item inside <ul class="impact">. Empty the section to hide the heading too.' },
   { key: 'help',    label: 'How you can help',   desc: 'The "How you can help" list (About page and the Home partner band).' },
   { key: 'partner', label: 'Partner With Us',    desc: 'Body of the Partner With Us page (the nonprofit sign-up button is added below it).' },
   { key: 'footer',  label: 'Footer',             desc: 'Site-wide footer text. The emergency 911 / 988 / 211 box is built in.' }

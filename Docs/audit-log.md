@@ -86,7 +86,7 @@ Summaries are written to be safe to read over anyone's shoulder:
 | `template.create` / `template.update` / `template.delete` | A template saved (from Settings or from a form's Templates drop-down) or deleted | template name |
 | `webapp_settings.save` | Web App Settings → a tab saved | the tab; the names of the keys that changed in the web app's `config.json` |
 | `webapp.power` | Start / Stop / Restart Web App | the action and the command's exit code |
-| `website.section` | Web App Website: a section (hero, about, help, partner, footer) saved | the section |
+| `website.section` | Web App Website: a section (hero, about, impact, help, partner, footer) saved | the section |
 | `website.image` | Web App Website: an image uploaded or deleted | the file name |
 | `maintenance.enable` / `maintenance.disable` / `maintenance.status` | Maintenance mode command run | exit code |
 | `lockout.unlock` | Locked Users: a lockout cleared | the scope (IP or login) |

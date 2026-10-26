@@ -117,7 +117,7 @@ password is replaced by re-running the command above with the same username.
 | **Data Browser**     | Generic table browser / editor for the whole web-app database. |
 | **Locked Users**     | Current login lockouts (accounts and IPs) with Unlock. |
 | **Reports**          | Nonprofits (all / pending), events, raffles, lockouts, console admins — view or CSV. |
-| **Web App Website**  | Website copy sections (hero, about, help, partner, footer), images, Maintenance Mode. |
+| **Web App Website**  | Website copy sections (hero, about, impact, help, partner, footer), images, Maintenance Mode. |
 | **Web App Logs**     | Tail of the web app's `logs/app.log`. |
 | **Backup/Restore**   | JSON exports / restores and one-file rebuild bundles (incl. `uploads/**`). |
 | **Web App Settings** | The web app's `config.json` (General incl. public site info and the Donate button, Email, Security, Database, Server) + Start / Stop / Restart. |

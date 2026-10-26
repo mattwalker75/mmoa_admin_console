@@ -54,7 +54,10 @@
       "h1,h2,h3{font-family:'Saira Condensed',Barlow,sans-serif;font-weight:700;line-height:1.1}",
       'h1,h2{text-transform:uppercase}',
       'a{color:#8fdc4f}a:hover{color:#b5ec86}',
-      'img{max-width:100%;height:auto}'
+      'img{max-width:100%;height:auto}',
+      // the About page's "What we've done" cards (site styles.scss .impact)
+      '.impact{list-style:none;padding:0;margin:0;display:grid;gap:10px}',
+      '.impact li{background:#242526;border:1px solid #3a3b3c;border-left:4px solid #7cd136;border-radius:12px;padding:12px 16px}'
     ].join('');
     var body = rewriteImages(applyTokens(content || '', tokens()));
     return '<!DOCTYPE html><html lang="en"><head><meta charset="utf-8">'
