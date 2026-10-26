@@ -945,6 +945,7 @@ module.exports = function (db, appConfig, appConfigModule) {
       // Drop any memoized SSM client so changed EC2 credentials take effect
       // without a restart.
       try { awsSsm.resetClient(); } catch (e) { /* best effort */ }
+      try { require('../helpers/awsAlb').resetCache(); } catch (e) { /* best effort */ }
 
       const engineIsSqlite = (appConfig.database.engine || '') === 'sqlite';
       const webAppMoved = conn(appConfig.webApp) !== webAppBefore;

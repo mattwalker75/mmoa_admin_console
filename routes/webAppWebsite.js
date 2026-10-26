@@ -27,7 +27,7 @@ const path = require('path');
 const multer = require('multer');
 const { page, flash } = require('../views/layout');
 const { escapeHtml } = require('../views/escapeHtml');
-const { websiteLinkCard } = require('../helpers/websiteCard');
+const { websiteLinkCard, resolveWebsiteAddress, prefetchWebsiteAddress } = require('../helpers/websiteCard');
 const { siteTokens } = require('../helpers/siteTokens');
 const { requireAdmin } = require('../middleware/auth');
 const webAppAccess = require('../helpers/webAppAccess');
@@ -322,6 +322,7 @@ function makeRouter(appConfig, db) {
     if (!webAppAccess.isConfigured(appConfig)) {
       notConfigured = true;
     } else {
+      prefetchWebsiteAddress(appConfig); // EC2: load balancer lookup alongside the bundle read
       const accessor = webAppAccess.createAccessorFromConfig(appConfig);
       accessDesc = accessor.describe();
       // Everything the page needs — 5 fragments, the remote config.json and
@@ -367,6 +368,7 @@ function makeRouter(appConfig, db) {
       cards = results.map((r, i) => sectionCard(r.s, r.content, r.err, i === 0)).join('\n');
     }
 
+    const siteAddr = notConfigured ? null : await resolveWebsiteAddress(appConfig, cfgForTokens || { publicBaseUrl });
     const header = `<header class="mb-6">
       <h1 class="text-2xl font-bold text-slate-900 dark:text-slate-100">Web App Website</h1>
       <p class="mt-1 text-sm text-slate-500 dark:text-slate-400">Edit the website's fixed copy (home hero, our story, how to help, partner page, footer). Events, raffles, the board and the directory have their own pages.</p>
@@ -401,7 +403,7 @@ function makeRouter(appConfig, db) {
       ${banner}
       ${notConfigured ? '' : `<div class="max-w-4xl space-y-3" data-wa-tokens="${escapeHtml(JSON.stringify(tokens))}">
         ${maintenanceCard(maintenanceCommand)}
-        ${websiteLinkCard(publicBaseUrl)}
+        ${websiteLinkCard(siteAddr || publicBaseUrl)}
         ${imagesCard(images, req.query)}
         ${cards}
       </div>`}

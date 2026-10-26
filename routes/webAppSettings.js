@@ -22,7 +22,7 @@
 const express = require('express');
 const { page, flash, waRestartPrompt } = require('../views/layout');
 const { escapeHtml } = require('../views/escapeHtml');
-const { websiteLinkCard } = require('../helpers/websiteCard');
+const { websiteLinkCard, resolveWebsiteAddress, prefetchWebsiteAddress } = require('../helpers/websiteCard');
 const { requireAdmin } = require('../middleware/auth');
 const webAppAccess = require('../helpers/webAppAccess');
 const waConfig = require('../helpers/webAppConfig');
@@ -371,7 +371,7 @@ function powerBar(cmds, restartPending) {
   </div>`;
 }
 
-function renderBody({ tab, json, readErr, notConfigured, accessDesc, query, cmds, restartPending }) {
+function renderBody({ tab, json, readErr, notConfigured, accessDesc, query, cmds, restartPending, siteAddr }) {
   // ?wa=1 means the Web App's config.json actually changed (and so a
   // restart is now pending); ?saved=1 alone means the form was saved but
   // the remote file came out identical — nothing was edited.
@@ -433,7 +433,7 @@ function renderBody({ tab, json, readErr, notConfigured, accessDesc, query, cmds
   return `
     ${pageHeader('Web App Settings', 'Configure the Web App application by editing its config.json — no need to log into it.')}
     ${powerBar(cmds, restartPending)}
-    ${json ? `<div class="mb-6 max-w-3xl">${websiteLinkCard(json.publicBaseUrl)}</div>` : ''}
+    ${json ? `<div class="mb-6 max-w-3xl">${websiteLinkCard(siteAddr || json.publicBaseUrl)}</div>` : ''}
     ${flash('error', query.error)}
     ${saved}
     ${waRestartPrompt(!!query.wa)}
@@ -498,6 +498,7 @@ module.exports = function (appConfig, appConfigModule) {
     if (!webAppAccess.isConfigured(appConfig)) {
       notConfigured = true;
     } else {
+      prefetchWebsiteAddress(appConfig); // EC2: load balancer lookup alongside the config read
       try {
         const accessor = webAppAccess.createAccessorFromConfig(appConfig);
         accessDesc = accessor.describe();
@@ -509,9 +510,10 @@ module.exports = function (appConfig, appConfigModule) {
       }
     }
 
+    const siteAddr = json ? await resolveWebsiteAddress(appConfig, json) : null;
     const body = renderBody({
       tab, json, readErr, notConfigured, accessDesc, query: req.query, cmds,
-      restartPending: waConfig.isRestartPending(appConfig)
+      restartPending: waConfig.isRestartPending(appConfig), siteAddr
     });
     res.send(page({ title: 'Web App Settings', body, appConfig, user, activeNav: 'web-app-settings' }));
   });

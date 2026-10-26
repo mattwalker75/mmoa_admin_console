@@ -293,9 +293,19 @@ the board and the directory come from the database (their own pages).
   off), `{{year}}` and `{{eventCount}}`. An unset value renders as nothing. The values come from Web
   App Settings → General, where each field that feeds a token says so
   ("Website token: …").
-- **Website** — the site's public address (`publicBaseUrl` from Web App
-  Settings → General) with an **Open website** button that opens it in a
-  new browser window.
+- **Website** — the address visitors use, with an **Open website** button
+  that opens it in a new browser window. Which address depends on where the
+  Web App runs (Settings → Web App):
+  - **Local** — its `publicBaseUrl` (Web App Settings → General);
+    `localhost` is fine because it's on the same machine.
+  - **EC2** — the load balancer the instance is registered with, found
+    with read-only AWS calls (target groups → load balancer → listeners,
+    for http or https). The card names the load balancer and says whether
+    it reports the instance healthy. With no load balancer it falls back
+    to a non-localhost `publicBaseUrl`, and never shows localhost. The
+    lookup is cached for 10 minutes; saving Settings → Web App clears it.
+  - **SSH** — a non-localhost `publicBaseUrl`, else the SSH host on the
+    Web App's port.
 - **Images** — upload, then copy the `<img src="/content/images/…">` tag
   into a section. **Preview** opens the picture in a floating window (Esc
   or ✕ closes it). Works in every access mode.
