@@ -62,7 +62,7 @@ const FIELDS = {
     { path: 'allowMemberRegistration', label: 'Allow new nonprofit sign-ups', type: 'toggle', def: true, hint: 'Off hides the website\'s nonprofit sign-up; existing logins keep working.' },
     { path: 'maintenanceCommand', label: 'Maintenance Command', type: 'text', hint: 'Command run on the Web App server (from its install directory) to put it into / take it out of maintenance. Default ./scripts/maintenance.sh' },
     { type: 'heading', label: 'Public site info', hint: 'Shown in the website header / footer (GET /api/site). Each value marked with a token can also be placed in any Web App Website section as {{token}} — the website fills it in.' },
-    { path: 'site.phone', label: 'Phone', type: 'text', hint: 'e.g. (214) 763-5546', tokens: ['phone', 'phoneTel'], tokenNote: '{{phoneTel}} is the digits-only form for tel: links.' },
+    { path: 'site.phone', label: 'Phone', type: 'text', hint: 'e.g. (972) 555-0100 — leave blank to show no phone on the site', tokens: ['phone', 'phoneTel'], tokenNote: '{{phoneTel}} is the digits-only form for tel: links.' },
     { path: 'site.email', label: 'Public email', type: 'text', hint: 'A contact address for the public, e.g. info@missionmenofanna.org', tokens: ['email'] },
     { path: 'site.ein', label: 'EIN', type: 'text', hint: 'e.g. 33-4035685', tokens: ['ein'] },
     { path: 'site.tagline', label: 'Tagline', type: 'text', hint: 'A short motto, e.g. Men in service of the people of Anna', tokens: ['tagline'] },
