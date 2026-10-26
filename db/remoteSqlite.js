@@ -198,7 +198,28 @@ function init(appConfig, sqliteCfg) {
     const a = accessor();
     const file = dbFile();
     const flags = `-batch ${opts && opts.bail ? '-bail ' : ''}${opts && opts.json ? '-json ' : ''}-cmd ".timeout 5000"`;
-    const argv = statements.map(shq).join(' ');
+    // Too big to pass on the command line (a long description, say, would
+    // break SSM's request size / the OS argument limit): stage the
+    // statements in a private temp file — like the transactions do — and
+    // feed it on stdin. Same single sqlite3 run, so changes() /
+    // last_insert_rowid() still refer to these statements.
+    let staged = null;
+    if (statements.reduce((n, st) => n + String(st).length, 0) > MAX_INLINE_SQL) {
+      staged = `${file}.console-in.${tmpSuffix()}.sql`;
+      const script = statements.map((st) => {
+        const t = String(st).trim();
+        return t.startsWith('.') || t.endsWith(';') ? t : t + ';';
+      }).join('\n') + '\n';
+      const pieces = chunkForUpload(script, MAX_INLINE_SQL);
+      for (let i = 0; i < pieces.length; i++) {
+        const w = await a.runCommand(`umask 077; printf '%s' ${shq(pieces[i])} | base64 -d ${i === 0 ? '>' : '>>'} ${shq(staged)}`, { timeoutMs: 60000 });
+        if (w.code !== 0) {
+          await a.runCommand(`rm -f ${shq(staged)}`, { timeoutMs: 30000 }).catch(() => {});
+          throw new Error(`Could not stage the SQL on the host (piece ${i + 1} of ${pieces.length}): ${w.timedOut ? 'timed out' : ((w.stderr || '').trim() || 'exit ' + w.code)}. Nothing was changed.`);
+        }
+      }
+    }
+    const argv = staged ? `< ${shq(staged)}` : statements.map(shq).join(' ');
     const run = `sqlite3 ${flags} ${shq(file)} ${argv}`;
     let cmd, tmp = null;
     if (a.mode === 'ec2') {
@@ -214,10 +235,16 @@ function init(appConfig, sqliteCfg) {
     } else {
       cmd = guardMissing(file, run);
     }
-    const rmTmp = async () => { if (tmp) { try { await a.runCommand(`rm -f ${shq(tmp)}`, { timeoutMs: 30000 }); } catch (e) { /* best effort */ } } };
+    const rmTmp = async () => {
+      const gone = [tmp, staged].filter(Boolean);
+      if (gone.length) { try { await a.runCommand(`rm -f ${gone.map(shq).join(' ')}`, { timeoutMs: 30000 }); } catch (e) { /* best effort */ } }
+      tmp = null; staged = null;
+    };
     let r;
     try { r = await a.runCommand(cmd, { timeoutMs: (opts && opts.timeoutMs) || 60000 }); }
     catch (e) { await rmTmp(); throw e; }
+    // The staged input script is done with whatever happened.
+    if (staged) { await a.runCommand(`rm -f ${shq(staged)}`, { timeoutMs: 30000 }).catch(() => {}); staged = null; }
     if (r.timedOut) { await rmTmp(); throw new Error('Remote SQLite query timed out (the command may still be running on the host).'); }
     if (r.code !== 0) {
       const msg = (r.stderr || '').trim() || (r.stdout || '').trim() || `sqlite3 exited with code ${r.code}`;
@@ -311,7 +338,9 @@ function init(appConfig, sqliteCfg) {
       const mk = `${tmp}.rc`;
       let r = await a.runCommand(
         guardMissing(file, `sqlite3 -batch -bail -cmd ".timeout 5000" ${shq(file)} < ${shq(tmp)}; rc=$?; echo $rc > ${shq(mk)}; exit $rc`),
-        { timeoutMs: 600000 }
+        // We stop waiting after 10 min and then watch the marker file for up
+        // to an hour, so the host must let it run that long too.
+        { timeoutMs: 600000, execTimeoutMs: 3600 * 1000 + 600000 }
       );
       let code = r.code;
       if (!r.timedOut && code !== 0) {

@@ -108,7 +108,10 @@ async function runCommand(appConfig, instanceId, command, opts) {
   // executionTimeout (AWS-RunShellScript default 3600 s). Set both from the
   // caller's budget so a command can't outlive what the console expects.
   const ssmTimeoutSec = Math.min(600, Math.max(30, Math.ceil(timeoutMs / 1000)));
-  const execTimeoutSec = Math.min(172800, Math.max(30, Math.ceil(timeoutMs / 1000)));
+  // A caller that keeps watching after its own wait (the remote SQLite
+  // transaction polls a result-marker file) passes a longer execTimeoutMs,
+  // so the host doesn't kill the command while the console still waits.
+  const execTimeoutSec = Math.min(172800, Math.max(30, Math.ceil(((opts && opts.execTimeoutMs) || timeoutMs) / 1000)));
 
   const sendInput = {
     InstanceIds: [instanceId],
@@ -157,7 +160,15 @@ async function runCommand(appConfig, instanceId, command, opts) {
         // queryable. Keep polling.
         continue;
       }
-      throw err;
+      // The command was sent and is running on the host: a poll that fails
+      // for a passing reason (throttling, a network blip, a 5xx) must not
+      // turn into "failed" — the caller would retry something that may well
+      // have succeeded. Keep polling until the deadline (then it's reported
+      // as timed out, "may still be running"). Only a clearly permanent
+      // error stops it.
+      if (/AccessDenied|UnrecognizedClient|InvalidClientTokenId|ValidationException|InvalidCommandId|InvalidInstanceId|ExpiredToken/i.test(String(name || ''))) throw err;
+      backoffMs = Math.max(backoffMs, 2000);
+      continue;
     }
   }
   // Our budget expired before AWS reported terminal. Return whatever the

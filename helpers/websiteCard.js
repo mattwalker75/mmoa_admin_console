@@ -41,6 +41,18 @@ async function resolveWebsiteAddress(appConfig, waConfigJson) {
       if (alb.found) {
         const health = alb.health === 'healthy' ? 'healthy'
           : `${alb.health}${alb.healthReason ? ` — ${alb.healthReason}` : ''}`;
+        // An https:// public base URL wins: with it the Web App sends HSTS /
+        // upgrade-insecure-requests, so the plain-HTTP load balancer address
+        // would no longer load the site (and an https:// load-balancer DNS
+        // name wouldn't match a certificate).
+        if (/^https:\/\//i.test(configuredPublic)) {
+          return {
+            url: configuredPublic,
+            note: `The Web App's public base URL. Load balancer ${alb.name} (instance ${ec2.instanceId}: ${health}).`,
+            warn: alb.health !== 'healthy' ? `The load balancer reports the Web App as ${health}, so the site may not load.` : '',
+            alt: ''
+          };
+        }
         return {
           url: alb.url,
           note: `Load balancer ${alb.name} (target group ${alb.targetGroup}, instance ${ec2.instanceId}: ${health}).`,

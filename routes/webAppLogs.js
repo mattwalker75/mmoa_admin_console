@@ -107,7 +107,9 @@ module.exports = function (appConfig) {
         // a tail would be the OLDEST part. Cut to the last ~23 KB on the host
         // so the end of the log is what survives.
         const ec2 = accessor.mode === 'ec2';
-        const cmd = `tail -n ${lines} ${LOG_REL_PATH}` + (ec2 ? ` | tail -c ${SSM_TAIL_BYTES}` : '');
+        // A missing log must not read as "empty": in a pipe the last tail's
+        // exit status wins, so check the file first.
+        const cmd = `[ -f ${LOG_REL_PATH} ] || { echo "tail: ${LOG_REL_PATH}: No such file or directory" >&2; exit 2; }; tail -n ${lines} ${LOG_REL_PATH}` + (ec2 ? ` | tail -c ${SSM_TAIL_BYTES}` : '');
         const r = await accessor.runCommand(cmd, {
           cwd: accessor.appPath || undefined,
           timeoutMs: 30000,

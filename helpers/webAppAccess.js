@@ -200,7 +200,10 @@ async function genericReadBundle(accessor, spec, opts) {
 // of a 0600 config.json doesn't come back 0644.
 function mvKeepMode(tmp, target) {
   const t = shQuote(target), m = shQuote(tmp);
-  return `{ [ -e ${t} ] && { chmod --reference=${t} ${m} 2>/dev/null || chmod "$(stat -f %Lp ${t})" ${m} 2>/dev/null || true; }; mv -f ${m} ${t}; }`;
+  // Keep the target's mode AND owner (the owner part only matters when the
+  // command runs as root — e.g. EC2 with no "run as" user — and is a no-op
+  // otherwise), so a rewrite never leaves config.json unreadable to the app.
+  return `{ [ -e ${t} ] && { chmod --reference=${t} ${m} 2>/dev/null || chmod "$(stat -f %Lp ${t})" ${m} 2>/dev/null || true; chown --reference=${t} ${m} 2>/dev/null || true; }; mv -f ${m} ${t}; }`;
 }
 
 function getMode(appConfig) {
@@ -376,7 +379,10 @@ function sshAccessor(cfg) {
           username: connCfg.username,
           privateKey: connCfg.privateKey,
           readyTimeout: 15000,
-          keepaliveInterval: 0,
+          // Keepalives so a silently dropped connection errors out within
+          // ~30 s instead of hanging an SFTP read/write forever.
+          keepaliveInterval: 10000,
+          keepaliveCountMax: 3,
           // Own infrastructure → trust-on-first-use. Log the fingerprint so
           // an unexpected host-key change is at least visible in the logs.
           hostVerifier: (key) => {
@@ -407,12 +413,18 @@ function sshAccessor(cfg) {
     return new Promise((resolve, reject) => {
       conn.exec(command, (err, stream) => {
         if (err) return reject(translateSshError(err));
-        let stdout = '', stderr = '', code = null, timedOut = false, timer = null;
-        const finish = () => { if (timer) clearTimeout(timer); resolve({ code, stdout, stderr, timedOut }); };
+        // Collect raw bytes and decode once at the end: decoding each packet
+        // on its own would garble a UTF-8 character split across two.
+        const out = [], errOut = [];
+        let code = null, timedOut = false, timer = null;
+        const finish = () => {
+          if (timer) clearTimeout(timer);
+          resolve({ code, stdout: Buffer.concat(out).toString('utf8'), stderr: Buffer.concat(errOut).toString('utf8'), timedOut });
+        };
         timer = setTimeout(() => { timedOut = true; try { stream.close(); } catch (e) {} }, timeoutMs);
         stream.on('close', (c2) => { code = (typeof c2 === 'number') ? c2 : null; finish(); });
-        stream.on('data', (d) => { stdout += d.toString(); });
-        stream.stderr.on('data', (d) => { stderr += d.toString(); });
+        stream.on('data', (d) => { out.push(Buffer.isBuffer(d) ? d : Buffer.from(String(d))); });
+        stream.stderr.on('data', (d) => { errOut.push(Buffer.isBuffer(d) ? d : Buffer.from(String(d))); });
       });
     });
   }
@@ -456,9 +468,16 @@ function sshAccessor(cfg) {
       return withConnection(async (conn) => {
         const sftp = await getSftp(conn);
         const tmp = tmpNameFor(remotePath);
-        await new Promise((resolve, reject) => {
-          sftp.writeFile(tmp, content, (err) => err ? reject(err) : resolve());
-        });
+        // 0600 temp file (it may hold config.json secrets), removed if the
+        // upload fails partway.
+        try {
+          await new Promise((resolve, reject) => {
+            sftp.writeFile(tmp, content, { mode: 0o600 }, (err) => err ? reject(err) : resolve());
+          });
+        } catch (e) {
+          await exec(conn, `rm -f -- ${shQuote(tmp)}`, { timeoutMs: 30000 }).catch(() => {});
+          throw e;
+        }
         const r = await exec(conn, mvKeepMode(tmp, remotePath), { timeoutMs: 30000 });
         if (r.code !== 0) {
           await exec(conn, `rm -f -- ${shQuote(tmp)}`, { timeoutMs: 30000 }).catch(() => {});
@@ -476,9 +495,16 @@ function sshAccessor(cfg) {
         if (mk.code !== 0) throw new Error(`Could not create ${dirOf(remotePath)}: ${(mk.stderr || '').trim() || 'exit ' + mk.code}`);
         const sftp = await getSftp(conn);
         const tmp = tmpNameFor(remotePath);
-        await new Promise((resolve, reject) => {
-          sftp.writeFile(tmp, buf, (err) => err ? reject(err) : resolve());
-        });
+        // 0600 temp file (it may hold config.json secrets), removed if the
+        // upload fails partway.
+        try {
+          await new Promise((resolve, reject) => {
+            sftp.writeFile(tmp, buf, { mode: 0o600 }, (err) => err ? reject(err) : resolve());
+          });
+        } catch (e) {
+          await exec(conn, `rm -f -- ${shQuote(tmp)}`, { timeoutMs: 30000 }).catch(() => {});
+          throw e;
+        }
         const r = await exec(conn, mvKeepMode(tmp, remotePath), { timeoutMs: 30000 });
         if (r.code !== 0) {
           await exec(conn, `rm -f -- ${shQuote(tmp)}`, { timeoutMs: 30000 }).catch(() => {});
@@ -584,6 +610,7 @@ function ec2Accessor(cfg) {
     return awsSsm.runCommand({}, instanceId, wrap(command), {
       creds,
       timeoutMs: (opts && opts.timeoutMs) || 60000,
+      execTimeoutMs: opts && opts.execTimeoutMs,
       comment: (opts && opts.comment) || 'Admin console web-app command'
     });
   }

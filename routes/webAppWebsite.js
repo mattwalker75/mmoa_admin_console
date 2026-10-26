@@ -382,7 +382,8 @@ function makeRouter(appConfig, db) {
         const cfgJson = cfgEntry.content ? JSON.parse(cfgEntry.content) : null;
         cfgForTokens = cfgJson;
         publicBaseUrl = (cfgJson && typeof cfgJson.publicBaseUrl === 'string') ? cfgJson.publicBaseUrl : '';
-        maintenanceCommand = (cfgJson && typeof cfgJson.maintenanceCommand === 'string') ? cfgJson.maintenanceCommand : '';
+        // Absent from config.json = the Web App's own default.
+        maintenanceCommand = (cfgJson && typeof cfgJson.maintenanceCommand === 'string') ? cfgJson.maintenanceCommand : (cfgJson ? './scripts/maintenance.sh' : '');
       } catch (e) { /* keep blanks */ }
 
       images = ((bundle.dirs[imgDir] || {}).names || []).filter(n => IMAGE_EXT.test(n)).sort();
@@ -512,7 +513,8 @@ function makeRouter(appConfig, db) {
     try {
       const accessor = webAppAccess.createAccessorFromConfig(appConfig);
       const dir = imagesDirOf(accessor);
-      await accessor.runCommand(`rm -f -- ${shq(waConfig.joinPath(dir, name))}`, { timeoutMs: 20000 });
+      const r = await accessor.runCommand(`rm -f -- ${shq(waConfig.joinPath(dir, name))}`, { timeoutMs: 20000 });
+      if (r.timedOut || r.code !== 0) throw new Error(r.timedOut ? 'the command timed out — it may still be running' : ((r.stderr || '').trim() || 'exit ' + r.code));
       await audit(req, 'website.image', { kind: 'website', id: 'images', label: name, summary: 'Image deleted' });
       res.redirect('/web-app-website?imgdel=' + encodeURIComponent(name));
     } catch (e) {
@@ -536,7 +538,7 @@ function makeRouter(appConfig, db) {
     try {
       const accessor = webAppAccess.createAccessorFromConfig(appConfig);
       const { json } = await waConfig.readRemoteConfig(accessor);
-      const base = (json && typeof json.maintenanceCommand === 'string' ? json.maintenanceCommand : '').trim();
+      const base = (json && typeof json.maintenanceCommand === 'string' ? json.maintenanceCommand : './scripts/maintenance.sh').trim();
       if (!base) {
         return res.status(400).json({ ok: false, error: 'No Maintenance Command is configured. Set it under Web App Settings → General.' });
       }
