@@ -455,6 +455,9 @@ exactly why not.
   — every row is written inside a transaction that is always rolled back,
   so duplicate keys and other constraint problems are found now, not mid-
   restore. Over EC2 the trial runs on the Web App host with ROLLBACK.
+  One side effect on **MySQL** only: InnoDB never rolls back
+  AUTO_INCREMENT counters, so after a trial load new rows' ids can skip
+  ahead (gaps in the numbering). No data changes; SQLite is unaffected.
 - Full bundle: checksums, row counts and table contents against the
   manifest, fit with this database, access to the Web App (read, write,
   run commands, every uploads folder) and the trial load.
