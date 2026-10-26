@@ -222,6 +222,7 @@ ${body}
   <script defer src="/js/validate-restore.js?v=${assetVer('js/validate-restore.js')}"></script>
   <script defer src="/js/dashboard.js?v=${assetVer('js/dashboard.js')}"></script>
   <script defer src="/js/nav-progress.js?v=${assetVer('js/nav-progress.js')}"></script>
+  <script defer src="/js/page-loader.js?v=${assetVer('js/page-loader.js')}"></script>
   <script defer src="/js/alpine.min.js?v=${assetVer('js/alpine.min.js')}"></script>
 </head>
 <body>

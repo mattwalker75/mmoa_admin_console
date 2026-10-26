@@ -245,6 +245,9 @@ app.use((req, res, next) => {
   res.redirect('/setup');
 });
 
+// Slow tabs over EC2 / SSH open instantly with a "Loading…" line, then load
+// the real page (middleware/pageShell.js + public/js/page-loader.js).
+app.use(require('./middleware/pageShell')(appConfig));
 app.use('/', require('./routes/setup')(appConfig));
 app.use('/', require('./routes/public')(db, appConfig));
 app.use('/', require('./routes/settings')(db, appConfig, appConfigModule));

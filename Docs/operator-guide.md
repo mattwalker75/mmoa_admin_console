@@ -33,10 +33,16 @@ The page opens straight away and the numbers fill in a moment later
 EC2 instance every read is an SSM round trip, so that takes a second or
 two; signing in no longer waits for it.
 
-**Slow pages.** Any page that reads the Web App's database over EC2 can
-take a few seconds. If a page hasn't arrived after about 0.7 s a
-"Loading… fetching data from the Web App" notice appears at the top of the
-screen and goes away when the page loads.
+**Slow pages.** When the Web App is on EC2 (or an SSH host), the tabs that
+read its database or files open instantly: you see the tab's title and the
+same "Loading the latest data…" line as the Dashboard, then the page fills
+in. Those tabs are Events, Raffles, Nonprofits, Categories & Cities, Board,
+Data Browser, Locked Users, Audit log, Web App Website, Web App Logs and Web
+App Settings (middleware/pageShell.js + public/js/page-loader.js). It's a
+real page load underneath, so everything on the page works as before; in
+local mode the pages are fast and load directly. Anything else that takes
+more than about 0.7 s (a save, say) shows a "Loading… fetching data from
+the Web App" notice at the top of the screen until the next page arrives.
 
 ## Admins
 
