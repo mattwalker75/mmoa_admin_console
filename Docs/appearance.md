@@ -217,5 +217,5 @@ Two ways:
 
 The `@source` directives in `tailwind.input.css` tell the CLI which
 files to scan for class names, so as long as your new utility classes
-appear somewhere under `routes/`, `views/`, `scripts/`, `public/js/`,
-or `app.js`, they'll be compiled into the output CSS automatically.
+appear somewhere under `routes/`, `views/`, `helpers/`, `middleware/`,
+`scripts/`, `public/js/`, or `app.js`, they'll be compiled into the output CSS automatically.

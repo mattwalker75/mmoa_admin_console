@@ -25,6 +25,9 @@ and then come back to these pages for depth.
 - **[appearance.md](appearance.md)** — the theme system, dark mode,
   background image / color / opacity, image uploads, the preview
   pipeline.
+- **[audit-log.md](audit-log.md)** — the admin audit trail: what gets
+  recorded, where the rows live, the Audit log page and the Dashboard's
+  Recent activity card.
 - **[operator-guide.md](operator-guide.md)** — tab-by-tab user guide for
   the people who use this console day-to-day.
 - **[development.md](development.md)** — how to add a page, modify

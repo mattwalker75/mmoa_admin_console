@@ -33,7 +33,11 @@ Backends:
   web-app host through the transport. Bound values are encoded as SQL
   literals (quote-aware `?` substitution). Transactions are queued and
   flushed as one `BEGIN…COMMIT` script with `-bail` (large ones are
-  chunk-uploaded to a temp file first). Expect ~1 s per statement over
+  chunk-uploaded to a temp file first; the run limit asked of SSM is
+  longer than the console's own watch window, so the host doesn't cut off
+  a long restore the console is still waiting on). A single statement too
+  big for one command line is staged the same way, in a private
+  (`umask 077`) temp file next to the DB. Expect ~1 s per statement over
   SSM. Foreign keys are **not** enforced (each statement is a new
   process). The `sqlite3` CLI must be installed on the host.
 - **MySQL** — `mysql2` pool with `timezone: 'Z'` and `dateStrings: true`,
@@ -68,6 +72,8 @@ From the shared build contract (both engines, same columns):
 | `raffle_beneficiaries` | like `event_beneficiaries`: `raffle_id`, `org_id` (NULL on org delete), `name`, `url`, `sort` — replaced wholesale on save |
 | `raffles` / `raffle_images` | the raffle fields incl. `visibility` (`draft` / `published` / `archived` — only published is public; `is_published` is a legacy mirror), `is_latest` (1 on at most one raffle — served at `/raffles/latest`), `status` = the stage (`open` / `closed` / `drawn`; `draft` is a legacy value the web app converts on boot), `winning_ticket`, `claim_requirements`, `claim_preset`, `beneficiary_org_id`, `preview_token` + `preview_expires_at` (the Preview button's 30-minute link); prize photos with `path`, `alt`, `sort` |
 | `board_members` | `board_id`, `role_title`, `role_description`, `person_name`, `photo_path`, `sort` |
+| `admin_audit` | `audit_id`, `at`, `admin`, `action`, `target_kind`, `target_id`, `target_label`, `summary`, `ip` — the console's audit trail (written by `helpers/audit.js`, read by the Audit log page and the Dashboard; see [audit-log.md](audit-log.md)) |
+| `org_metrics` | `metric_id`, `org_id`, `kind`, `bucket`, `bucket_start`, `n` — the web app's anonymous usage counts per nonprofit; the console only deletes a nonprofit's rows (and dumps / restores the table) |
 
 Remote SQLite (ssh / ec2) has no foreign-key enforcement and no reads
 inside a transaction, so every page above reads first, then writes, and
@@ -89,16 +95,16 @@ Portability rules followed by every query here:
 | Page | Writes |
 | ---- | ------ |
 | Nonprofits → Verification | `UPDATE organizations` (`verification_status`, `verified_at`, `verified_by`, `verification_note`) |
-| Nonprofits → account actions | `UPDATE users` (active, email verified + consume open verification tokens, account fields, `password_hash` + consume open reset tokens) |
-| Nonprofits → Delete | read photo paths, then one transaction: null `event_beneficiaries.org_id` / `raffles.beneficiary_org_id`, delete `org_images`, `org_contacts`, `org_categories`, `org_cities`, `organizations`, the user's tokens and the user; then `rm -f` the photo files |
-| Events → Create / Save | `INSERT` / `UPDATE events`; beneficiaries replaced (`DELETE` + `INSERT`) in one transaction; slug made unique (`-2`, `-3`, …) |
+| Nonprofits → account actions | `UPDATE users` (active, email verified + consume open verification tokens, `password_hash` + consume open reset tokens); Edit account is one transaction — the account fields, plus on an email change consuming the open reset / verification tokens, and re-keying the account's `login_lockouts` rows on a rename |
+| Nonprofits → Delete | read photo paths, then one transaction: null `event_beneficiaries.org_id` / `raffles.beneficiary_org_id` / `raffle_beneficiaries.org_id`, delete `org_images`, `org_contacts`, `org_categories`, `org_cities`, `org_metrics`, `organizations`, the account's `login_lockouts` rows, the user's tokens and the user; then `rm -f` the photo files |
+| Events / Raffles → Create / Save | `INSERT` / `UPDATE events` / `raffles`; the row and its beneficiaries (replaced: `DELETE` + `INSERT`) are saved in one transaction (Create then finds the new row by its slug, since remote SQLite can't report `lastID` inside a transaction); slug made unique (`-2`, `-3`, …) |
 | Events / Raffles / Board → image upload | file first (`writeFileChunked`), then `UPDATE … SET *_path` / `INSERT INTO raffle_images`; the replaced file is deleted; a failed DB write deletes the new file |
 | Events / Raffles → Delete | one transaction (children, then the row), then the image files |
 | Raffles → Stage | `UPDATE raffles SET status, winning_ticket … WHERE status = <current>` (one step at a time) |
 | Categories & Cities / Board / prize photos → reorder | `sort` renumbered 1..n in one transaction |
 | Categories & Cities → Delete | `DELETE … WHERE id = ? AND NOT EXISTS (SELECT 1 FROM org_* …)` — refused while in use |
 | Locked Users → Unlock | `DELETE FROM login_lockouts WHERE id = ?` |
-| Data Browser | `UPDATE` / `INSERT` / `DELETE` on any table, by primary key |
+| Data Browser | `UPDATE` / `INSERT` / `DELETE` on any table, by primary key. An edit writes only the fields changed since the page loaded (so a value the website changed meanwhile isn't overwritten); textarea line breaks (`\r\n`) are stored as `\n` |
 | Backup → Database restore | every table present in both the backup and the live schema is emptied and reloaded in one transaction, with FK checks off (`PRAGMA foreign_keys = OFF` around it on SQLite, `SET FOREIGN_KEY_CHECKS = 0` inside it on MySQL) |
 
 ## Data Browser internals
@@ -144,11 +150,11 @@ not a SELECT per table at slightly different moments:
 | remote SQLite (ssh / ec2) | `db.dumpTables(names)` — ONE `sqlite3 -json` invocation on the host: `BEGIN;` then, per table, a marker row (`SELECT '<nonce> TABLE <name>'`) followed by `SELECT *`, then `COMMIT;` and an END marker. The console splits the output on the markers (`splitTableDump`, random nonce per call so no row value can forge one; a missing END marker = truncated output, refused). On EC2 the output goes through the usual temp-file + `readFileChunked` path, so size is no problem. |
 
 The manifest in a rebuild bundle records the per-table row counts and
-the time window of the dump; Verify checks the dump against it. Note that
-the local-SQLite console shares ONE connection across requests, so a
-console write that lands between the dump's `BEGIN` and `COMMIT` joins
-that transaction (the dump takes milliseconds; the Database restore has
-the same property).
+the time window of the dump; Validate checks the dump against it. The
+local-SQLite console shares ONE connection across requests, so
+`db/database.js` puts a transaction gate in front of it: while the dump's
+(or a Database restore's) `BEGIN … COMMIT` is open, every other console
+statement waits for it to finish instead of running inside it.
 
 **Why a file copy is not a backup.** With WAL, recent commits sit in
 `mmoa_web_app.db-wal` until a checkpoint: copying `mmoa_web_app.db` on its

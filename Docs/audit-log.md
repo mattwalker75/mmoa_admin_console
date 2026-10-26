@@ -63,7 +63,7 @@ Summaries are written to be safe to read over anyone's shoulder:
 | `event.image` | Flyer or cover photo uploaded, replaced or removed | title; which slot |
 | `event.preview` | A preview link was made | title |
 | `raffle.create` / `raffle.save` / `raffle.delete` | Raffles: created, saved, deleted | title; a save says whether the visibility changed |
-| `raffle.stage` | Stage moved (open → closed → drawn → claimed, or back) | title · *Stage closed → drawn (winner recorded)* |
+| `raffle.stage` | Stage moved (open → closed → drawn, or one step back) | title · *Stage closed → drawn (winner recorded)* |
 | `raffle.image` | Flyer uploaded / replaced / removed; prize photo added / moved / deleted | title |
 | `raffle.preview` | A preview link was made | title |
 | `nonprofit.verify` / `nonprofit.reject` / `nonprofit.reset` | Verification decision | organization name; note length |
@@ -91,10 +91,16 @@ Summaries are written to be safe to read over anyone's shoulder:
 | `maintenance.enable` / `maintenance.disable` / `maintenance.status` | Maintenance mode command run | exit code |
 | `lockout.unlock` | Locked Users: a lockout cleared | the scope (IP or login) |
 | `data.insert` / `data.update` / `data.delete` | Data Browser: a row inserted, updated or deleted | the table; the row key and column names |
-| `backup.*` | Backup/Restore actions | see `routes/backup.js` |
+| `backup.create` / `backup.upload` / `backup.verify` / `backup.restore` / `backup.delete` | Rebuild bundles: created, uploaded, validated, restored (or refused), deleted | the bundle name |
+| `backup.settings_export` / `backup.settings_restore` | Console settings downloaded / restored (or refused) | *Console settings* or the uploaded file name |
+| `backup.waconfig_export` / `backup.waconfig_restore` | Web App `config.json` downloaded / restored (or refused) | *Web App configuration* or the file name |
+| `backup.website_export` / `backup.website_restore` | Web App website sections downloaded / restored (or refused) | *Web App website* or the file name |
+| `backup.database_export` / `backup.database_restore` | Web App database downloaded / restored (or failed — summary says whether the outcome is unknown) | *Web App database* or the file name; table / row counts |
+| `backup.images_export` / `backup.images_restore` | Uploaded images downloaded / restored (or refused) | *Images* or the file name |
 
-Reads — opening pages, downloading a backup, the Reports page, viewing an
-upload — are not recorded.
+Reads — opening pages, downloading a stored bundle, the Reports page,
+viewing an upload — are not recorded. (The Backup/Restore *exports*
+above are recorded.)
 
 ## Reading the page
 
@@ -119,10 +125,12 @@ await audit(req, 'event.publish', { kind: 'event', id, label: title, summary: 'P
 - `admin` comes from `req.session.user.username` (`system` without a
   session); `ip` from `req.ip`. Every field is clipped to the column size.
 - Routers that app.js does not hand a `db` (`profile`, `templates`,
-  `webAppSettings`, `webAppWebsite`) use the shared recorder
-  `require('./audit').record`, which `routes/audit.js` binds to the db when
-  app.js mounts it — audit calls only happen at request time, after every
-  router is mounted, so mount order does not matter.
+  `webAppSettings`) — and `webAppWebsite`, which is handed `db` but only
+  reads with it (the published-event count for `{{tokens}}`) — use the
+  shared recorder `require('./audit').record`, which `routes/audit.js`
+  binds to the db when app.js mounts it — audit calls only happen at
+  request time, after every router is mounted, so mount order does not
+  matter.
 - New actions: keep the `<area>.<verb>` shape, give the target a label a
   board member would recognize, and keep secrets and long text out of the
   summary. Add the action to the table above.

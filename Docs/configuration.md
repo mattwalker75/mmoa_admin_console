@@ -44,7 +44,7 @@ a partial file is fine.
 | `webApp.local.appPath` | `"../mmoa_web_app"` | no | Relative to the console's working directory (START_APP.sh cd's to the repo) or absolute. |
 | `webApp.ssh.host` / `port` / `username` / `privateKey` / `appPath` | `""` / `22` / `""` / `""` / `""` | no | Unencrypted PEM key, stored in plain text. |
 | `webApp.ec2.runningInAws` | `false` | no | Use the console's instance profile instead of keys. |
-| `webApp.ec2.accessKeyId` / `secretAccessKey` | `""` | no | Need `ssm:SendCommand` + `ssm:GetCommandInvocation`. |
+| `webApp.ec2.accessKeyId` / `secretAccessKey` | `""` | no | Need `ssm:SendCommand` + `ssm:GetCommandInvocation`. The Website card's "Open website" and previews also need the read-only `elasticloadbalancing:DescribeTargetGroups`, `DescribeTargetHealth`, `DescribeLoadBalancers` (and optionally `DescribeListeners` — without it the address is assumed http) to find the load balancer (`helpers/awsAlb.js`). |
 | `webApp.ec2.region` / `instanceId` | `"us-east-1"` / `""` | no | |
 | `webApp.ec2.appPath` | `"/home/mmoa/mmoa_web_app"` | no | Matches mmoa_web_app_infra. |
 | `webApp.ec2.runAsUser` | `"mmoa"` | no | Commands run as `su - mmoa`. Blank = SSM default user. |
@@ -56,8 +56,8 @@ on Settings → Web App (or restoring a Console settings backup) switches
 the console's database connection immediately: it opens the new
 connection, checks it with a `SELECT 1`, and says either "Now using the
 Web App's database … — no restart needed" or why it couldn't connect. The
-old connection is closed a minute later so requests already running on it
-finish. Settings that still need a restart (the throttling settings on
+old connection is closed an hour later so requests already running on it
+(a backup or restore transaction can take many minutes) finish. Settings that still need a restart (the throttling settings on
 Settings → Security, and from a Console settings restore the port, TLS
 and the other "yes" rows) open a **Restart the MMoA Admin Console**
 popup that says exactly that: stop it with Ctrl-C and run `npm start`
@@ -71,9 +71,9 @@ effect after a **web app** restart — the page prompts for one.
 
 | Tab | Keys |
 | --- | ---- |
-| General | `appTitle`, `appSubtitle`, `orgName`, `publicBaseUrl`, `port`, `sessionKeyMode`, `sessionMaxAgeHours`, `passwordResetTokenTtlHours`, `allowMemberRegistration` (nonprofit sign-ups), `maintenanceCommand`, and **Public site info**: `site.phone`, `site.ein`, `site.facebookUrl`, `site.donationEnabled` + `site.donationUrl` (the website's "Donate" button — the switch refuses to turn on without a valid http(s) link, in the browser and again on save), `uploads.maxMb` (1–8) |
+| General | `appTitle`, `appSubtitle`, `orgName`, `publicBaseUrl`, `port`, `sessionMaxAgeHours`, `passwordResetTokenTtlHours`, `allowMemberRegistration` (nonprofit sign-ups), `maintenanceCommand`, and **Public site info**: `site.phone`, `site.email`, `site.ein`, `site.tagline`, `site.foundedYear`, `site.meetingInfo`, the mailing address (`site.addressLine1` / `addressLine2` / `city` / `state` / `zip`), social links (`site.facebookUrl`, `site.instagramUrl`, `site.youtubeUrl`, `site.xUrl`, `site.nextdoorUrl` — http(s) only), `site.needHelpEnabled` ("Show the Need Help? button", default on), `site.donationEnabled` + `site.donationUrl` (the website's "Donate" button — the switch refuses to turn on without a valid http(s) link, in the browser and again on save), `uploads.maxMb` (1–8). When the web app's `config.json` lacks them, EIN, Facebook page URL and Maintenance Command show the web app's own defaults. |
 | Email | `email.transport` (`console` / `smtp` / `ses`), `email.from`, `email.replyTo`, **`email.showLinksInBrowser`** (TESTING / TEMPORARY — the web app also returns verification / reset links in its JSON and shows them on screen; turn off once email works), `email.smtp.*`, and the **AWS (SES credentials)** group: `aws.runningInAws`, `aws.accessKeyId`, `aws.secretAccessKey`, `aws.region` |
-| Security | `passwordMinLength`, `security.verificationLinkExpiresMinutes`, `security.rateLimiting.auth.*`, `security.loginLockout.enabled` / `maxFailures` / `lockoutSeconds`, `security.session.secure` (Auto = `null` follows `server.ssl` / On / Off), `security.session.httpOnly` / `sameSite`, `security.headers.*` |
+| Security | `passwordMinLength`, `security.verificationLinkExpiresMinutes`, `security.rateLimiting.login.*` (Sign-in requests per IP, default 30 per 60 s, 0 = off), `security.rateLimiting.auth.*` (Account & email requests per IP, 10 per 300 s), `security.loginLockout.enabled` / `maxFailures` / `lockoutSeconds`, `security.session.secure` (Auto = `null` follows `server.ssl` / On / Off), `security.session.httpOnly` / `sameSite`, `security.headers.*` |
 | Database | `database.engine`, `database.sqlite.filename`, `database.mysql.*` (the web app's own connection — the console's is under Settings → Web App) |
 | Server | `server.ssl`, `server.keyPath`, `server.certPath`, `server.trustProxy` (hop count; 0 = off) |
 

@@ -189,8 +189,9 @@ Security. The UI displays the window as **minutes** (1–1440) and
 multiplies by 60 on save.
 
 The limiter is registered **once at boot**, so changing
-`maxAttempts` or `windowSeconds` requires a server restart. The
-save flash message reminds operators of this.
+`maxAttempts` or `windowSeconds` requires a server restart. Saving a
+change opens the **Restart the MMoA Admin Console** popup
+(`consoleRestartPopup` in `views/layout.js`) to remind operators of this.
 
 ### IP source
 
@@ -207,7 +208,9 @@ rate-limit).
 length of every string field on `req.body` to protect against trivial
 DOS via oversized form posts.
 
-Defaults:
+Defaults (e.g. — the full list is `FIELD_CAPS` in the file; it also caps
+`password_confirm`, the event / raffle Markdown and text fields, the
+beneficiaries JSON and the Nonprofits profile fields):
 
 | Field                | Cap (chars) |
 | -------------------- | ----------- |
@@ -256,10 +259,11 @@ Four layers, each independent of the others:
 1. **A per-session CSRF token** ([middleware/csrf.js](../middleware/csrf.js)).
    32 random bytes (hex) stored in the signed session cookie as
    `req.session.csrf`. It is minted lazily on the first request that has
-   none — the login page needs one before anyone is signed in — kept
-   across login (the cookie is signed and there is no server-side store
-   to rotate against) and dropped with the session on logout, so the
-   next visit gets a fresh one. Every `POST` / `PUT` / `PATCH` / `DELETE`
+   none — the login page needs one before anyone is signed in — renewed
+   at sign-in ([routes/public.js](../routes/public.js) deletes the
+   pre-login token and mints a new one, so a token planted with the
+   cookie doesn't carry over) and dropped with the session on logout, so
+   the next visit gets a fresh one. Every `POST` / `PUT` / `PATCH` / `DELETE`
    must send it back, either as the `X-CSRF-Token` header or as the
    `_csrf` form field, and it is compared with `crypto.timingSafeEqual`.
    A missing or wrong token is refused with 403 — JSON
@@ -348,10 +352,18 @@ window return a 403 ("First-run setup required — open / in a browser
 to begin.") rather than silently bouncing — that prevents a stray
 form POST from succeeding against an unconfigured app.
 
+**Who may use `/setup`.** [routes/setup.js](../routes/setup.js) serves
+the form only to a browser on this machine (loopback `req.ip`) or to a
+request carrying the one-time setup token printed in the terminal at
+start-up (`/setup?token=…`); anyone else is refused. Note that behind a
+reverse proxy on the same machine without `trust proxy`, `req.ip` is
+loopback for every visitor — so don't expose a fresh install that way.
+
 Once the first admin is created, the gate short-circuits and normal
 routing takes over. The `/setup` route itself also self-disables —
 both GET and POST redirect to `/login` as soon as at least one admin
-exists.
+exists. The "no admins yet" check is repeated after the (slow) bcrypt
+hash, so two racing requests can't both create a "first" admin.
 
 **Corrupt credential file fails closed.** A count of 0 can mean either a
 genuine first run *or* a `local_admins.json` that exists but can't be
@@ -393,7 +405,18 @@ their own guard rails (details at the top of
 - **Every delete goes through `uiConfirm`.**
 
 Nonprofits → Edit account pre-checks login name
-(case-insensitive) and email uniqueness.
+(case-insensitive) and email uniqueness, and applies the same login-name
+rule as sign-up (3–30 letters, digits, `.` `_` `-` — never an `@`, so a
+login name can't look like an email). The save is one transaction: an
+email change consumes any open password-reset / verification links sent
+to the old address, and the account's `login_lockouts` rows are re-keyed
+to the new login name / email so a rename doesn't release a lock.
+Delete removes the account's lockouts and its directory usage counts
+(`org_metrics`) along with every other child row.
+
+The temporary password shown after **New nonprofit → Create** is held in
+the console's memory for up to 10 minutes; the session cookie carries
+only a random reference to it, and it is dropped once shown.
 
 ## Uploads, Markdown and outbound calls
 
@@ -429,13 +452,16 @@ chmod 0600 config.json local_admins.json
 Do this once after cloning: `config.json` is tracked in git (the infra
 scripts depend on it) and a fresh checkout is `0644` until the console
 first saves it. The Settings → Web App form never echoes the SSH
-private key or the AWS secret back to the browser — a blank field keeps
-the stored value, a "Remove the stored …" checkbox clears it.
+private key, the AWS secret or the MySQL password back to the browser —
+a blank field keeps the stored value, a "Remove the stored …" checkbox
+(e.g. "Remove the stored password") clears it.
 
 Treat `config.json` as a secret. In EC2 mode prefer the instance profile
 (Settings → Web App → "This app is deployed in AWS") over stored access
-keys. The console's only AWS call is SSM Run Command — it never creates
-or modifies AWS resources.
+keys. The console's only AWS calls are SSM Run Command and the read-only
+ELBv2 `Describe*` lookups that find the load balancer for "Open website"
+([helpers/awsAlb.js](../helpers/awsAlb.js)) — it never creates or
+modifies AWS resources.
 
 ## What's NOT in scope
 

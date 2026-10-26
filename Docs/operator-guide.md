@@ -7,7 +7,9 @@ from this console.
 
 1. `./START_APP.sh` and open http://localhost:3005.
 2. With no admins configured you land on **Create the first admin**.
-   This account lives in `local_admins.json` on this machine — not in the
+   The setup page opens only in a browser on this machine, or — from
+   another computer — with the one-time `/setup?token=…` link the console
+   prints in its terminal at start-up. This account lives in `local_admins.json` on this machine — not in the
    web app's database — so it keeps working if the database is down.
 3. Sign in, then open **Settings → Web App** and check that the console
    can reach the web app (**Test connection**) and its database (the
@@ -179,7 +181,9 @@ directory until a board member verifies them.
   organization verifies it) and *Mark the organization as verified* (it
   goes straight into the directory, listed, with every field public). The
   temporary password is shown **once**, on the page you land on — pass it
-  to the organization; it is not kept anywhere, including the audit log.
+  to the organization. Until then the console holds it in memory for up
+  to 10 minutes (your session only carries a random reference to it); it
+  is not stored anywhere, including the audit log.
 - The detail page shows the **whole profile**, including fields the
   organization marked hidden (each field is tagged public / hidden), its
   contacts, categories, cities and photos (**Remove** takes down an
@@ -250,6 +254,9 @@ Direct access to every table, for anything the pages above don't cover:
   password.
 - Edits bypass the website's own validation and don't delete image files
   — prefer the dedicated pages.
+- Saving an edit writes only the fields you changed since the page
+  loaded, so a value the website changed meanwhile is left alone. Line
+  breaks in text fields are stored as plain `\n`.
 
 ## Locked Users
 
@@ -282,7 +289,8 @@ nonprofit sees its own numbers in its portal ("Your profile activity").
 ## Web App Website
 
 Edit the website's fixed copy — **Home hero**, **About — our story**,
-**How you can help**, **Partner With Us** and **Footer**. Events, raffles,
+**What we've done** (the impact list on the About page), **How you can
+help**, **Partner With Us** and **Footer**. Events, raffles,
 the board and the directory come from the database (their own pages).
 
 - Each card holds that section's HTML. Saves are live on the next page
@@ -304,7 +312,9 @@ the board and the directory come from the database (their own pages).
   Web App runs (Settings → Web App):
   - **Local** — its `publicBaseUrl` (Web App Settings → General);
     `localhost` is fine because it's on the same machine.
-  - **EC2** — the load balancer the instance is registered with, found
+  - **EC2** — an `https://` `publicBaseUrl` wins (the site sends HSTS
+    with it, so the plain load-balancer address would no longer load);
+    otherwise the load balancer the instance is registered with, found
     with read-only AWS calls (target groups → load balancer → listeners,
     for http or https). The card names the load balancer and says whether
     it reports the instance healthy. With no load balancer it falls back
@@ -339,11 +349,15 @@ in the file, including secrets, is left alone — and then offers to
   password-reset links on screen. Turn it off as soon as email works.
 - **Email → AWS (SES credentials)** — only needed with the AWS SES
   transport.
-- **General → Public site info** — phone, EIN and Facebook URL shown in the
-  site's header / footer, the portal's max upload size, and the optional
-  **Donate** button: paste the donation payment link (e.g. a Stripe Payment
-  Link) and turn on **Show the "Donate" button** — it won't turn on without
-  a valid `https://` link. Turning it off keeps the link for later. Restart
+- **General → Public site info** — phone, public email, EIN, tagline,
+  founded year, meeting info, mailing address and social links (Facebook,
+  Instagram, YouTube, X, Nextdoor — `http(s)` links only) shown on the
+  site and available as `{{tokens}}`; **Show the "Need Help?" button**
+  (on by default — off hides the header button and the "Find help" links;
+  the directory pages still work for anyone with a link); the portal's max
+  upload size; and the optional **Donate** button: paste the donation
+  payment link (e.g. a Stripe Payment Link) and turn on **Show the
+  "Donate" button** — it won't turn on without a valid `http(s)` link. Turning it off keeps the link for later. Restart
   the web app after saving.
 - The **power bar** (Start / Stop / Restart) runs the commands set under
   Settings → Web App.
@@ -408,7 +422,7 @@ console's own settings).
 
 ### Verify
 
-**Verify selected bundle** runs a checklist (shown in the Progress area
+**Validate selected bundle** runs a checklist (shown in the Progress area
 and in the status window) and records a `backup.verify` audit row:
 
 - JSON parses · manifest present · bundle type
@@ -496,7 +510,8 @@ the order is what makes a failed restore safe:
    restore the shell commands**) + `local-secrets.json` (mode 600). **Keep
    this server's own machine settings** (on by default) keeps the host's
    `port`, `server` (TLS / proxy), `database` connection,
-   `aws.runningInAws` and `aws.region`, and its `publicBaseUrl` when it has
+   `aws.runningInAws` and `aws.region` (kept even when the bundle has no
+   `aws` block at all), and its `publicBaseUrl` when it has
    one — they describe the machine and its address, not the site, and the
    EC2 install script sets them per instance (a setting the host doesn't
    have stays at its default). Site settings the bundle doesn't have go back
@@ -520,8 +535,14 @@ view shows a red **interrupted** banner saying which step it reached; run
 the restore again. Each restore first removes temp files an earlier failed or interrupted
 run left behind (older than a minute).
 
+If the restore loses contact with the host during the database step,
+the result says the outcome is **unknown** (the database may or may not
+have been replaced) — check it, then run the restore again. If it fails
+after the database step, the Web App is flagged as needing a restart
+(the power bar shows **Restart pending**), as a finished restore would.
 
-then it prompts for the Web App restart the new config needs. A
+When it finishes, the result lists what was restored and what was
+skipped, then it prompts for the Web App restart the new config needs. A
 `backup.restore` audit row lists what was restored and what was skipped
 (`backup.create`, `backup.upload`, `backup.verify` and `backup.delete` are
 recorded too). The safeguards stay: type `RESTORE`, the access test must
@@ -535,7 +556,8 @@ pass, one backup / restore at a time, shell commands only when ticked.
    `SETUP_MYSQL_DB.sh`). Stop it or enable Maintenance Mode.
 2. On this console, point Settings → Web App at the new host (and its
    database), then **Test access to the Web App**.
-3. Select the bundle (upload it first if it was made elsewhere), **Verify**,
+3. Select the bundle (upload it first if it was made elsewhere), **Validate
+   selected bundle**,
    type `RESTORE`, **Web App Full Restore**.
 4. Restart the Web App (the prompt / power bar) so it reads the restored
    `config.json` and `local-secrets.json`.
@@ -558,8 +580,9 @@ snapshot), or on the host `sqlite3 mmoa_web_app.db ".backup backup.db"`.
   SSH key / AWS secret / MySQL password the file lacks is kept). **Web App
   access** (connection: mode, folder, SSH / EC2 settings, and the Start /
   Stop / Restart commands) is only taken from the file when you tick that
-  box. The result lists what needs a console restart. Exports and restores
-  are in the Audit log.
+  box. The result lists what needs a console restart. Refused while a
+  backup or another restore is running. Exports and restores are in the
+  Audit log.
 - **Web App configuration** — the Web App's `config.json` plus its session
   keys (`local-secrets.json`). The keys are only restored when you tick
   **Also restore the session keys** (members stay signed in) — whoever has
@@ -575,7 +598,9 @@ snapshot), or on the host `sqlite3 mmoa_web_app.db ".backup backup.db"`.
   the Web App's `config.json` is missing or broken, the restore rebuilds it
   from the file — only with every section ticked; the broken file is kept as
   `config.json.broken-…` and the new one is private (0600). Sections must
-  have the right shape (text, groups, http(s) links) or nothing is written. Exports and restores are in the Audit log.
+  have the right shape (text, groups, http(s) links) or nothing is written.
+  Refused while a backup or another restore is running. Exports and
+  restores are in the Audit log.
 - **Web App website** — selective restore of the HTML sections (each up to
   the editor's 60 KB; the form shows every section's size). One file
   operation runs at a time: it waits for a running Full Backup / Restore or
@@ -600,7 +625,9 @@ snapshot), or on the host `sqlite3 mmoa_web_app.db ".backup backup.db"`.
   in a value, a missing required value … refuse it, nothing changes). One
   operation at a time with the other restores. The result shows accounts
   before → after and locked logins, and offers the Web App restart it
-  needs. Audited — and because the audit log lives in the database a
+  needs. If contact with the host is lost mid-restore, the result says
+  the outcome is unknown — check the database before trying again.
+  Audited — and because the audit log lives in the database a
   restore replaces, every database-replacing restore is also written to
   `backups/.restore-log.jsonl` on the console's own disk. Choosing a file
   shows, before you type RESTORE, which tables it would leave empty or skip
@@ -632,13 +659,17 @@ MySQL password) and password hashes — store them like the database.
 - **Web App** — how the console reaches the website: **Local** (same
   machine), **Remote via SSH** (host, user, private key), or **Remote on
   EC2** (instance id + region, instance profile or access keys, run-as
-  user `mmoa`). The SSH private key and the AWS secret are write-only:
+  user `mmoa`; saving with **Run commands as** blank warns that commands
+  then run as root and files the console creates there are owned by
+  root). The SSH private key, the AWS secret and the MySQL password are
+  write-only:
   the form never shows them again — leave the field blank to keep what
   is stored, paste a new value to replace it, or tick **Remove the
   stored …** to clear it. Also the web app's directory, the database connection, and
   the Start / Stop / Restart commands. **Test connection** checks the
-  values in the form before you save. Database changes need a console
-  restart (a dialog says so).
+  values in the form before you save. Database changes take effect
+  straight away — the console reconnects to the new database on save, no
+  restart needed.
 - **Templates** — the raffle text templates ("How to buy", "Claim
   requirements"): where they're saved (a folder on this console's server,
   default `templates/` in the console folder — one sub-folder per field,

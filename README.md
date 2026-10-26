@@ -26,7 +26,8 @@ It is a port of `car_show_admin_console` with the car-show-only domain
   corrupt file fails closed.
 - **Three ways to reach the web app** — `local`, `ssh` (pasted private
   key), `ec2` (SSM Run Command). Every file write is atomic; SSM reads
-  refuse anything near the ~24 KB output cap rather than truncate it.
+  never truncate — at the ~24 KB output cap they fall back to ~15 KB
+  pieces (`webAppAccess.readFileChunked`).
 - **Events & Raffles** — the website is the source of truth for both
   (Facebook only links to it). Create / edit, Draft → Published →
   Archived, a **Preview** pop-up of the real page, Markdown-lite
@@ -72,7 +73,10 @@ It is a port of `car_show_admin_console` with the car-show-only domain
   (wired up by `public/js/date-picker.js` for any `input[data-datetime]`).
 - **bcrypt**, **cookie-session**, **helmet**, **express-rate-limit**,
   **morgan**, **multer**, **mysql2**, **sqlite3**, **ssh2**,
-  **@aws-sdk/client-ssm** (lazy-required; the only AWS SDK).
+  **@aws-sdk/client-ssm** (lazy-required), and
+  **@aws-sdk/client-elastic-load-balancing-v2** (lazy-required, read-only
+  load-balancer lookup for "Open website" and previews in EC2 mode —
+  `helpers/awsAlb.js`).
 
 ## Quick start
 
@@ -82,7 +86,8 @@ npm install
 ```
 
 `npm start` runs the `prestart` hook to rebuild Tailwind CSS and refresh
-the Alpine bundle, then boots the server on **http://localhost:3005**.
+the Alpine, flatpickr and font files (`copy:alpine`, `copy:flatpickr`,
+`copy:fonts`), then boots the server on **http://localhost:3005**.
 
 The committed [config.json](config.json) assumes the web app is checked
 out next to this repo (`../mmoa_web_app`, database
@@ -90,7 +95,10 @@ out next to this repo (`../mmoa_web_app`, database
 `SETUP_SQLLITE_DB.sh`) so the database exists, then restart the console.
 
 On the first boot the console detects an empty `local_admins.json` and
-redirects every request to **`/setup`**. Fill in the form and sign in.
+redirects every request to **`/setup`**. The setup page opens from this
+machine (loopback) or, from anywhere else, with the one-time
+`/setup?token=…` link printed in the terminal at start-up. Fill in the
+form and sign in.
 CLI alternative:
 
 ```bash
@@ -107,7 +115,7 @@ password is replaced by re-running the command above with the same username.
 | Tab                  | Purpose |
 | -------------------- | ------- |
 | **Profile**          | Edit your own name / email / password. |
-| **Dashboard**        | Nonprofits verified / pending / rejected, upcoming events, event drafts, open raffles, locked logins, console admins + the "Pending verification" list. |
+| **Dashboard**        | Nonprofits verified / pending / rejected, upcoming events, event drafts, open raffles, locked logins, console admins + the "Pending verification" list and the Recent activity card (latest audit-log entries). |
 | **Admins**           | Add / replace / remove local-file console admins. |
 | **Events**           | List filtered by a Show drop-down (All / Draft / Published / Archived); create, edit, Draft / Published / Archived switch, Preview pop-up, flyer + cover, beneficiaries, delete, View on site. |
 | **Raffles**          | Same pattern (Draft / Published / Archived, Preview) + a separate stage (open → closed → drawn, with winning ticket), claim presets, prize photos (≤ 8, reorder). |
@@ -117,6 +125,7 @@ password is replaced by re-running the command above with the same username.
 | **Data Browser**     | Generic table browser / editor for the whole web-app database. |
 | **Locked Users**     | Current login lockouts (accounts and IPs) with Unlock. |
 | **Reports**          | Nonprofits (all / pending), events, raffles, lockouts, console admins — view or CSV. |
+| **Audit log**        | Who did what in this console (`/audit`) — newest first, filter by admin, action, text and dates. |
 | **Web App Website**  | Website copy sections (hero, about, impact, help, partner, footer), images, Maintenance Mode. |
 | **Web App Logs**     | Tail of the web app's `logs/app.log`. |
 | **Backup/Restore**   | JSON exports / restores and one-file rebuild bundles (incl. `uploads/**`). |
@@ -148,6 +157,8 @@ db/database.js                  Dual-engine SQLite/MySQL with "dead-DB" fallback
 db/remoteSqlite.js              SQLite on the web-app host via the sqlite3 CLI (ssh / ec2 modes)
 middleware/auth.js              requireAdmin, hash/verify password, password complexity helpers
 middleware/inputLimits.js       Per-field char caps on form bodies
+middleware/csrf.js              Per-session CSRF token (synchroniser-token pattern)
+middleware/pageShell.js         "Loading…" shell for slow (EC2 / SSH) tabs
 helpers/localAdmins.js          Read/write/lookup over local_admins.json
 helpers/webAppAccess.js         local / ssh / ec2 transport (run, read, write, readBundle, test)
 helpers/webAppConfig.js         Read-modify-write of the web app's config.json; restart-pending flag
@@ -157,6 +168,10 @@ helpers/markdownLite.js         VERBATIM copy of mmoa_web_app/helpers/markdownLi
 helpers/localTime.js            Event / raffle times: org time zone (timeZone) ↔ stored UTC
 helpers/pageKit.js              Shared bits for the content pages (safeGet, slugs, reorder, upload widget)
 helpers/awsSsm.js               SSM Run Command (ec2 mode); awsLog.js / awsClientKey.js support it
+helpers/awsAlb.js               Read-only ELBv2 lookup of the load balancer in front of the EC2 instance
+helpers/websiteCard.js          The "Website" card + "Open website" address (Website and Web App Settings)
+helpers/siteTokens.js           The website's {{tokens}}, filled in for section previews
+helpers/audit.js                Writes the admin audit trail (web app's admin_audit table)
 views/layout.js                 HTML shell, sidebar, themeCss, restart prompt, confirm dialog
 views/escapeHtml.js             escapeHtml + jsAttrStr
 routes/setup.js                 First-run "create the first admin" gate
@@ -176,12 +191,20 @@ routes/backup.js                Backup / Restore + rebuild bundles
 routes/webAppWebsite.js         Web App Website editor + Maintenance Mode
 routes/webAppLogs.js            Web App Logs
 routes/webAppSettings.js        Web App Settings (remote config.json) + power bar
-routes/settings.js              Settings (Security, Appearance, Web App)
+routes/settings.js              Settings (Security, Appearance, Web App, Templates)
+routes/templates.js             Settings → Templates + the raffle form's Templates JSON API
+routes/audit.js                 Audit log page
 scripts/create-local-admin.js   Command-line admin seeding
+public/js/csrf.js               Adds the CSRF token to every state-changing fetch / form
+public/js/page-loader.js        Swaps a slow tab's "Loading…" shell for the real page
+public/js/nav-progress.js       "Still loading…" notice for slow page loads
+public/js/dashboard.js          Fills in the Dashboard from /dashboard/data
 public/js/ui-confirm.js         CSP-safe confirm dialog (window.uiConfirm)
 public/js/wa-preview.js         Website section preview popup
 public/js/image-upload.js       Browser-side resize (≤ 1600 px JPEG) + upload
 tailwind.input.css              Tailwind v4 source
+templates/                      Raffle text templates (how-to-buy, claim-requirements) as JSON files
+test/                           node --test suites (remote SQLite chunks, dump parsing, transaction gate)
 START_APP.sh                    Convenience boot script
 local_admins.json               GITIGNORED — bcrypt hashes for console admins
 admin_passwords.json            Symlink → local_admins.json (easy-to-find name; holds no data itself)
@@ -210,6 +233,7 @@ chmod 0700 backups
 - [Docs/database.md](Docs/database.md) — DB module, offline mode, expected schema, Data Browser
 - [Docs/security.md](Docs/security.md) — auth, sessions, throttling, CSP, write safety
 - [Docs/appearance.md](Docs/appearance.md) — theme system
+- [Docs/audit-log.md](Docs/audit-log.md) — the admin audit trail: what is recorded and where
 - [Docs/operator-guide.md](Docs/operator-guide.md) — tab-by-tab user guide
 - [Docs/development.md](Docs/development.md) — how to add a page, styles, debugging
 

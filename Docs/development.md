@@ -21,12 +21,12 @@ npm install
 `npm start` runs the `prestart` hook before booting:
 
 ```jsonc
-"prestart": "npm run build:css && npm run copy:alpine"
+"prestart": "npm run build:css && npm run copy:alpine && npm run copy:flatpickr && npm run copy:fonts"
 ```
 
-That guarantees the built `public/css/tailwind.css` and the
-`public/js/alpine.min.js` bundle are fresh before the server serves
-them.
+That guarantees the built `public/css/tailwind.css`, the
+`public/js/alpine.min.js` bundle, the flatpickr files and the
+self-hosted fonts are fresh before the server serves them.
 
 Useful scripts in [package.json](../package.json):
 
@@ -36,6 +36,8 @@ Useful scripts in [package.json](../package.json):
 | `npm run build:css` | Compile `tailwind.input.css` → `public/css/tailwind.css`      |
 | `npm run watch:css` | Same, but watch source files for changes                      |
 | `npm run copy:alpine` | Copy Alpine bundle from `node_modules` into `public/js/`    |
+| `npm run copy:flatpickr` | Copy flatpickr's JS / CSS into `public/js/` and `public/css/` |
+| `npm run copy:fonts` | Copy the Saira Condensed / Barlow `.woff2` files into `public/fonts/` |
 | `npm run audit`     | `npm audit --omit=dev` — known vulnerabilities in the production dependencies |
 
 ### Dependency check at start
@@ -64,11 +66,16 @@ db/database.js                  Dual-engine SQLite/MySQL + dead-DB fallback
 db/remoteSqlite.js              SQLite on the web-app host via the sqlite3 CLI (ssh / ec2 modes)
 middleware/auth.js              requireAdmin, hash/verify, getPasswordRules, validatePassword
 middleware/inputLimits.js       Per-field char caps
+middleware/csrf.js              Per-session CSRF token (csrfProtection, ensureToken)
+middleware/pageShell.js         "Loading…" shell for slow tabs over EC2 / SSH (SLOW list)
 helpers/localAdmins.js          local_admins.json CRUD
 helpers/webAppAccess.js         local / ssh / ec2 transport to the web app host
 helpers/webAppConfig.js         read-modify-write of the web app's config.json + restart-pending flag
 helpers/dbSchema.js             live-schema introspection (Data Browser, Backup)
 helpers/awsSsm.js, awsLog.js, awsClientKey.js   SSM Run Command (ec2 mode only)
+helpers/awsAlb.js               Read-only ELBv2 lookup of the instance's load balancer (ec2 mode)
+helpers/websiteCard.js          The "Website" card + "Open website" address
+helpers/audit.js                audit(req, action, {…}) — one admin_audit row per change
 views/layout.js                 HTML shell + sidebar + themeCss + asset cache-buster
 views/escapeHtml.js             escapeHtml(...) + jsAttrStr(...) for Alpine attributes
 routes/                         All route handlers (one file per major section)
@@ -94,6 +101,7 @@ tailwind.input.css              Tailwind v4 source (with @source + @theme + @lay
 package.json                    Deps + scripts + _dependencies_info documentation
 README.md                       Top-level project README
 Docs/                           These detailed docs
+test/                           node --test suites (see "Running the tests")
 ```
 
 ## How to add a new page
@@ -155,7 +163,17 @@ The full flow takes about 5 minutes.
 
    (Or, with `watch:css` running, it rebuilds automatically.)
 
-5. **Restart the server.** Route files are `require`d once at boot;
+5. **Slow over EC2 / SSH?** If the page reads the Web App's database or
+   files, add its path to `SLOW` in
+   [middleware/pageShell.js](../middleware/pageShell.js) so it opens
+   instantly with a "Loading…" line.
+
+6. **Audit every write.** After a change succeeds, call
+   `audit(req, '<area>.<verb>', { kind, id, label, summary })` from
+   [helpers/audit.js](../helpers/audit.js) — see
+   [audit-log.md](audit-log.md).
+
+7. **Restart the server.** Route files are `require`d once at boot;
    changes won't take effect until restart.
 
 **CSRF — nothing to add.** Every `POST` / `PUT` / `PATCH` / `DELETE`
@@ -401,9 +419,10 @@ If you ever tighten CSP, remember:
   for subsystem tags: `[db]`, `[settings]`, `[nonprofits]`, `[events]`, `[raffles]`,
   `[uploads]`, `[data]`,
   `[reports]`, `[login]`, `[profile]`, `[admin]`, `[setup]`,
-  `[backup]`, `[boot]`, `[session]`, `[localAdmins]`, `[csrf]` (a
-  refused cross-site request or a missing / wrong CSRF token — see
-  [security.md](security.md)).
+  `[backup]`, `[boot]`, `[session]`, `[localAdmins]`, `[audit]`,
+  `[server]`, `[error]` (an unhandled route error), `[fatal]`,
+  `[shutdown]`, `[csrf]` (a refused cross-site request or a missing /
+  wrong CSRF token — see [security.md](security.md)).
 - **Alpine devtools.** The browser DevTools console can inspect any
   element's `_x_dataStack` to see Alpine's current state for that
   scope. Or just sprinkle `console.log` inside an `x-init` /
@@ -415,6 +434,21 @@ If you ever tighten CSP, remember:
   minimal "Not found" page in [app.js](../app.js). Check that route
   files are mounted in the right order; ordering matters when paths
   overlap (e.g. `/users/:id` vs `/users/me`).
+
+## Running the tests
+
+```bash
+node --test test/*.test.js
+```
+
+Three files, built-in `node:test`, no extra dependencies:
+
+- `test/remoteSqliteChunks.test.js` — remote SQLite splits big scripts
+  into upload pieces on UTF-8 bytes (no broken emoji).
+- `test/remoteSqliteDump.test.js` — the one-invocation dump's marker
+  parsing (`splitTableDump`), including truncated output.
+- `test/sqliteTransactionGate.test.js` — the local SQLite transaction
+  gate holds other statements until the open transaction finishes.
 
 ## Git and house-keeping
 
@@ -430,7 +464,8 @@ If you ever tighten CSP, remember:
   don't drift, but committing them lets the app run without a build
   step in environments where you can't reach npm. If you're
   uncomfortable with that, gitignore them and run `npm install &&
-  npm run build:css && npm run copy:alpine` on deploy.
+  npm run build:css && npm run copy:alpine && npm run copy:flatpickr &&
+  npm run copy:fonts` on deploy.
 
 ## What "done" looks like for a change
 

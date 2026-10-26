@@ -155,7 +155,7 @@ const TEXTAREA_CLS = 'block w-full font-mono text-xs rounded-lg border border-sl
 // Donation link check (server side of a toggle `guard`; the browser copy is
 // donationUrlErrorJs below). Same rule as the web app's
 // safeHttpUrl: an http(s) URL with a dotted host name. '' = OK.
-const DONATION_URL_MSG = 'Enter a valid donation link (starting with https://) before turning on the Donate button.';
+const DONATION_URL_MSG = 'Enter a valid donation link (a full web address, e.g. https://donate.stripe.com/…) before turning on the Donate button.';
 function donationUrlError(v) {
   try {
     const u = new URL(String(v || '').trim());
