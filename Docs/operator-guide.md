@@ -376,6 +376,19 @@ or restore — SSH / Local are much faster. For the
 demo data (31 nonprofits with photos, two events with flyer + cover, two
 raffles with photos) a bundle is about 12 MB.
 
+The card has **Web App Full Backup** at the top and **Web App Full Restore**
+below it, in four steps: **1. Choose the bundle** (click a row; *Upload a
+bundle* adds one from your computer), **2. Check it** (*Validate selected
+bundle* and *Test access* — they change nothing), **3. Options**, and
+**4. Restore** (type `RESTORE`, then the button). A new backup or an
+uploaded bundle comes back already selected.
+
+A bundle is **one self-contained file**: configuration, session keys,
+maintenance file, website sections, images, uploads (base64) and every
+database table are inside it — nothing is referenced from elsewhere — so
+*Download* on one console and *Upload a bundle* on another moves a whole
+site (up to 256 MB per upload; copy bigger ones into `backups/` by hand).
+
 Bundles are listed from a small `.meta.json` summary written next to each
 one (a bundle copied in by hand is summarized once, on the next page
 view). Each bundle row offers **Download** and, for bundles that carry one,
@@ -391,7 +404,7 @@ and in the status window) and records a `backup.verify` audit row:
 - JSON parses · manifest present · bundle type
 - `config.json` present · `local-secrets.json` present (yes / no — never
   the values) · `maintenance.json` present
-- website HTML sections (all five) · images · uploads
+- website HTML sections (all six) · images · uploads
 - database tables present · **every table's row count equals the
   manifest** · **every file's sha256 matches the manifest**
 - **every image path the database refers to has a file in the bundle**

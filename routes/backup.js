@@ -1537,8 +1537,10 @@ module.exports = function (db, appConfig, appConfigModule) {
         : `<span class="pill-failed" title="${escapeHtml((s.problems || []).join('; '))}">invalid</span>`;
       const warn = (s.warnings && s.warnings.length)
         ? ` <span class="text-xs text-amber-600 dark:text-amber-400" title="${escapeHtml(s.warnings.join('; '))}">⚠ ${s.warnings.length} warning(s)</span>` : '';
-      return `<tr class="border-t border-slate-100 dark:border-slate-800">
-        <td class="py-2 pr-2"><input type="radio" name="bundle" value="${escapeHtml(b.name)}" x-model="selected" class="h-4 w-4"></td>
+      return `<tr class="border-t border-slate-100 dark:border-slate-800 cursor-pointer" title="Click to select this bundle"
+            x-on:click="if (!$event.target.closest('a, button')) selected = '${escapeHtml(b.name)}'"
+            :class="selected === '${escapeHtml(b.name)}' ? 'bg-brand-50 dark:bg-brand-500/10' : 'hover:bg-slate-50 dark:hover:bg-slate-800/50'">
+        <td class="py-2 pr-2 pl-1"><input type="radio" name="bundle" value="${escapeHtml(b.name)}" x-model="selected" class="h-4 w-4"></td>
         <td class="py-2 pr-3 font-mono text-xs break-all">${escapeHtml(b.name)}</td>
         <td class="py-2 pr-3 whitespace-nowrap text-slate-500" title="when the bundle was made (UTC)">${escapeHtml(b.mtime.replace('T', ' ').slice(0, 16))} UTC</td>
         <td class="py-2 pr-3 whitespace-nowrap text-slate-500">${fmtBytes(b.size)}</td>
@@ -1552,8 +1554,8 @@ module.exports = function (db, appConfig, appConfigModule) {
       </tr>`;
     }).join('');
 
-    return `<div class="card surface-target card-pad" x-data="{
-        busy: '', log: [], selected: '', confirmText: '', maintOn: false, restoreCommands: false, pruneFiles: true, keepHostSettings: true, restoreTemplates: true,
+    return `<div id="full-backup" class="card surface-target card-pad scroll-mt-6" x-init="if (selected) $nextTick(() => $el.scrollIntoView({ block: 'start' }))" x-data="{
+        busy: '', log: [], selected: (new URLSearchParams(location.search).get('bundle') || ''), confirmText: '', maintOn: false, restoreCommands: false, pruneFiles: true, keepHostSettings: true, restoreTemplates: true,
         md: { open: false, what: '', title: ${jsStr(MAINT_TITLE)}, message: ${jsStr(MAINT_MESSAGE)}, resolve: null },
         sw: { open: false, op: null, timer: null, now: Date.now() },
         say(kind, text) { this.log.push({ kind, text }); },
@@ -1646,7 +1648,7 @@ module.exports = function (db, appConfig, appConfigModule) {
             (s.warnings || []).forEach(w => this.say('warn', w));
             await this.offerDisableMaintenance('The backup finished.');
             this.say('info', 'Reloading the bundle list…');
-            setTimeout(() => window.location.reload(), 900);
+            setTimeout(() => { window.location.href = '/backup-restore?bundle=' + encodeURIComponent(r.name) + '#full-backup'; }, 900);
           } finally { this.busy = ''; }
         },
         async testAccess() {
@@ -1738,25 +1740,51 @@ module.exports = function (db, appConfig, appConfigModule) {
           if (r.ok) window.location.reload(); else this.say('err', r.error || 'Delete failed');
         }
       }">
-      <div class="grid lg:grid-cols-2 gap-6">
-        <section>
-          <h3 class="text-base font-semibold text-slate-900 dark:text-slate-100">Web App Full Backup</h3>
+      <section>
+        <h3 class="text-base font-semibold text-slate-900 dark:text-slate-100">Web App Full Backup</h3>
           <p class="mt-1 text-sm text-slate-500 dark:text-slate-400">One click captures everything needed to rebuild the Web App as it is right now: <code class="font-mono">config.json</code>, <code class="font-mono">local-secrets.json</code> (session keys — members stay signed in), <code class="font-mono">maintenance.json</code>, the website (HTML sections, images), every uploaded image (uploads/ — flyers, prize, nonprofit and board photos), the whole database as one point-in-time snapshot, plus this console's raffle text templates and settings — with a manifest (row counts, a hash per table and per file) that Verify checks against. Over EC2 (SSM) every file is captured, in pieces, so a photo-heavy site takes a while — SSH or Local access is faster.</p>
           <div class="mt-3 text-xs text-amber-600 dark:text-amber-400"><strong>Sensitive:</strong> a bundle holds the Web App's secrets (SMTP / AWS credentials, session keys) and nonprofit password hashes. Treat it like the database.</div>
-          <div class="mt-4">
+        <div class="mt-4">
             <button type="button" class="btn-primary" x-on:click="fullBackup()" :disabled="!!busy" :class="busy ? 'opacity-50 cursor-not-allowed' : ''">
               <span x-show="busy !== 'backup'">Web App Full Backup</span><span x-show="busy === 'backup'">Backing up…</span>
             </button>
-          </div>
-        </section>
-        <section>
-          <h3 class="text-base font-semibold text-slate-900 dark:text-slate-100">Web App Full Restore</h3>
+        </div>
+      </section>
+
+      <section class="mt-8 pt-6 border-t border-slate-200 dark:border-slate-700">
+        <h3 class="text-base font-semibold text-slate-900 dark:text-slate-100">Web App Full Restore</h3>
           <p class="mt-1 text-sm text-slate-500 dark:text-slate-400">After the Web App is redeployed: point <a class="text-brand-600 hover:underline" href="/settings/web-app">Settings → Web App</a> at the new instance, select a bundle below, then run the guided restore — it tests access, offers Maintenance Mode, verifies the bundle, restores the database first (all-or-nothing) → configuration + session keys → website → uploads → console templates → removes files not in the bundle → maintenance file, and finishes with the Web App restart the new config needs. The console settings inside a bundle are not applied here — use the <em>Console settings</em> download on the bundle row with Console settings → Restore.</p>
           ${dbReady ? '' : `<div class="mt-3 flash-error text-xs">Database is not available — the restore can't run until <a class="underline" href="/settings/web-app">Settings → Web App</a> reaches it.</div>`}
-          <div class="mt-4 flex flex-wrap items-center gap-2">
-            <button type="button" class="btn-secondary" x-on:click="testAccess()" :disabled="!!busy">Test access to the Web App</button>
-            <button type="button" class="btn-secondary" x-on:click="verify()" :disabled="!!busy || !selected">Validate selected bundle</button>
-          </div>
+
+        <h4 class="mt-5 text-sm font-semibold text-slate-900 dark:text-slate-100">1. Choose the bundle to restore</h4>
+        <p class="mt-1 text-xs text-slate-500 dark:text-slate-400">Each bundle is <strong>one self-contained file</strong> — configuration, secrets, website sections, images, uploads and the whole database are all inside it, nothing is referenced from elsewhere. <em>Download</em> saves it to your computer; <em>Upload a bundle</em> adds one (from another console or server) to this list.</p>
+        <div class="mt-3 flex items-center gap-2 flex-wrap">
+          <span class="text-xs text-slate-600 dark:text-slate-300">Upload a bundle from your computer:</span>
+          <form method="POST" action="/backup-restore/bundle/upload" enctype="multipart/form-data" class="flex items-center gap-2">
+            <input class="${FILE_INPUT_CLS} max-w-xs" type="file" name="bundle" accept="application/json,.json" required>
+            <button type="submit" class="btn-secondary text-sm">Upload bundle</button>
+          </form>
+        </div>
+        ${bundles.length ? `
+        <div class="mt-3 overflow-x-auto">
+          <table class="w-full text-sm">
+            <thead><tr class="text-left text-xs text-slate-500 dark:text-slate-400"><th class="pb-1"></th><th class="pb-1">Bundle</th><th class="pb-1">Created</th><th class="pb-1">Size</th><th class="pb-1">Contents</th><th class="pb-1">Check</th><th class="pb-1"></th></tr></thead>
+            <tbody>${rows}</tbody>
+          </table>
+        </div>` : `<p class="mt-3 text-sm text-slate-400 italic">No bundles yet — run a Full Backup, or upload one.</p>`}
+        <p class="mt-2 text-sm" x-show="selected" x-cloak>Selected: <code class="font-mono font-semibold text-brand-700 dark:text-brand-300" x-text="selected"></code></p>
+        <p class="mt-2 text-sm text-slate-500 dark:text-slate-400" x-show="!selected">No bundle selected — click a row above.</p>
+
+        <h4 class="mt-6 text-sm font-semibold text-slate-900 dark:text-slate-100">2. Check it (optional — changes nothing)</h4>
+        <p class="mt-1 text-xs text-slate-500 dark:text-slate-400"><em>Validate</em> checks the selected bundle has everything a restore needs (manifest, checksums, row counts), that it fits this database, that the Web App can be reached, and loads the database in a trial that is rolled back. The restore runs the same checks again before it starts.</p>
+        <div class="mt-3 flex flex-wrap items-center gap-2">
+          <button type="button" class="btn-secondary" x-on:click="verify()" :disabled="!!busy || !selected" :class="(!!busy || !selected) ? 'opacity-50 cursor-not-allowed' : ''">
+            <span x-show="busy !== 'verify'">Validate selected bundle</span><span x-show="busy === 'verify'">Validating…</span>
+          </button>
+          <button type="button" class="btn-secondary" x-on:click="testAccess()" :disabled="!!busy">Test access to the Web App</button>
+        </div>
+
+        <h4 class="mt-6 text-sm font-semibold text-slate-900 dark:text-slate-100">3. Options</h4>
           <label class="mt-3 flex items-start gap-2 text-xs text-slate-700 dark:text-slate-200">
             <input type="checkbox" x-model="restoreTemplates" class="mt-0.5">
             <span>Restore this console's raffle text templates from the bundle (writes into the Settings → Templates folder; a template with the same id is replaced, others are kept).</span>
@@ -1773,6 +1801,9 @@ module.exports = function (db, appConfig, appConfigModule) {
             <input type="checkbox" x-model="restoreCommands" class="mt-0.5">
             <span>${escapeHtml(RESTORE_COMMANDS_LABEL)}</span>
           </label>
+
+        <h4 class="mt-6 text-sm font-semibold text-slate-900 dark:text-slate-100">4. Restore</h4>
+        <p class="mt-1 text-xs text-slate-500 dark:text-slate-400">Type <code class="font-mono">${RESTORE_CONFIRM}</code> and click the button. It replaces the Web App's configuration, website, images, uploads and the ENTIRE database with the selected bundle.</p>
           <div class="mt-3 flex flex-wrap items-center gap-2">
             <input class="input max-w-[12rem]" type="text" x-model="confirmText" autocomplete="off" placeholder="Type ${RESTORE_CONFIRM}">
             <button type="button" class="btn-danger" x-on:click="fullRestore()"
@@ -1781,25 +1812,7 @@ module.exports = function (db, appConfig, appConfigModule) {
               <span x-show="busy !== 'restore'">Web App Full Restore</span><span x-show="busy === 'restore'">Restoring…</span>
             </button>
           </div>
-        </section>
-      </div>
-
-      <div class="mt-6">
-        <div class="flex items-center justify-between gap-3 flex-wrap">
-          <h4 class="text-sm font-semibold text-slate-900 dark:text-slate-100">Bundles on this console <span class="font-normal text-slate-400">(backups/)</span></h4>
-          <form method="POST" action="/backup-restore/bundle/upload" enctype="multipart/form-data" class="flex items-center gap-2">
-            <input class="${FILE_INPUT_CLS} max-w-xs" type="file" name="bundle" accept="application/json,.json" required>
-            <button type="submit" class="btn-secondary text-sm">Upload bundle</button>
-          </form>
-        </div>
-        ${bundles.length ? `
-        <div class="mt-3 overflow-x-auto">
-          <table class="w-full text-sm">
-            <thead><tr class="text-left text-xs text-slate-500 dark:text-slate-400"><th class="pb-1"></th><th class="pb-1">Bundle</th><th class="pb-1">Created</th><th class="pb-1">Size</th><th class="pb-1">Contents</th><th class="pb-1">Check</th><th class="pb-1"></th></tr></thead>
-            <tbody>${rows}</tbody>
-          </table>
-        </div>` : `<p class="mt-3 text-sm text-slate-400 italic">No bundles yet — run a Full Backup, or upload one.</p>`}
-      </div>
+      </section>
 
       <div class="mt-5" x-show="log.length || sw.op" x-cloak>
         <div class="flex items-center justify-between mb-1">
@@ -2806,7 +2819,7 @@ module.exports = function (db, appConfig, appConfigModule) {
       const base = path.basename(req.file.originalname).replace(/[^A-Za-z0-9._-]/g, '_');
       const upSha = sha256(req.file.buffer);
       const same = listBundles().find(x => { try { return fs.statSync(path.join(BUNDLE_DIR, x.name)).size === req.file.buffer.length && sha256(fs.readFileSync(path.join(BUNDLE_DIR, x.name))) === upSha; } catch (e) { return false; } });
-      if (same) return res.redirect('/backup-restore?ok=bundleup&warn=' + encodeURIComponent(`That file is already here as ${same.name} — nothing new was stored.`));
+      if (same) return res.redirect('/backup-restore?ok=bundleup&bundle=' + encodeURIComponent(same.name) + '&warn=' + encodeURIComponent(`That file is already here as ${same.name} — nothing new was stored.`) + '#full-backup');
       let name = safeBundleName(base) || `web_app_bundle_${bundleStamp()}.json`;
       // Never overwrite a bundle already here (same name, other content).
       if (fs.existsSync(path.join(BUNDLE_DIR, name))) name = uniqueBundleName(name.replace(/\.json$/i, ''));
@@ -2817,7 +2830,7 @@ module.exports = function (db, appConfig, appConfigModule) {
         const v = verifyBundle(parsed);
         audit(req, 'backup.upload', { kind: 'backup', id: name, label: name,
           summary: `Bundle uploaded (${fmtBytes(st.size)}, v${s.version}) — verify ${v.valid ? 'passed' : 'FAILED'}: ${v.checks.filter(c => !c.ok).map(c => c.name).join(', ') || 'all checks ok'}` })
-          .finally(() => res.redirect('/backup-restore?ok=bundleup' + (v.valid ? '' : '&warn=' + encodeURIComponent('Uploaded, but Verify reports: ' + v.checks.filter(c => !c.ok && c.level === 'error').map(c => c.name + ' — ' + c.detail).join('; ')))));
+          .finally(() => res.redirect('/backup-restore?ok=bundleup&bundle=' + encodeURIComponent(name) + (v.valid ? '' : '&warn=' + encodeURIComponent('Uploaded, but Verify reports: ' + v.checks.filter(c => !c.ok && c.level === 'error').map(c => c.name + ' — ' + c.detail).join('; '))) + '#full-backup'));
       } catch (e) {
         res.redirect('/backup-restore?error=' + encodeURIComponent('Could not save the bundle: ' + (e.message || e)));
       }
