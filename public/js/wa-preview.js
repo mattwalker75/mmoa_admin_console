@@ -103,13 +103,14 @@
       + '<div class="wa-img-bar"><span class="wa-img-name"></span>'
       + '<span class="wa-img-meta"></span>'
       + '<button type="button" class="wa-img-close" aria-label="Close">✕</button></div>'
-      + '<div class="wa-img-body"><img alt=""><div class="wa-img-err" hidden>The image could not be loaded.</div></div>'
+      + '<div class="wa-img-body"><div class="wa-img-loading" role="status">Loading the image from the Web App…</div><img alt="" hidden><div class="wa-img-err" hidden>The image could not be loaded.</div></div>'
       + '</div>';
     overlay.querySelector('.wa-img-name').textContent = opts.name || '';
     var img = overlay.querySelector('img');
     var meta = overlay.querySelector('.wa-img-meta');
-    img.addEventListener('load', function () { meta.textContent = img.naturalWidth + ' × ' + img.naturalHeight + ' px'; });
-    img.addEventListener('error', function () { img.hidden = true; overlay.querySelector('.wa-img-err').hidden = false; });
+    var loading = overlay.querySelector('.wa-img-loading');
+    img.addEventListener('load', function () { loading.hidden = true; img.hidden = false; meta.textContent = img.naturalWidth + ' × ' + img.naturalHeight + ' px'; });
+    img.addEventListener('error', function () { loading.hidden = true; img.hidden = true; overlay.querySelector('.wa-img-err').hidden = false; });
     img.src = opts.url || '';
     overlay.querySelector('.wa-img-close').addEventListener('click', closeImage);
     overlay.addEventListener('click', function (e) { if (e.target === overlay) closeImage(); });

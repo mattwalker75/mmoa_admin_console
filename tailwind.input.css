@@ -198,3 +198,5 @@
 .wa-img-body { padding: 0.9rem; overflow: auto; display: flex; align-items: center; justify-content: center; }
 .wa-img-body img { max-width: 100%; max-height: calc(92vh - 4.5rem); height: auto; display: block; border-radius: 0.5rem; }
 .wa-img-err { color: #f3b1b1; font-size: 0.9rem; padding: 2rem; }
+.wa-img-body img[hidden], .wa-img-loading[hidden], .wa-img-err[hidden] { display: none; }
+.wa-img-loading { color: #a7aeaa; font-size: 0.9rem; padding: 2rem 3rem; }

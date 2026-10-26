@@ -33,6 +33,7 @@ const { requireAdmin } = require('../middleware/auth');
 const webAppAccess = require('../helpers/webAppAccess');
 const waConfig = require('../helpers/webAppConfig');
 const uploads = require('../helpers/webAppUploads');
+const kit = require('../helpers/pageKit');
 // This router has no db of its own: the audit trail goes through the
 // recorder routes/audit.js captures when app.js mounts it.
 const { record: audit } = require('./audit');
@@ -76,6 +77,25 @@ function sniffImage(buf) {
   const text = buf.subarray(0, 4096).toString('utf8').replace(/^\uFEFF/, '').replace(/<!--[\s\S]*?-->/g, '').trim();
   if (/^(<\?xml[^>]*\?>\s*)?(<!DOCTYPE[^>]*>\s*)?<svg[\s>]/i.test(text)) return Object.assign({ kind: 'svg' }, SNIFF.svg);
   return null;
+}
+
+// GET <base>/content/images/<name> from the live site; the image bytes, or
+// null (not reachable, not found, or not an image of the requested type).
+async function fetchLiveImage(base, name, ext) {
+  if (!/^https?:\/\//i.test(base || '')) return null;
+  const ctl = new AbortController();
+  const timer = setTimeout(() => ctl.abort(), 8000);
+  try {
+    const r = await fetch(`${base}/content/images/${encodeURIComponent(name)}`, { signal: ctl.signal, redirect: 'follow' });
+    if (!r.ok) return null;
+    const buf = Buffer.from(await r.arrayBuffer());
+    const kind = sniffImage(buf);
+    return kind && kind.exts.includes(String(ext).toLowerCase()) ? buf : null;
+  } catch (e) {
+    return null;
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 // Single-quote a string for POSIX sh (for the ls / rm / mkdir calls below).
@@ -427,7 +447,14 @@ function makeRouter(appConfig, db) {
     let buf;
     try {
       const accessor = webAppAccess.createAccessorFromConfig(appConfig);
-      buf = await accessor.readFileChunked(waConfig.joinPath(imagesDirOf(accessor), name));
+      // Fast path off this machine: the live site serves these files at
+      // /content/images/, so fetch them through its public address (the
+      // load balancer on EC2) — about 0.4 s where reading the file over SSM
+      // takes ~15 s for a 200 KB photo. Only accepted if the bytes really
+      // are that kind of image (a missing file comes back as the SPA page);
+      // otherwise fall back to reading the file directly.
+      if (accessor.mode !== 'local') buf = await fetchLiveImage(await kit.webAppPublicUrl(appConfig), name, ext);
+      if (!buf) buf = await accessor.readFileChunked(waConfig.joinPath(imagesDirOf(accessor), name));
     } catch (e) {
       return res.status(404).send('Image not available: ' + (e.message || e));
     }
