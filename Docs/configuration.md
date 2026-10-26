@@ -29,10 +29,10 @@ a partial file is fine.
 | `passwordMinLength` | `8` | no | Legacy mirror of `security.password.minLength`. |
 | `templates.dir` | `"templates"` | no | Folder for raffle text templates (Settings → Templates); relative = inside the console folder. Created (with starter templates) on first use; gitignored. |
 | `timeZone` | `"America/Chicago"` | no | IANA zone the Events / Raffles date-time fields are entered and shown in; the database stores UTC. Invalid → Chicago. Not in the committed `config.json` (default only). |
-| `database.engine` | `"sqlite"` | yes | `sqlite`, `mysql`, or `""` (offline). |
-| `database.sqlite.filename` | `"../mmoa_web_app/mmoa_web_app.db"` | yes | **Local mode:** path on this machine, relative to this repo or absolute. The file is never created by the console. **SSH / EC2 mode:** path on the web-app host, relative paths resolve against `webApp.<mode>.appPath` (the default still works there). |
-| `database.mysql.host` / `port` / `database` / `user` / `password` | `localhost` / `3306` / `mmoa_web_app` / `mmoa_app` / `""` | yes | Must be reachable from this console. |
-| `database.mysql.connectionLimit` | `5` | yes | |
+| `database.engine` | `"sqlite"` || no (live) | `sqlite`, `mysql`, or `""` (offline). |
+| `database.sqlite.filename` | `"../mmoa_web_app/mmoa_web_app.db"` || no (live) | **Local mode:** path on this machine, relative to this repo or absolute. The file is never created by the console. **SSH / EC2 mode:** path on the web-app host, relative paths resolve against `webApp.<mode>.appPath` (the default still works there). |
+| `database.mysql.host` / `port` / `database` / `user` / `password` | `localhost` / `3306` / `mmoa_web_app` / `mmoa_app` / `""` || no (live) | Must be reachable from this console. |
+| `database.mysql.connectionLimit` | `5` || no (live) | |
 | `security.rateLimiting.auth.windowSeconds` / `maxAttempts` | `300` / `10` | yes | Failed `/login` attempts per IP. |
 | `security.headers.enabled` / `contentSecurityPolicy` | `true` / `true` | yes | helmet + CSP. |
 | `security.session.secure` / `httpOnly` / `sameSite` | `null` / `true` / `"strict"` | yes | Cookie attributes. `secure: null` = auto — `Secure` whenever the console serves HTTPS (`server.ssl` true or an `https://` `publicBaseUrl`); an explicit `true` / `false` is authoritative. |
@@ -40,7 +40,7 @@ a partial file is fine.
 | `security.password.requireUpper` / `requireLower` / `requireDigit` / `requireSymbol` | `false` | no | |
 | `theme.mode` | `"light"` | no | `light` / `dark`. |
 | `theme.login.*` / `theme.app.*` | blank / opacity `1` | no | See [appearance.md](appearance.md). |
-| `webApp.mode` | `"local"` | DB: yes | `local`, `ssh`, `ec2`. A mode change flips a SQLite DB between direct and remote access, so Settings asks for a restart. |
+| `webApp.mode` | `"local"` | no (live) | `local`, `ssh`, `ec2`. A mode change flips a SQLite DB between direct and remote access; the console reconnects straight away. |
 | `webApp.local.appPath` | `"../mmoa_web_app"` | no | Relative to the console's working directory (START_APP.sh cd's to the repo) or absolute. |
 | `webApp.ssh.host` / `port` / `username` / `privateKey` / `appPath` | `""` / `22` / `""` / `""` / `""` | no | Unencrypted PEM key, stored in plain text. |
 | `webApp.ec2.runningInAws` | `false` | no | Use the console's instance profile instead of keys. |
@@ -51,9 +51,17 @@ a partial file is fine.
 | `webApp.commands.start` / `stop` / `restart` | `./START_APP.sh` / `./STOP_APP.sh` / `./RESTART_APP.sh` | no | Run from the web app directory by the power bar. Blank disables a button. |
 | `webApp.restartPending` | `false` | — | Bookkeeping: set when this console changed the web app's config.json, cleared by a successful Start / Restart. |
 
-"Restart?" means a restart of **this console**. The Settings → Web App
-page pops a "Restart required" dialog when a save changed something the
-DB connection depends on.
+"Restart?" means a restart of **this console**. "no (live)" means saving
+on Settings → Web App (or restoring a Console settings backup) switches
+the console's database connection immediately: it opens the new
+connection, checks it with a `SELECT 1`, and says either "Now using the
+Web App's database … — no restart needed" or why it couldn't connect. The
+old connection is closed a minute later so requests already running on it
+finish. Settings that still need a restart (the throttling settings on
+Settings → Security, and from a Console settings restore the port, TLS
+and the other "yes" rows) open a **Restart the MMoA Admin Console**
+popup that says exactly that: stop it with Ctrl-C and run `npm start`
+again. The Web App does not need restarting for any of them.
 
 ## The web app's `config.json` (Web App Settings)
 

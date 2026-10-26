@@ -28,6 +28,16 @@ events, event drafts, open raffles, logins currently locked out, and
 console admins. Below them, the **Pending verification** list — each name
 opens that nonprofit. A red banner means the database couldn't be reached.
 
+The page opens straight away and the numbers fill in a moment later
+("Loading the latest numbers…"). When the Web App's database is on the
+EC2 instance every read is an SSM round trip, so that takes a second or
+two; signing in no longer waits for it.
+
+**Slow pages.** Any page that reads the Web App's database over EC2 can
+take a few seconds. If a page hasn't arrived after about 0.7 s a
+"Loading… fetching data from the Web App" notice appears at the top of the
+screen and goes away when the page loads.
+
 ## Admins
 
 Who can sign in to **this console**. Re-using a username replaces that

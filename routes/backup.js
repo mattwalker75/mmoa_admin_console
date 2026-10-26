@@ -48,7 +48,7 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 const multer = require('multer');
-const { page, flash, waRestartPrompt } = require('../views/layout');
+const { page, flash, waRestartPrompt, consoleRestartPopup } = require('../views/layout');
 const { escapeHtml } = require('../views/escapeHtml');
 const { requireAdmin } = require('../middleware/auth');
 const webAppAccess = require('../helpers/webAppAccess');
@@ -2048,6 +2048,7 @@ module.exports = function (db, appConfig, appConfigModule) {
       </header>
 
       ${flash('error', req.query.error)}
+      ${consoleRestartPopup(req.query.restartConsole ? String(req.query.restartConsole).slice(0, 200) : '')}
       ${interruptedMsg}
       ${okMsg}
       ${flash('warn', req.query.warn)}
@@ -2087,7 +2088,7 @@ module.exports = function (db, appConfig, appConfigModule) {
     if (!sections.length) return res.redirect('/backup-restore?error=' + encodeURIComponent('No sections selected to restore.'));
     const restoreConnection = req.body.restore_commands === '1';
     let plan;
-    try { plan = await csRestore.planRestore(parsed, appConfig, { sections, restoreConnection }); }
+    try { plan = await csRestore.planRestore(parsed, appConfig, { sections, restoreConnection, runningPort: req.socket && req.socket.localPort }); }
     catch (e) { return res.redirect('/backup-restore?error=' + encodeURIComponent('Restore failed: ' + (e.message || e))); }
     if (plan.errors.length) {
       await audit(req, 'backup.settings_restore', { kind: 'settings', label: req.file && req.file.originalname, summary: `Refused: ${plan.errors.join('; ')}` });
@@ -2124,9 +2125,24 @@ module.exports = function (db, appConfig, appConfigModule) {
       const changed = Object.keys(updates).filter(k => JSON.stringify(before[k]) !== JSON.stringify(updates[k]));
       await audit(req, 'backup.settings_restore', { kind: 'settings', label: req.file && req.file.originalname,
         summary: `Restored: ${sections.join(', ')}${changed.length ? ` (changed: ${changed.join(', ')})` : ' (nothing changed)'}${nImg ? `; ${nImg} appearance image(s) written` : ''}${restoreConnection ? '; Web App access + commands taken from the file' : ''}` });
-      const restartMsg = plan.restart.length ? `RESTART THE CONSOLE to apply: ${[...new Set(plan.restart)].join(', ')}` : '';
+      // A restored database / Web App connection is switched to live; only
+      // the rest needs the console to start again.
+      let restart = [...new Set(plan.restart)];
+      if ((changed.includes('database') || changed.includes('webApp')) && typeof db.reconnect === 'function') {
+        db.reconnect(appConfig);
+        restart = restart.filter(k => k !== 'database' && k !== 'webApp.mode');
+        // Check the new connection, as Settings → Web App does, so a database
+        // block that doesn't fit this machine isn't a silent outage.
+        await new Promise(r => setTimeout(r, 300));
+        let ok = !!db.available;
+        if (ok) { try { await db.getAsync('SELECT 1 AS ok', []); } catch (e) { ok = false; } }
+        if (!ok) warnings.push(`the console could not reach the Web App's database with the restored settings (${db.statusMessage || 'connection failed'}) — fix them under Settings → Web App${restoreConnection ? '' : '; if the file came from a console set up differently, restore again with the Web App access box ticked so the connection matches the database'}`);
+      }
+      const NAMES = { port: 'the port', server: 'the TLS / server settings', publicBaseUrl: 'the public address', sessionKeyMode: 'the session key mode', sessionMaxAgeHours: 'the session length', security: 'the security settings' };
+      const restartWhat = restart.map(k => NAMES[k] || k).join(', ').replace(/, ([^,]*)$/, ' and $1');
       res.redirect('/backup-restore?ok=settings&n=' + sections.length +
-        ((warnings.length || restartMsg) ? '&warn=' + encodeURIComponent([restartMsg, ...warnings].filter(Boolean).join('; ')) : ''));
+        (warnings.length ? '&warn=' + encodeURIComponent(warnings.join('; ')) : '') +
+        (restartWhat ? '&restartConsole=' + encodeURIComponent(restartWhat) : ''));
     } catch (err) {
       for (const k of Object.keys(before)) { if (before[k] === undefined) delete appConfig[k]; else appConfig[k] = before[k]; }
       console.error('[backup] import failed:', err);

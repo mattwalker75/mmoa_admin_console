@@ -23,13 +23,14 @@ const rateLimit = require('express-rate-limit');
 
 const appConfigModule = require('./config/appConfig');
 const { appConfig } = appConfigModule;
-const { init: initDb } = require('./db/database');
+const { initSwappable } = require('./db/database');
 const { enforceInputLimits } = require('./middleware/inputLimits');
 const { csrfProtection } = require('./middleware/csrf');
 const localAdmins = require('./helpers/localAdmins');
 const { escapeHtml } = require('./views/escapeHtml');
 
-const db = initDb(appConfig);
+// Swappable: Settings → Web App can point it at another database live.
+const db = initSwappable(appConfig);
 
 const app = express();
 

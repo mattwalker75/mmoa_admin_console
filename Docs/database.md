@@ -24,8 +24,9 @@ Backends:
   `sqlite3` driver, `PRAGMA foreign_keys = ON`. The file is opened
   read-write **without create**: if it doesn't exist the console runs
   offline instead of making an empty file (which would stop the web app
-  from bootstrapping its schema onto a fresh file). Restart the console
-  once the web app has created it.
+  from bootstrapping its schema onto a fresh file). Once the web app has
+  created it, save Settings → Web App again (or restart the console) to
+  connect.
 - **Remote SQLite** (`engine: sqlite`, mode `ssh` / `ec2`) —
   [db/remoteSqlite.js](../db/remoteSqlite.js) runs every statement as
   `sqlite3 -batch -json -cmd ".timeout 5000" <file> '<sql>'` on the

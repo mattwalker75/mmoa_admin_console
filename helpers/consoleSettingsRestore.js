@@ -94,7 +94,10 @@ async function planRestore(parsed, live, opts = {}) {
     switch (k) {
       case 'port': {
         if (!intIn(v, 1, 65535)) { errors.push(`port: must be a whole number 1–65535 (got ${JSON.stringify(v)})`); break; }
-        if (v !== Number(live.port)) {
+        // The port this console is listening on right now is "in use" by
+        // the console itself — going back to it (say after restoring a file
+        // with a different port) is fine and needs no restart.
+        if (v !== Number(live.port) && v !== Number(opts.runningPort)) {
           if (!(await portFree(v))) { errors.push(`port: ${v} is already in use on this machine — the console could not start on it`); break; }
           restart.push('port');
         }

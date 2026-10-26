@@ -380,4 +380,37 @@ function init(appConfig) {
   return makeDeadDb('none', new Error(`Unknown engine "${engine}"`), `Unknown engine "${engine}"`);
 }
 
-module.exports = { init };
+// One stable handle for the whole app whose connection can be REPLACED at
+// run time: Settings → Web App calls db.reconnect(appConfig) after a save
+// that changes how the Web App's database is reached (local file ↔ SSH /
+// EC2, SQLite ↔ MySQL, another host / file), so the console switches to
+// the new database straight away instead of needing a restart. Every
+// property read goes to the CURRENT connection; a transaction already in
+// flight keeps the connection it started on, and the old connection is
+// closed a little later once in-flight work has finished.
+function initSwappable(appConfig) {
+  let current = init(appConfig);
+  const closeLater = (old) => setTimeout(() => {
+    try {
+      if (old && old.raw && typeof old.raw.close === 'function') old.raw.close(() => {});
+      else if (old && old.raw && typeof old.raw.end === 'function') old.raw.end(() => {}); // MySQL pool
+    } catch (e) { /* already closed */ }
+  }, 60000).unref();
+  function reconnect(cfg) {
+    const old = current;
+    current = init(cfg || appConfig);
+    closeLater(old);
+    return current;
+  }
+  return new Proxy({}, {
+    get(_, k) {
+      if (k === 'reconnect') return reconnect;
+      if (k === 'current') return current;
+      const v = current[k];
+      return typeof v === 'function' ? v.bind(current) : v;
+    },
+    has(_, k) { return k === 'reconnect' || k in current; }
+  });
+}
+
+module.exports = { init, initSwappable };

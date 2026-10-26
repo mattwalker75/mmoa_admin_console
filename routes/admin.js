@@ -39,13 +39,13 @@ function pageHeader(title, subtitle, actions) {
 
 // One dashboard tile. `href` (optional) makes the whole tile a link to the
 // page that explains the number.
-function statCard(label, value, accent, href) {
+function statCard(label, value, accent, href, key) {
   const dot = accent || 'bg-brand-500';
   const display = (value === null || value === undefined) ? '—' : String(value);
   const inner = `<span class="inline-block w-2 h-10 rounded-full ${dot}"></span>
     <div>
       <div class="text-xs uppercase tracking-wider text-slate-500 dark:text-slate-400">${escapeHtml(label)}</div>
-      <div class="mt-1 text-2xl font-semibold text-slate-900 dark:text-slate-100">${escapeHtml(display)}</div>
+      <div class="mt-1 text-2xl font-semibold text-slate-900 dark:text-slate-100"${key ? ` data-stat="${escapeHtml(key)}"` : ''}>${escapeHtml(display)}</div>
     </div>`;
   return href
     ? `<a href="${escapeHtml(href)}" class="stat-card card surface-target card-pad flex items-center gap-4 hover:ring-2 hover:ring-brand-500/30 transition">${inner}</a>`
@@ -67,42 +67,49 @@ module.exports = function (db, appConfig) {
   // binds JS's Date.now() against the epoch-ms column, so no engine-specific
   // time function is needed. The "Pending verification" list is the board's
   // to-do list: nonprofits waiting to be checked before they're listed.
-  router.get('/', requireAdmin, async (req, res) => {
-    const user = req.session.user;
-    const c = {};
-    let firstErr = null;
+  // The page itself renders straight away with placeholders, and
+  // public/js/dashboard.js then fetches /dashboard/data to fill them in. When
+  // the database is on the EC2 instance every query is an SSM round trip
+  // (about a second each), so waiting for them before sending the page made
+  // login look stuck. The counts are one statement and the two lists run
+  // alongside it, so the data arrives in roughly one round trip.
+  async function loadDashboard() {
     const now = Date.now();
     const upcomingCut = new Date(now - 12 * 3600 * 1000).toISOString().replace('T', ' ').replace(/\..+/, '');
-    for (const [key, sql, params] of [
-      ['verified',     "SELECT COUNT(*) AS c FROM organizations WHERE verification_status = 'verified'", []],
-      ['pending',      "SELECT COUNT(*) AS c FROM organizations WHERE verification_status = 'unverified'", []],
-      ['rejected',     "SELECT COUNT(*) AS c FROM organizations WHERE verification_status = 'rejected'", []],
-      ['upcoming',     "SELECT COUNT(*) AS c FROM events WHERE status = 'published' AND starts_at >= ?", [upcomingCut]],
-      ['drafts',       "SELECT COUNT(*) AS c FROM events WHERE status = 'draft'", []],
-      ['openRaffles',  "SELECT COUNT(*) AS c FROM raffles WHERE visibility = 'published' AND status = 'open'", []],
-      ['lockedIps',    "SELECT COUNT(*) AS c FROM login_lockouts WHERE scope = 'ip' AND locked_until_ms > ?", [now]],
-      ['lockedAccts',  "SELECT COUNT(*) AS c FROM login_lockouts WHERE scope <> 'ip' AND locked_until_ms > ?", [now]]
-    ]) {
-      const { value, err } = await safeGet(db, sql, params, { c: null });
-      c[key] = value && value.c != null ? Number(value.c) : null;
-      if (err && !firstErr) firstErr = err;
+    let firstErr = null;
+    const countsSql = `SELECT
+        (SELECT COUNT(*) FROM organizations WHERE verification_status = 'verified')   AS verified,
+        (SELECT COUNT(*) FROM organizations WHERE verification_status = 'unverified') AS pending,
+        (SELECT COUNT(*) FROM organizations WHERE verification_status = 'rejected')   AS rejected,
+        (SELECT COUNT(*) FROM events WHERE status = 'published' AND starts_at >= ?)   AS upcoming,
+        (SELECT COUNT(*) FROM events WHERE status = 'draft')                          AS drafts,
+        (SELECT COUNT(*) FROM raffles WHERE visibility = 'published' AND status = 'open') AS openRaffles,
+        (SELECT COUNT(*) FROM login_lockouts WHERE scope = 'ip' AND locked_until_ms > ?)  AS lockedIps,
+        (SELECT COUNT(*) FROM login_lockouts WHERE scope <> 'ip' AND locked_until_ms > ?) AS lockedAccts`;
+    const [countsR, pendingR, recentR] = await Promise.allSettled([
+      db.getAsync(countsSql, [upcomingCut, now, now]),
+      db.allAsync(`SELECT o.user_id, o.name, o.ein, o.city, o.created_at, u.email
+                     FROM organizations o JOIN users u ON u.user_id = o.user_id
+                    WHERE o.verification_status = 'unverified'
+                    ORDER BY o.created_at ASC, o.org_id ASC LIMIT 25`, []),
+      db.allAsync('SELECT at, admin, action, target_label, summary FROM admin_audit ORDER BY at DESC, audit_id DESC LIMIT 5', [])
+    ]);
+    const c = {};
+    const row = countsR.status === 'fulfilled' ? (countsR.value || {}) : {};
+    if (countsR.status === 'rejected') firstErr = countsR.reason;
+    for (const k of ['verified', 'pending', 'rejected', 'upcoming', 'drafts', 'openRaffles', 'lockedIps', 'lockedAccts']) {
+      c[k] = row[k] != null ? Number(row[k]) : null;
     }
-    const localCount = localAdmins.count();
     let pending = [];
-    try {
-      pending = await db.allAsync(`SELECT o.user_id, o.name, o.ein, o.city, o.created_at, u.email
-                                     FROM organizations o JOIN users u ON u.user_id = o.user_id
-                                    WHERE o.verification_status = 'unverified'
-                                    ORDER BY o.created_at ASC, o.org_id ASC LIMIT 25`, []);
-    } catch (err) { if (!firstErr) firstErr = err; }
+    if (pendingR.status === 'fulfilled') pending = pendingR.value || [];
+    else if (!firstErr) firstErr = pendingR.reason;
+    let recent = [], recentErr = null;
+    if (recentR.status === 'fulfilled') recent = recentR.value || [];
+    else recentErr = recentR.reason;
     const locked = (c.lockedIps == null && c.lockedAccts == null) ? null : (c.lockedIps || 0) + (c.lockedAccts || 0);
     // Recent activity (the audit trail — /audit). The table is the web app's;
     // until it has restarted after this update the table is missing, which
     // is NOT a dashboard error — the card just says so.
-    let recent = [], recentErr = null;
-    try {
-      recent = await db.allAsync('SELECT at, admin, action, target_label, summary FROM admin_audit ORDER BY at DESC, audit_id DESC LIMIT 5', []);
-    } catch (err) { recentErr = err; }
     const recentHtml = recent.length
       ? `<div class="table-wrap surface-target"><table class="table-base">
           <thead><tr><th>When</th><th>Admin</th><th>Action</th><th>Target</th><th>Summary</th></tr></thead>
@@ -131,45 +138,69 @@ module.exports = function (db, appConfig) {
           ${c.pending > pending.length ? `<p class="mt-2 text-xs text-slate-500"><a class="text-brand-600 hover:underline" href="/nonprofits?status=unverified">All ${c.pending} pending →</a></p>` : ''}`
       : `<p class="text-sm text-slate-500 dark:text-slate-400">${firstErr ? 'Unavailable.' : 'Nothing waiting — every nonprofit has been reviewed.'}</p>`;
 
+    return {
+      stats: { verified: c.verified, pending: c.pending, rejected: c.rejected, upcoming: c.upcoming,
+               drafts: c.drafts, openRaffles: c.openRaffles, locked },
+      pendingHtml, recentHtml, bannerHtml: dbBanner(firstErr)
+    };
+  }
+
+  router.get('/dashboard/data', requireAdmin, async (req, res) => {
+    try {
+      res.set('Cache-Control', 'no-store');
+      res.json(await loadDashboard());
+    } catch (err) {
+      res.status(500).json({ error: err.message || 'Could not load the dashboard data.' });
+    }
+  });
+
+  router.get('/', requireAdmin, (req, res) => {
+    const user = req.session.user;
+    const localCount = localAdmins.count();
+    const loading = `<p class="text-sm text-slate-500 dark:text-slate-400" data-dash-loading>Loading data from the Web App…</p>`;
     const body = `
       ${pageHeader('Dashboard', `Welcome back, ${user.name || user.username}.`)}
 
-      ${dbBanner(firstErr)}
+      <div id="dash-banner"></div>
+      <div id="dash-status" class="mb-6 flex items-center gap-2 text-sm text-slate-600 dark:text-slate-300" role="status" aria-live="polite">
+        <span class="inline-block w-4 h-4 rounded-full border-2 border-brand-500 border-t-transparent animate-spin"></span>
+        <span>Loading the latest numbers from the Web App's database${db.remote ? ' on the EC2 instance — this can take a few seconds' : ''}…</span>
+      </div>
 
       <section class="mb-10">
         <h2 class="text-sm font-semibold uppercase tracking-wider text-slate-500 dark:text-slate-400 mb-3">Nonprofits</h2>
         <div class="grid grid-cols-2 lg:grid-cols-4 gap-4">
-          ${statCard('Verified', c.verified, 'bg-emerald-500', '/nonprofits?status=verified')}
-          ${statCard('Pending verification', c.pending, 'bg-amber-500', '/nonprofits?status=unverified')}
-          ${statCard('Rejected', c.rejected, 'bg-red-500', '/nonprofits?status=rejected')}
+          ${statCard('Verified', '…', 'bg-emerald-500', '/nonprofits?status=verified', 'verified')}
+          ${statCard('Pending verification', '…', 'bg-amber-500', '/nonprofits?status=unverified', 'pending')}
+          ${statCard('Rejected', '…', 'bg-red-500', '/nonprofits?status=rejected', 'rejected')}
         </div>
       </section>
 
       <section class="mb-10">
         <h2 class="text-sm font-semibold uppercase tracking-wider text-slate-500 dark:text-slate-400 mb-3">Website</h2>
         <div class="grid grid-cols-2 lg:grid-cols-4 gap-4">
-          ${statCard('Upcoming events', c.upcoming, 'bg-sky-500', '/events')}
-          ${statCard('Event drafts', c.drafts, 'bg-slate-400', '/events?tab=drafts')}
-          ${statCard('Open raffles', c.openRaffles, 'bg-indigo-500', '/raffles?status=published')}
+          ${statCard('Upcoming events', '…', 'bg-sky-500', '/events', 'upcoming')}
+          ${statCard('Event drafts', '…', 'bg-slate-400', '/events?tab=drafts', 'drafts')}
+          ${statCard('Open raffles', '…', 'bg-indigo-500', '/raffles?status=published', 'openRaffles')}
         </div>
       </section>
 
       <section class="mb-10">
         <h2 class="text-sm font-semibold uppercase tracking-wider text-slate-500 dark:text-slate-400 mb-3">Security &amp; console</h2>
         <div class="grid grid-cols-2 lg:grid-cols-4 gap-4">
-          ${statCard('Locked logins', locked, 'bg-orange-500', '/locked-users')}
+          ${statCard('Locked logins', '…', 'bg-orange-500', '/locked-users', 'locked')}
           ${statCard('Console admins', localCount, 'bg-brand-500', '/admins')}
         </div>
       </section>
 
       <section class="mb-10">
         <h2 class="text-sm font-semibold uppercase tracking-wider text-slate-500 dark:text-slate-400 mb-3">Pending verification</h2>
-        ${pendingHtml}
+        <div id="dash-pending">${loading}</div>
       </section>
 
       <section>
         <h2 class="text-sm font-semibold uppercase tracking-wider text-slate-500 dark:text-slate-400 mb-3">Recent activity</h2>
-        ${recentHtml}
+        <div id="dash-recent">${loading}</div>
       </section>
     `;
     res.send(page({ title: 'Dashboard', body, appConfig, user, activeNav: 'home' }));

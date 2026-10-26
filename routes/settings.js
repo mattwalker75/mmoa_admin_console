@@ -25,7 +25,7 @@ const express = require('express');
 const fs = require('fs');
 const path = require('path');
 const multer = require('multer');
-const { page, flash } = require('../views/layout');
+const { page, flash, consoleRestartPopup } = require('../views/layout');
 const { escapeHtml, jsAttrStr } = require('../views/escapeHtml');
 const { requireAdmin } = require('../middleware/auth');
 const awsSsm = require('../helpers/awsSsm');
@@ -182,6 +182,7 @@ module.exports = function (db, appConfig, appConfigModule) {
       ${tabsNav('security')}
 
       ${flash('error', req.query.error)}
+      ${consoleRestartPopup(req.query.restartConsole ? String(req.query.restartConsole).slice(0, 200) : '')}
       ${flash('ok', req.query.saved && 'Settings saved.')}
 
       <form method="POST" action="/settings/security" class="space-y-6 max-w-3xl">
@@ -213,7 +214,7 @@ module.exports = function (db, appConfig, appConfigModule) {
         <section class="card surface-target card-pad space-y-4">
           <div>
             <h2 class="text-base font-semibold text-slate-900 dark:text-slate-100">Login throttling</h2>
-            <p class="mt-0.5 text-xs text-slate-500 dark:text-slate-400">After too many failed attempts from a single IP, further logins from that IP are rejected for the block duration. Helps prevent bot password-spray attacks. <strong>Takes effect on next restart.</strong></p>
+            <p class="mt-0.5 text-xs text-slate-500 dark:text-slate-400">After too many failed attempts from a single IP, further logins from that IP are rejected for the block duration. Helps prevent bot password-spray attacks. <strong>Takes effect when the MMoA Admin Console is restarted.</strong></p>
           </div>
 
           <div class="grid sm:grid-cols-2 gap-4">
@@ -273,7 +274,8 @@ module.exports = function (db, appConfig, appConfigModule) {
       const changed = changedPaths(before, appConfig.security, 'security');
       await audit(req, 'settings.save', { kind: 'settings', id: 'security', label: 'Settings → Security',
         summary: changed.length ? `Changed: ${changed.join(', ')}` : 'Saved, nothing changed' });
-      res.redirect('/settings/security?saved=1');
+      const throttleChanged = JSON.stringify(before.rateLimiting || {}) !== JSON.stringify(appConfig.security.rateLimiting || {});
+      res.redirect('/settings/security?saved=1' + (throttleChanged ? '&restartConsole=' + encodeURIComponent('the login throttling settings') : ''));
     } catch (err) {
       console.error('[settings] security save failed:', err);
       res.redirect('/settings/security?error=Save+failed');
@@ -449,7 +451,7 @@ module.exports = function (db, appConfig, appConfigModule) {
       ${tabsNav('web-app')}
 
       ${flash('error', req.query.error)}
-      ${flash('ok', req.query.saved && 'Settings saved.')}
+      ${flash('ok', req.query.saved && ('Settings saved.' + (req.query.switched ? ' ' + String(req.query.switched) : '')))}
       ${flash('warn', req.query.warn)}
 
       <!-- Restart-required popup — auto-opens when the saved database
@@ -665,7 +667,7 @@ module.exports = function (db, appConfig, appConfigModule) {
             <div class="flex items-start justify-between gap-3">
               <div>
                 <h2 class="text-base font-semibold text-slate-900 dark:text-slate-100">Database</h2>
-                <p class="mt-0.5 text-xs text-slate-500 dark:text-slate-400">The Web App's database — this console reads and writes the same data. Access follows the mode selected above. Changes take effect on the next restart.</p>
+                <p class="mt-0.5 text-xs text-slate-500 dark:text-slate-400">The Web App's database — this console reads and writes the same data. Access follows the mode selected above. Saving switches the console to it straight away (no restart).</p>
                 <p class="mt-1 text-xs text-slate-500 dark:text-slate-400">${escapeHtml(db.statusMessage || db.engine || 'not configured')}</p>
               </div>
               ${dbStatusPill}
@@ -913,8 +915,10 @@ module.exports = function (db, appConfig, appConfigModule) {
       // itself, plus the access mode (a mode change flips a SQLite database
       // between "open the file directly" and "query via the transport").
       const prevDb = (appConfig.database && typeof appConfig.database === 'object') ? appConfig.database : {};
-      const prevMode = (appConfig.webApp && appConfig.webApp.mode) || 'local';
       const dbBefore = JSON.stringify(prevDb);
+      // The connection part of the access settings (not the commands).
+      const conn = (w) => JSON.stringify({ mode: w && w.mode, local: w && w.local, ssh: w && w.ssh, ec2: w && w.ec2 });
+      const webAppBefore = conn(appConfig.webApp || {});
       const beforeWa = snapshot(appConfig.webApp || {});
       const beforeDbCfg = snapshot(prevDb);
 
@@ -943,12 +947,21 @@ module.exports = function (db, appConfig, appConfigModule) {
       try { awsSsm.resetClient(); } catch (e) { /* best effort */ }
 
       const engineIsSqlite = (appConfig.database.engine || '') === 'sqlite';
-      const localityFlipped = (prevMode === 'local') !== (appConfig.webApp.mode === 'local');
+      const webAppMoved = conn(appConfig.webApp) !== webAppBefore;
       const dbChanged = JSON.stringify(appConfig.database) !== dbBefore
-        || (engineIsSqlite && localityFlipped);
-      res.redirect('/settings/web-app?saved=1'
-        + (dbChanged ? '&reboot=1' : '')
-        );
+        || (engineIsSqlite && webAppMoved); // remote SQLite rides on the access settings
+      // Switch the console's database connection now — no restart needed.
+      let switched = '';
+      if (dbChanged && typeof db.reconnect === 'function') {
+        db.reconnect(appConfig);
+        await new Promise(r => setTimeout(r, 300)); // let a local open / pool settle
+        let ok = !!db.available;
+        if (ok) { try { await db.getAsync('SELECT 1 AS ok', []); } catch (e) { ok = false; } }
+        switched = ok
+          ? `&switched=${encodeURIComponent(`Now using the Web App's database ${db.remote ? `on the ${appConfig.webApp.mode === 'ec2' ? 'EC2 instance (over SSM)' : 'SSH host'}` : `(${db.engine})`} — no restart needed.`)}`
+          : `&error=${encodeURIComponent(`Saved, but the console could not reach the database with these settings: ${db.statusMessage || 'connection failed'}. Check them and save again.`)}`;
+      }
+      res.redirect('/settings/web-app?saved=1' + switched);
     } catch (err) {
       console.error('[settings] web-app save failed:', err);
       res.redirect('/settings/web-app?error=Save+failed');

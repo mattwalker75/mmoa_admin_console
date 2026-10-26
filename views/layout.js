@@ -220,6 +220,8 @@ ${body}
   <script defer src="/js/flyer-maker.js?v=${assetVer('js/flyer-maker.js')}"></script>
   <script defer src="/js/input-masks.js?v=${assetVer('js/input-masks.js')}"></script>
   <script defer src="/js/validate-restore.js?v=${assetVer('js/validate-restore.js')}"></script>
+  <script defer src="/js/dashboard.js?v=${assetVer('js/dashboard.js')}"></script>
+  <script defer src="/js/nav-progress.js?v=${assetVer('js/nav-progress.js')}"></script>
   <script defer src="/js/alpine.min.js?v=${assetVer('js/alpine.min.js')}"></script>
 </head>
 <body>
@@ -311,4 +313,25 @@ function confirmDialog() {
   <script src="/js/ui-confirm.js?v=${assetVer('js/ui-confirm.js')}"></script>`;
 }
 
-module.exports = { page, flash, waRestartPrompt };
+// "Restart the MMoA Admin Console" — a popup for the few console settings
+// that only take effect when the console process starts (its port, TLS,
+// session cookie, login throttling). `what` names them. Opens on load.
+function consoleRestartPopup(what) {
+  if (!what) return '';
+  return `<div x-data="{ open: true }" x-show="open" x-on:keydown.escape.window="open = false"
+       class="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60" role="dialog" aria-modal="true" aria-labelledby="crp-title">
+    <div class="card surface-target card-pad w-full max-w-md">
+      <div class="flex items-start gap-3">
+        <div class="text-2xl text-amber-500 leading-none" aria-hidden="true">⟳</div>
+        <div class="flex-1 min-w-0">
+          <h3 id="crp-title" class="text-base font-semibold text-slate-900 dark:text-slate-100">Restart the MMoA Admin Console</h3>
+          <p class="mt-2 text-sm text-slate-700 dark:text-slate-200">Your changes are saved, but <strong>${escapeHtml(what)}</strong> only take${/,| and /.test(what) ? '' : 's'} effect when the <strong>MMoA Admin Console</strong> starts.</p>
+          <p class="mt-2 text-sm text-slate-700 dark:text-slate-200">Stop the MMoA Admin Console and start it again (on this computer: Ctrl-C in its terminal, then <code class="font-mono">npm start</code>). The Web App does <strong>not</strong> need restarting for this.</p>
+        </div>
+      </div>
+      <div class="mt-5 flex justify-end"><button type="button" class="btn-primary" x-on:click="open = false">OK</button></div>
+    </div>
+  </div>`;
+}
+
+module.exports = { page, flash, waRestartPrompt, consoleRestartPopup };

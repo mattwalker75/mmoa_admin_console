@@ -65,7 +65,7 @@ module.exports = function (db, appConfig) {
       if (!local || !ok) {
         // No session yet, so the row's admin is "system"; the attempted
         // username goes in the summary (never the password).
-        await audit(req, 'login.failure', { kind: 'login', summary: `Failed sign-in for "${username}"` });
+        audit(req, 'login.failure', { kind: 'login', summary: `Failed sign-in for "${username}"` }).catch(() => {});
         return fail(generic);
       }
 
@@ -80,7 +80,9 @@ module.exports = function (db, appConfig) {
       // middleware/auth.js sessionProblem.
       req.session.iat = Date.now();
       req.session.fp = sessionFingerprint(local.password_hash);
-      await audit(req, 'login.success', { kind: 'login', id: local.username, label: local.username, summary: 'Signed in' });
+      // Not awaited: over EC2 the audit insert is an SSM round trip, and
+      // signing in must not wait for the Web App's database.
+      audit(req, 'login.success', { kind: 'login', id: local.username, label: local.username, summary: 'Signed in' }).catch(() => {});
       res.redirect('/');
     } catch (err) {
       console.error('[login] error:', err);
@@ -91,7 +93,9 @@ module.exports = function (db, appConfig) {
   router.post('/logout', async (req, res) => {
     // Record while the session (and so the admin's name) is still there.
     if (req.session && req.session.user) {
-      await audit(req, 'logout', { kind: 'login', id: req.session.user.username, label: req.session.user.username, summary: 'Signed out' });
+      // Not awaited (an SSM round trip over EC2). audit() reads the admin's
+      // name synchronously, so clearing the session below is safe.
+      audit(req, 'logout', { kind: 'login', id: req.session.user.username, label: req.session.user.username, summary: 'Signed out' }).catch(() => {});
     }
     req.session = null;
     res.redirect('/login');
