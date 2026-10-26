@@ -31,16 +31,19 @@ function siteTokens(cfg, { eventCount = 0 } = {}) {
     phone,
     phoneTel: digits.length === 10 ? '+1' + digits : digits,
     email: str(site.email),
-    ein: str(site.ein),
+    // The Web App's defaults apply only when the key is absent (its
+    // config merge fills missing keys, never blank ones) — same here.
+    ein: str(site.ein === undefined ? '33-4035685' : site.ein),
     addressLine1: line1, addressLine2: line2, city, state, zip,
     address: [line1, line2, cityLine].filter(Boolean).join(', '),
     meetingInfo: str(site.meetingInfo),
-    facebookUrl: safeHttpUrl(site.facebookUrl),
+    facebookUrl: safeHttpUrl(site.facebookUrl === undefined ? 'https://www.facebook.com/missionmenofanna' : site.facebookUrl),
     instagramUrl: safeHttpUrl(site.instagramUrl),
     youtubeUrl: safeHttpUrl(site.youtubeUrl),
     xUrl: safeHttpUrl(site.xUrl),
     nextdoorUrl: safeHttpUrl(site.nextdoorUrl),
     donationUrl: (site.donationEnabled === true && safeHttpUrl(site.donationUrl)) || '',
+    needHelpEnabled: String(site.needHelpEnabled !== false),
     year: String(new Date().getFullYear()),
     eventCount: String(eventCount || 0)
   };
